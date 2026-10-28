@@ -164,6 +164,10 @@ class Store:
         self.conn = sqlite3.connect(self.path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
+        self.conn.execute("PRAGMA busy_timeout = 5000")
+        if self.path != ":memory:":
+            # Lets the web UI read while a background ingest is writing.
+            self.conn.execute("PRAGMA journal_mode = WAL")
         self.conn.executescript(SCHEMA)
 
     def close(self) -> None:
@@ -231,6 +235,13 @@ class Store:
             (campaign.id,),
         )
         return [dict(r) for r in rows]
+
+    def delete_source(self, campaign: Campaign, source_id: int) -> bool:
+        with self.conn:
+            cur = self.conn.execute(
+                "DELETE FROM sources WHERE id = ? AND campaign_id = ?", (source_id, campaign.id)
+            )
+        return cur.rowcount > 0
 
     def _visible_sources_clause(self, campaign: Campaign) -> str:
         return "s.campaign_id = ?" + (" AND s.dm_only = 0" if campaign.spoiler_safe else "")
@@ -581,6 +592,17 @@ class Store:
                 "SELECT name FROM characters WHERE campaign_id = ? ORDER BY name", (campaign.id,)
             )
         return [r["name"] for r in rows]
+
+    def rename_character(self, old: str, new: str) -> None:
+        with self.conn:
+            self.conn.execute(
+                "UPDATE characters SET name = ? WHERE name = ? COLLATE NOCASE", (new, old)
+            )
+
+    def delete_character(self, name: str) -> bool:
+        with self.conn:
+            cur = self.conn.execute("DELETE FROM characters WHERE name = ? COLLATE NOCASE", (name,))
+        return cur.rowcount > 0
 
     def character_log(self, name: str, limit: int = 20) -> list[dict[str, Any]]:
         rows = self.conn.execute(

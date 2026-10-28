@@ -25,7 +25,34 @@ export ANTHROPIC_API_KEY=... # or `ant auth login`
 Data lives in `~/.local/share/campaign/campaign.db`. Set `CAMPAIGN_DB` to put
 it somewhere else.
 
-## Usage
+## Web UI
+
+```bash
+uv run campaign web            # http://127.0.0.1:8765
+```
+
+- **Characters**: the full sheet, editable in place and saved automatically.
+  It has ability scores with live modifiers, save and skill proficiency
+  checkboxes, and HP with damage and heal buttons (damage comes off temp HP
+  first). Resources like spell slots and hit dice are clickable pips. It
+  also covers attacks, spells by level, inventory and coin, conditions,
+  death saves, short and long rests, export to JSON, and a change history.
+  It works at phone width for use at the table.
+- **Campaigns**: create DM or player campaigns, then use the tabs:
+  - **Sessions**: paste a transcript, or upload a text file or a recording,
+    to run an ingest. A live log shows what Claude is reading and
+    recording. Each past session has its recap and a **Revert** button.
+  - **Reference**: upload module PDFs and notes, mark them DM-only, and
+    search the text directly.
+  - **World state**: tracked NPCs, quests, locations and items, filterable
+    by kind and status.
+  - **Journal**: events grouped by session.
+
+There's no login. By default it listens only on this machine. Pass
+`--host 0.0.0.0` to reach it from a phone on your network, and put it
+behind something that authenticates before exposing it any further.
+
+## Command line
 
 ```bash
 # create a campaign: --role dm or --role player
@@ -101,15 +128,19 @@ Add `--read-only` to expose only the lookup tools.
 
 Working and tested (`uv run pytest`): storage, PDF/Markdown chunking,
 search, spoiler filtering, revisions and revert, character sheets, CLI, MCP
-tool registration, and the agent loop against a scripted fake API.
+tool registration, the web API including background ingest jobs, and the
+agent loop against a scripted fake API. The web UI was also exercised in
+headless Chromium at desktop and phone widths.
 
 Not yet exercised: live API calls end to end against a real module, and
 audio transcription (`transcribe.py` uses faster-whisper but hasn't been run
 here). Likely next steps:
 
 - **Speaker diarization** for recordings, so the transcript says who spoke.
-- **A web UI** for the character sheet and the campaign state, to use at
-  the table on a phone or tablet.
+- **Ask from the web UI**: a chat box on the campaign page, using the same
+  agent as `campaign chat`.
+- **Editing world state by hand** in the web UI. Today it's read-only there;
+  corrections go through chat or a revert.
 - **Review before commit** for ingest: show proposed changes and approve
   them, as an alternative to ingest-then-revert.
 - **Scanned PDFs** need OCR. Text-layer PDFs work as they are.

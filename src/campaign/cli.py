@@ -10,7 +10,7 @@ from typing import Annotated, Optional
 
 import typer
 
-from .charsheet import CharacterSheet, merge_patch, render
+from .charsheet import CharacterSheet, apply_hp, merge_patch, render, rest
 from .config import db_path
 from .db import Campaign, Store
 from .ingest import chunk_file
@@ -225,6 +225,18 @@ def mcp(
     serve(s, pick(s, campaign).slug, read_only=read_only)
 
 
+@app.command()
+def web(
+    host: Annotated[str, typer.Option(help="Use 0.0.0.0 to reach it from other devices; there is no login.")] = "127.0.0.1",
+    port: int = 8765,
+) -> None:
+    """Run the web UI for character sheets and campaign ingest."""
+    from .web import serve
+
+    typer.echo(f"Serving on http://{host}:{port}")
+    serve(db_path(), host=host, port=port)
+
+
 # -- characters --------------------------------------------------------------
 
 
@@ -284,14 +296,8 @@ def char_hp(
     """Apply damage or healing. Damage comes off temp HP first."""
     s = store()
     sheet = _load(s, name)
-    hp = sheet.hp.model_copy()
-    if delta < 0:
-        absorbed = min(hp.temp, -delta)
-        hp.temp -= absorbed
-        hp.current = max(0, hp.current + delta + absorbed)
-    else:
-        hp.current = min(hp.max, hp.current + delta)
-    sheet.hp = hp
+    apply_hp(sheet, delta)
+    hp = sheet.hp
     s.save_character(sheet.name, sheet.model_dump(), reason=f"hp {delta:+d}")
     typer.echo(f"{sheet.name}: {hp.current}/{hp.max}" + (f" (+{hp.temp} temp)" if hp.temp else ""))
 
@@ -301,13 +307,7 @@ def char_rest(name: str, long: Annotated[bool, typer.Option("--long/--short")] =
     """Reset resources that recharge on a short or long rest (long also restores HP)."""
     s = store()
     sheet = _load(s, name)
-    kinds = {"short rest"} | ({"long rest", "dawn"} if long else set())
-    for r in sheet.resources:
-        if r.recharge in kinds:
-            r.used = 0
-    if long:
-        sheet.hp = sheet.hp.model_copy(update={"current": sheet.hp.max, "temp": 0})
-        sheet.death_saves = {"successes": 0, "failures": 0}
+    rest(sheet, long)
     s.save_character(sheet.name, sheet.model_dump(), reason="long rest" if long else "short rest")
     typer.echo(render(sheet))
 

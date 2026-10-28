@@ -153,6 +153,29 @@ class CharacterSheet(Model):
         return out
 
 
+def apply_hp(sheet: CharacterSheet, delta: int) -> None:
+    """Damage (negative) comes off temp HP first; healing (positive) caps at max."""
+    hp = sheet.hp.model_copy()
+    if delta < 0:
+        absorbed = min(hp.temp, -delta)
+        hp.temp -= absorbed
+        hp.current = max(0, hp.current + delta + absorbed)
+    else:
+        hp.current = min(hp.max, hp.current + delta)
+    sheet.hp = hp
+
+
+def rest(sheet: CharacterSheet, long: bool) -> None:
+    """Reset resources that recharge on this rest; a long rest also restores HP."""
+    kinds = {"short rest"} | ({"long rest", "dawn"} if long else set())
+    sheet.resources = [
+        r.model_copy(update={"used": 0}) if r.recharge in kinds else r for r in sheet.resources
+    ]
+    if long:
+        sheet.hp = sheet.hp.model_copy(update={"current": sheet.hp.max, "temp": 0})
+        sheet.death_saves = {"successes": 0, "failures": 0}
+
+
 def merge_patch(target: Any, patch: Any) -> Any:
     """RFC 7396 JSON merge patch: objects merge recursively, null deletes, anything else replaces."""
     if not isinstance(patch, dict):
