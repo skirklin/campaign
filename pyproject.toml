@@ -1,0 +1,28 @@
+[project]
+name = "campaign"
+version = "0.1.0"
+description = "D&D campaign assistant: reference Q&A, campaign memory from session transcripts, and character sheets"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic>=2.3",
+    "mcp>=2.3.0",
+    "pydantic>=2",
+    "pymupdf>=2.0",
+    "typer>=0.27.3",
+]
+
+[project.optional-dependencies]
+audio = ["faster-whisper>=1.1"]
+
+[project.scripts]
+campaign = "campaign.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.11.32,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]
