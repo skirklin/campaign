@@ -1,0 +1,96 @@
+# Every push to main publishes an image. A version tag (v1.2.3), or running
+# this workflow by hand, also deploys it, once deployment is configured
+# (docs/deploy.md): set the repository variable DEPLOY_ENABLED=true.
+name: Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  image:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=sha,format=long
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable={{is_default_branch}}
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: image
+    if: >-
+      vars.DEPLOY_ENABLED == 'true' &&
+      (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: ${{ vars.PUBLIC_URL }}
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    steps:
+      - uses: azure/setup-kubectl@v4
+      - name: Connect to the cluster as the campaign deployer
+        env:
+          KUBE_SERVER: ${{ secrets.KUBE_SERVER }}
+          KUBE_TOKEN: ${{ secrets.KUBE_TOKEN }}
+        run: |
+          kubectl config set-cluster homelab --server="$KUBE_SERVER"
+          kubectl config set-credentials deployer --token="$KUBE_TOKEN"
+          kubectl config set-context deploy --cluster=homelab --user=deployer --namespace=campaign
+          kubectl config use-context deploy
+      - name: Roll out the new image
+        env:
+          # By digest, so the cluster runs exactly the image this run built.
+          IMAGE: ghcr.io/${{ github.repository }}@${{ needs.image.outputs.digest }}
+        run: |
+          kubectl set image deployment/campaign campaign="$IMAGE"
+          kubectl rollout status deployment/campaign --timeout=5m
+      - name: Check it's serving
+        env:
+          PUBLIC_URL: ${{ vars.PUBLIC_URL }}
+        run: |
+          for i in $(seq 1 12); do
+            curl -fsS "$PUBLIC_URL/healthz" && exit 0
+            sleep 5
+          done
+          echo "::error::$PUBLIC_URL/healthz didn't respond after the rollout"
+          exit 1

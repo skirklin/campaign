@@ -23,6 +23,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
 from . import digest
+from .auth import AuthConfig
+from .auth import install as install_auth
 from .charsheet import CharacterSheet, apply_hp, rest
 from .db import Campaign, Store, slugify
 from .library import add_reference, reindex
@@ -85,8 +87,11 @@ class MergeRequest(BaseModel):
     other_id: int
 
 
-def create_app(db: Path | str) -> FastAPI:
-    app = FastAPI(title="campaign")
+def create_app(db: Path | str, auth: AuthConfig | None = None) -> FastAPI:
+    # No interactive API docs: they'd be one more surface to protect.
+    app = FastAPI(title="campaign", docs_url=None, redoc_url=None, openapi_url=None)
+    if auth is not None:
+        install_auth(app, auth)
     jobs: dict[str, Job] = {}
     digesting: dict[int, threading.Thread] = {}
 
@@ -469,6 +474,10 @@ def create_app(db: Path | str) -> FastAPI:
 
     # -- static app ----------------------------------------------------------
 
+    @app.get("/healthz", include_in_schema=False)
+    def healthz(s: Store = Depends(store)) -> dict[str, Any]:
+        return {"ok": True, "schema_version": s.schema_version}
+
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
     @app.get("/", include_in_schema=False)
@@ -478,13 +487,28 @@ def create_app(db: Path | str) -> FastAPI:
     return app
 
 
-def serve(db: Path | str, host: str = "127.0.0.1", port: int = 8765) -> None:
+def serve(db: Path | str, host: str = "127.0.0.1", port: int = 8765, allow_no_auth: bool = False) -> None:
+    import ipaddress
+
     import uvicorn
 
+    auth = AuthConfig.from_env()
+    try:
+        loopback = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        loopback = host == "localhost"
+    if auth is None and not loopback and not allow_no_auth:
+        raise SystemExit(
+            f"Refusing to listen on {host} without sign-in: anyone who can reach it could read your\n"
+            "campaigns and spend your API credits. Set CAMPAIGN_AUTH=google (see docs/deploy.md),\n"
+            "or pass --no-auth if this network is trusted."
+        )
     # Opening the store migrates the schema; then bring chunking up to date.
     s = Store(db)
     for r in reindex(s):
         print(f"Re-chunked {r['title']}: {r['chunks']} chunks, {r['pending']} digest calls pending")
     print(f"Data: {Path(s.path).parent} (schema v{s.schema_version})")
+    print(f"Sign-in: Google, {len(auth.allowed_emails)} allowed address(es)" if auth else "Sign-in: off")
     s.close()
-    uvicorn.run(create_app(db), host=host, port=port)
+    # Behind a reverse proxy (Caddy) only the proxy's X-Forwarded-* headers are trusted.
+    uvicorn.run(create_app(db, auth), host=host, port=port, proxy_headers=True)

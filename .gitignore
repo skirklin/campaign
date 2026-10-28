@@ -3,3 +3,4 @@ __pycache__/
 *.db
 *.transcript.txt
 .pytest_cache/
+deploy/k8s/env

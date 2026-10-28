@@ -9,6 +9,10 @@ export async function api(method, url, body) {
     opts.body = JSON.stringify(body);
   }
   const res = await fetch(url, opts);
+  if (res.status === 401 && url.startsWith("/api/")) {
+    location.href = `/auth/login?next=${encodeURIComponent(location.pathname)}`;
+    throw new Error("Signing in…");
+  }
   if (res.status === 204) return null;
   const data = await res.json().catch(() => null);
   if (!res.ok) {

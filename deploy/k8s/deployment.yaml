@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: campaign
+  namespace: campaign
+  labels: {app: campaign}
+spec:
+  replicas: 1  # SQLite on a ReadWriteOnce volume: exactly one writer
+  strategy:
+    type: Recreate  # never two pods on the volume at once
+  selector:
+    matchLabels: {app: campaign}
+  template:
+    metadata:
+      labels: {app: campaign}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: campaign
+          # The release workflow pins this to ghcr.io/skirklin/campaign:sha-<commit>.
+          image: ghcr.io/skirklin/campaign:latest
+          ports:
+            - {name: http, containerPort: 8000}
+          envFrom:
+            - secretRef: {name: campaign-env}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: tmp, mountPath: /tmp}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 20
+            periodSeconds: 30
+          resources:
+            requests: {cpu: 50m, memory: 256Mi}
+            limits: {memory: 1Gi}
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: campaign-data}
+        - name: tmp
+          emptyDir: {}

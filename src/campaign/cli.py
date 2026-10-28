@@ -316,14 +316,14 @@ def mcp(
 
 @app.command()
 def web(
-    host: Annotated[str, typer.Option(help="Use 0.0.0.0 to reach it from other devices; there is no login.")] = "127.0.0.1",
+    host: Annotated[str, typer.Option(help="Interface to listen on. Anything but localhost requires sign-in (CAMPAIGN_AUTH=google) or --no-auth.")] = "127.0.0.1",
     port: int = 8765,
+    no_auth: Annotated[bool, typer.Option("--no-auth", help="Allow listening on a network interface without sign-in.")] = False,
 ) -> None:
     """Run the web UI for character sheets and campaign ingest."""
     from .web import serve
 
-    typer.echo(f"Serving on http://{host}:{port}")
-    serve(db_path(), host=host, port=port)
+    serve(db_path(), host=host, port=port, allow_no_auth=no_auth)
 
 
 # -- characters --------------------------------------------------------------

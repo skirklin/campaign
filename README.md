@@ -77,9 +77,13 @@ uv run campaign web            # http://127.0.0.1:8765
     - forms to add or end facts by hand, and to merge duplicates.
   - **Journal**: events by session, linked to the entities involved.
 
-There's no login. By default it listens only on this machine. Pass
-`--host 0.0.0.0` to reach it from a phone on your network, and put it
-behind something that authenticates before exposing it any further.
+Locally there's no sign-in, and the server listens only on this machine.
+To put it on the internet, turn on Google sign-in with an email allowlist
+(`CAMPAIGN_AUTH=google`). The server refuses to listen anywhere but
+localhost without it, unless you pass `--no-auth`.
+[docs/deploy.md](docs/deploy.md) covers running it on the homelab cluster:
+the container image, Kubernetes manifests, the Caddy route, and the
+CI/release workflows.
 
 ## Command line
 

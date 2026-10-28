@@ -379,3 +379,7 @@ ol.events { margin: .2rem 0; padding-left: 0; list-style: none; }
 ol.events li { padding: .2rem 0; }
 .add-fact input { margin-top: .4rem; }
 .event-entities { color: var(--muted); font-size: .88rem; }
+
+#account { margin-left: auto; display: flex; align-items: center; gap: .5rem; font-size: .85rem; color: var(--muted); }
+#account[hidden] { display: none; }
+@media (max-width: 640px) { #account-email { display: none; } }

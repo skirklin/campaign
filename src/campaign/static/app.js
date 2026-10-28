@@ -32,3 +32,10 @@ async function route() {
 
 window.addEventListener("hashchange", route);
 route();
+
+// Show who's signed in when sign-in is on (/auth/me is a 404 when it's off).
+fetch("/auth/me").then((r) => (r.ok ? r.json() : null)).then((me) => {
+  if (!me?.email) return;
+  document.getElementById("account-email").textContent = me.email;
+  document.getElementById("account").hidden = false;
+}).catch(() => {});

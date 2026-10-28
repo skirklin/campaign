@@ -1,0 +1,11 @@
+# One-time setup, with admin credentials:  kubectl apply -k deploy/k8s
+# The campaign-env Secret is created separately (see docs/deploy.md) so no
+# credentials live in the repo.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - pvc.yaml
+  - deployment.yaml
+  - service.yaml
+  - deployer.yaml

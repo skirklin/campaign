@@ -14,6 +14,10 @@
       <a href="#/characters" data-nav="characters">Characters</a>
       <a href="#/campaigns" data-nav="campaigns">Campaigns</a>
     </nav>
+    <form id="account" method="post" action="/auth/logout" hidden>
+      <span id="account-email"></span>
+      <button type="submit">Sign out</button>
+    </form>
   </header>
   <main id="view"></main>
   <div id="toast" role="status" aria-live="polite"></div>
