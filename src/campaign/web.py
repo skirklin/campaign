@@ -22,13 +22,13 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
+from . import digest
 from .charsheet import CharacterSheet, apply_hp, rest
 from .db import Campaign, Store, slugify
-from .ingest import chunk_file
+from .library import add_reference, reindex
 
 STATIC = Path(__file__).parent / "static"
 AUDIO = {".mp3", ".m4a", ".wav", ".ogg", ".flac", ".opus", ".webm"}
-REFERENCE = {".pdf", ".md", ".markdown", ".txt"}
 
 
 @dataclass
@@ -75,6 +75,7 @@ class RestRequest(BaseModel):
 def create_app(db: Path | str) -> FastAPI:
     app = FastAPI(title="campaign")
     jobs: dict[str, Job] = {}
+    digesting: dict[int, threading.Thread] = {}
 
     def store() -> Iterator[Store]:
         # One connection per request: sqlite connections shouldn't be shared
@@ -125,7 +126,41 @@ def create_app(db: Path | str) -> FastAPI:
 
     @app.get("/api/campaigns/{slug}/sources")
     def sources(slug: str, s: Store = Depends(store)) -> list[dict[str, Any]]:
-        return s.sources(campaign_or_404(s, slug))
+        out = []
+        for src in s.sources(campaign_or_404(s, slug)):
+            thread = digesting.get(src["id"])
+            status = s.digest_status(src["id"]) | {"running": bool(thread and thread.is_alive())}
+            out.append(src | {"digest": status})
+        return out
+
+    @app.get("/api/info")
+    def info(s: Store = Depends(store)) -> dict[str, Any]:
+        return {
+            "data_dir": str(Path(s.path).parent),
+            "database": s.path,
+            "schema_version": s.schema_version,
+            "originals": s.blobs.stats(),
+            "digest_model": digest.MODEL,
+        }
+
+    def start_digest(source_id: int) -> bool:
+        """Digest a source in the background, unless it already is."""
+        thread = digesting.get(source_id)
+        if thread and thread.is_alive():
+            return False
+        thread = threading.Thread(
+            target=lambda: digest.run(db, source_id), name=f"digest-{source_id}", daemon=True
+        )
+        digesting[source_id] = thread
+        thread.start()
+        return True
+
+    def source_or_404(s: Store, slug: str, source_id: int) -> dict[str, Any]:
+        c = campaign_or_404(s, slug)
+        src = s.source(source_id)
+        if src is None or src["campaign_id"] != c.id:
+            raise HTTPException(404, "no such source")
+        return src
 
     @app.post("/api/campaigns/{slug}/sources", status_code=201)
     def add_source(
@@ -134,27 +169,48 @@ def create_app(db: Path | str) -> FastAPI:
         title: str = Form(""),
         kind: str = Form("module"),
         dm_only: bool | None = Form(None),
+        digest_now: bool = Form(False),
         s: Store = Depends(store),
     ) -> dict[str, Any]:
         c = campaign_or_404(s, slug)
-        suffix = Path(file.filename or "").suffix.lower()
-        if suffix not in REFERENCE:
-            raise HTTPException(422, "upload a .pdf, .md or .txt file")
         if kind not in ("module", "notes"):
             raise HTTPException(422, "kind must be module or notes")
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / f"upload{suffix}"
-            path.write_bytes(file.file.read())
-            try:
-                chunks = chunk_file(path)
-            except Exception as err:
-                raise HTTPException(422, f"couldn't read {file.filename}: {err}")
-        if not chunks:
-            raise HTTPException(422, "no text found (a scanned PDF needs OCR first)")
-        hidden = (kind == "module") if dm_only is None else dm_only
-        name = title.strip() or Path(file.filename or "upload").stem
-        source_id = s.add_source(c, name, kind, chunks, path=file.filename, dm_only=hidden)
-        return {"id": source_id, "title": name, "chunks": len(chunks)}
+        try:
+            result = add_reference(
+                s, c, file.file.read(), file.filename or "upload", title.strip() or None, kind, dm_only
+            )
+        except ValueError as err:
+            raise HTTPException(422, str(err))
+        except Exception as err:
+            raise HTTPException(422, f"couldn't read {file.filename}: {err}")
+        result["digesting"] = bool(digest_now and result["pending"]) and start_digest(result["id"])
+        return result
+
+    @app.post("/api/campaigns/{slug}/sources/{source_id}/digest", status_code=202)
+    def run_digest(slug: str, source_id: int, s: Store = Depends(store)) -> dict[str, Any]:
+        source_or_404(s, slug, source_id)
+        if not start_digest(source_id):
+            raise HTTPException(409, "already digesting")
+        return {"digesting": True}
+
+    @app.get("/api/campaigns/{slug}/sources/{source_id}/outline")
+    def source_outline(slug: str, source_id: int, s: Store = Depends(store)) -> list[dict[str, Any]]:
+        source_or_404(s, slug, source_id)
+        return s.digest_outline(source_id)
+
+    @app.get("/api/campaigns/{slug}/sources/{source_id}/entities")
+    def source_entities(
+        slug: str, source_id: int, q: str | None = None, kind: str | None = None, s: Store = Depends(store),
+    ) -> list[dict[str, Any]]:
+        source_or_404(s, slug, source_id)
+        return s.ref_entities(s.campaign(slug), source_id=source_id, kind=kind or None, q=q or None)
+
+    @app.get("/api/campaigns/{slug}/sources/{source_id}/original")
+    def source_original(slug: str, source_id: int, s: Store = Depends(store)) -> FileResponse:
+        src = source_or_404(s, slug, source_id)
+        if not src["blob"] or not s.blobs.exists(src["blob"]):
+            raise HTTPException(404, "the original file wasn't kept for this source; upload it again")
+        return FileResponse(s.blobs.path(src["blob"]), filename=src["filename"] or f"{src['title']}")
 
     @app.delete("/api/campaigns/{slug}/sources/{source_id}", status_code=204)
     def delete_source(slug: str, source_id: int, s: Store = Depends(store)) -> None:
@@ -353,4 +409,10 @@ def create_app(db: Path | str) -> FastAPI:
 def serve(db: Path | str, host: str = "127.0.0.1", port: int = 8765) -> None:
     import uvicorn
 
+    # Opening the store migrates the schema; then bring chunking up to date.
+    s = Store(db)
+    for r in reindex(s):
+        print(f"Re-chunked {r['title']}: {r['chunks']} chunks, {r['pending']} digest calls pending")
+    print(f"Data: {Path(s.path).parent} (schema v{s.schema_version})")
+    s.close()
     uvicorn.run(create_app(db), host=host, port=port)

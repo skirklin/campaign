@@ -22,7 +22,12 @@ You are the campaign assistant for the D&D campaign "{name}". {role_line}
 
 You have tools over two kinds of knowledge:
 - Reference material (published modules, homebrew notes, past session
-  transcripts): search_reference, read_reference, read_pages.
+  transcripts). It has been digested into an outline of section summaries
+  and a catalog of NPCs, monsters, places, items and quests with their
+  aliases, pages and stat blocks. Use lookup for anything named or
+  described ("the hag", "the vampire's castle"), outline to find your way
+  into a part of the book, and search_reference, read_reference and
+  read_pages for the exact text.
 - Campaign state (who is alive, which quests are open, what happened when):
   find_entities, get_entity, recent_journal, list_sessions.
 Plus player character sheets: get_character, update_character.
@@ -39,7 +44,7 @@ hag", "I picked up a +1 shield", "Ireena now trusts us"), record it with the
 write tools so the campaign state stays current, and say what you recorded.
 {spoiler_rules}
 Keep answers tight and table-ready: the user is often mid-session.
-"""
+{overview}"""
 
 DM_ROLE = "The user is the Dungeon Master and may see everything, including module secrets."
 PLAYER_ROLE = "The user is a player in this campaign, not the DM."
@@ -63,8 +68,8 @@ Work in this order:
 1. Get your bearings: list_sessions, find_entities (no arguments) and
    recent_journal, so you know the existing names and open threads.
 2. Read the whole transcript.
-3. Resolve names against what's tracked and the reference material
-   (search_reference) so "Strad", "Straud" and "the count" all become the
+3. Resolve names against what's tracked and the reference material (the
+   catalog below, and lookup) so "Strad", "Straud" and "the count" all become the
    canonical "Strahd von Zarovich". Reuse existing entity names exactly.
 4. Record what changed: new or updated NPCs, locations, quests (with giver,
    objectives and reward when stated or found in the reference), items and
@@ -79,7 +84,7 @@ Work in this order:
 
 Prefer fewer, accurate writes over guesses. If something is ambiguous, leave
 it out and mention it in your final message.
-{spoiler_rules}"""
+{spoiler_rules}{catalog}"""
 
 
 @dataclass
@@ -177,9 +182,41 @@ def _role_parts(campaign) -> dict[str, str]:
     }
 
 
+def _span(n: dict[str, Any]) -> str:
+    if n["page_start"] is None:
+        return ""
+    return f" (p. {n['page_start']})" if n["page_end"] in (None, n["page_start"]) else f" (pp. {n['page_start']}-{n['page_end']})"
+
+
+def overview(store: Store, campaign: Any) -> str:
+    """Digest summaries of the book and its top-level sections, for the system prompt.
+
+    Changes only when a digest changes, so it stays in the cached prefix.
+    """
+    parts = []
+    for o in store.source_overviews(campaign):
+        parts.append(f"\n### {o['source']}\n{o['summary']}")
+        parts += [
+            f"- [section {s['id']}] {s['title']}{_span(s)}: {s['summary'] or '(not digested yet)'}"
+            for s in o["sections"]
+        ]
+    if not parts:
+        return ""
+    return "\n## What the reference material covers\n" + "\n".join(parts) + "\n"
+
+
+def catalog(store: Store, campaign: Any) -> str:
+    """Every name and alias in the reference catalog, so transcripts can be matched to it."""
+    rows = [e for e in store.ref_entities(campaign) if e["kind"] != "lore"]
+    if not rows:
+        return ""
+    lines = [f"{e['kind']} | {e['name']} | {'; '.join(e['aliases'])}" for e in rows]
+    return "\n## Names in the reference material\nkind | name | aliases\n" + "\n".join(lines) + "\n"
+
+
 def chat_agent(store: Store, campaign_slug: str, **kw: Any) -> Agent:
     campaign = store.campaign(campaign_slug)
-    system = ASK_SYSTEM.format(name=campaign.name, **_role_parts(campaign))
+    system = ASK_SYSTEM.format(name=campaign.name, overview=overview(store, campaign), **_role_parts(campaign))
     return Agent(store=store, ctx=ToolContext(store, campaign), system=system, **kw)
 
 
@@ -193,12 +230,16 @@ def ingest_session(
     **kw: Any,
 ) -> dict[str, Any]:
     """Store a transcript as a source, then have Claude fold it into the campaign state."""
-    from .ingest import chunk_markdown
+    from .ingest import parse_markdown
 
     campaign = store.campaign(campaign_slug)
     number = number or store.next_session_number(campaign)
     title = source_title or f"Session {number} transcript"
-    source_id = store.add_source(campaign, title, "transcript", chunk_markdown(transcript))
+    blob = store.blobs.put(transcript.encode("utf-8"))
+    source_id = store.add_source(
+        campaign, title, "transcript", parse_markdown(transcript),
+        blob=blob, filename=f"session-{number}.txt",
+    )
     session_id = store.upsert_session(campaign, number, played_on=played_on, source_id=source_id)
     ctx = ToolContext(store, campaign, session_id=session_id)
     result: dict[str, Any] = {"session": number}
@@ -214,7 +255,9 @@ def ingest_session(
         result.update(title=title, summary=summary)
         return "Session saved."
 
-    system = INGEST_SYSTEM.format(name=campaign.name, number=number, **_role_parts(campaign))
+    system = INGEST_SYSTEM.format(
+        name=campaign.name, number=number, catalog=catalog(store, campaign), **_role_parts(campaign)
+    )
     agent = Agent(
         store=store, ctx=ctx, system=system, effort=kw.pop("effort", "high"),
         extra_tools=[finish_session], **kw,

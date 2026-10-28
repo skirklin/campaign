@@ -22,8 +22,26 @@ uv sync                      # add `--extra audio` for local speech-to-text
 export ANTHROPIC_API_KEY=... # or `ant auth login`
 ```
 
-Data lives in `~/.local/share/campaign/campaign.db`. Set `CAMPAIGN_DB` to put
-it somewhere else.
+### Where your data lives
+
+Everything is stored in one data directory **outside the code checkout**, so
+pulling, switching branches, reinstalling or re-cloning never touches it:
+
+```
+~/.local/share/campaign/        (or $CAMPAIGN_HOME)
+  campaign.db                   campaigns, sources, digests, state, characters
+  blobs/ab/ab12…                every uploaded original, named by its SHA-256
+  backups/                      a database snapshot before every schema migration
+```
+
+- **Originals are kept.** Each upload is stored once by content hash and can
+  be downloaded again from the web UI. When the chunker improves,
+  `campaign reindex` rebuilds chunks from the originals. The web server does
+  this at startup too. Neither makes any API calls.
+- **Schema changes are migrations.** The schema is versioned
+  (`PRAGMA user_version`). Opening a database with a newer build snapshots it
+  to `backups/`, then upgrades it in place, one transaction per step.
+- `campaign info` and the Campaigns page show where the data is.
 
 ## Web UI
 
@@ -82,6 +100,26 @@ uv run campaign char set "Brannoc Ashvale" '{"currency": {"gp": 120}}' --reason 
 
 With more than one campaign, pass `-c <slug>` or set `CAMPAIGN=<slug>`.
 
+### Digesting reference material
+
+```bash
+uv run campaign add-source curse-of-strahd.pdf --digest   # or the checkbox in the web UI
+uv run campaign digest            # digest (or resume) everything not yet digested
+uv run campaign outline 1         # print the outline with section summaries
+```
+
+The digest turns a module into two things the assistant can use:
+- **An outline**: a summary for the book, each chapter, and each section,
+  with page ranges. The book and chapter summaries are part of every chat's
+  system prompt. The `outline` tool drills into deeper sections.
+- **A catalog** of NPCs, monsters, locations, items, quests, factions and
+  lore. Each entry has aliases ("the hag", "the burgomaster"), pages, key
+  facts with exact numbers, and a stat block where there is one. The
+  `lookup` tool finds entries by any name. Session ingest gets the full name
+  list, so it can match "Straud" to Strahd von Zarovich.
+
+See [How the digest works](#how-the-digest-works) for the caching rules.
+
 ### Using it from Claude Code or Claude Desktop (MCP)
 
 The same tools are also available over MCP. Claude Code or Claude Desktop
@@ -124,15 +162,57 @@ Add `--read-only` to expose only the lookup tools.
   override), with server-side refusal fallback enabled. Prompt caching keeps
   the repeated transcript cheap across the ingest tool loop.
 
+## How the digest works
+
+The document's section tree comes from the PDF's outline (bookmarks),
+Markdown headings, or 12-page groups when there's neither. Claude reduces
+that tree bottom-up (`digest.py`):
+
+- **Leaves** are sections' own text, split into parts above ~40k characters.
+  Runs of small sibling sections are packed into one call. Claude returns a
+  summary plus the entities in that text.
+- **Branches** see only their children's digests, never raw text. Claude
+  returns a summary of the section and says which children's entities are
+  the same thing under different names. The merge itself is done in code.
+  Exact duplicates are merged without asking.
+- **The root's** entities become the source's catalog.
+
+Each node's output is cached under a hash of exactly what produced it:
+
+```
+leaf key   = H("leaf",   LEAF_VERSION,   model, title, text)
+branch key = H("branch", BRANCH_VERSION, model, title, H(output of child 1), H(output of child 2), …)
+```
+
+So:
+
+- **Editing one section** re-digests that leaf and the branches above it.
+  Nothing else is redone.
+- **A text change that doesn't change a leaf's digest** stops there. Parents
+  hash their children's *outputs*, not their text.
+- **Re-uploading, re-chunking**, or loading the same book into another
+  campaign costs nothing.
+- **Interrupted or failed runs resume** where they stopped. A failed section
+  doesn't block its siblings.
+- **Bumping `BRANCH_VERSION`** after changing the reduce prompt redoes only
+  the branches. **Bumping `LEAF_VERSION`** redoes everything. Changing the
+  model (`CAMPAIGN_DIGEST_MODEL`) also gives new keys.
+
+The cache isn't tied to a source, so deleting and re-uploading a book is
+also free.
+
 ## Status and next steps
 
-Working and tested (`uv run pytest`): storage, PDF/Markdown chunking,
-search, spoiler filtering, revisions and revert, character sheets, CLI, MCP
-tool registration, the web API including background ingest jobs, and the
-agent loop against a scripted fake API. The web UI was also exercised in
+Working and tested (`uv run pytest`): storage, PDF/Markdown chunking and
+section trees, search, spoiler filtering, revisions and revert, character
+sheets, CLI, MCP tool registration, the web API including background ingest
+and digest jobs, schema migration from the first release, and the agent loop
+and digest cache rules against a scripted fake API. The web UI was also exercised in
 headless Chromium at desktop and phone widths.
 
-Not yet exercised: live API calls end to end against a real module, and
+Not yet exercised: live API calls end to end against a real module (the
+digest's request shape is checked against the real SDK, but it hasn't run
+against the API), and
 audio transcription (`transcribe.py` uses faster-whisper but hasn't been run
 here). Likely next steps:
 
@@ -144,4 +224,7 @@ here). Likely next steps:
 - **Review before commit** for ingest: show proposed changes and approve
   them, as an alternative to ingest-then-revert.
 - **Scanned PDFs** need OCR. Text-layer PDFs work as they are.
-- **Embedding search** as a second retriever, if keyword search misses.
+- **Batch API for digests**: leaves don't need to finish quickly, and the
+  Message Batches API costs half as much.
+- **Embedding search** as a second retriever, if lookup and keyword search
+  still miss things.

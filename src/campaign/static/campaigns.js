@@ -4,7 +4,7 @@
 import { api, h, toast, enc } from "./util.js";
 
 export async function campaignList() {
-  const campaigns = await api("GET", "/api/campaigns");
+  const [campaigns, info] = await Promise.all([api("GET", "/api/campaigns"), api("GET", "/api/info")]);
   const name = h("input", { placeholder: "Campaign name", required: true, "aria-label": "Campaign name" });
   const role = h("select", { "aria-label": "Your role" },
     h("option", { value: "dm" }, "I'm the DM"), h("option", { value: "player" }, "I'm a player"));
@@ -26,6 +26,9 @@ export async function campaignList() {
     ),
     h("form.inline-form", { onsubmit: create }, name, role, h("button.primary", { type: "submit" }, "Create")),
     h("p.muted.small", "In a player campaign the assistant never sees DM-only material or anything the party hasn't discovered."),
+    h("p.muted.small.data-location",
+      "Data is stored in ", h("code", info.data_dir),
+      ` (schema v${info.schema_version}, ${info.originals.files} original files, ${(info.originals.bytes / 1e6).toFixed(1)} MB).`),
   );
 }
 
@@ -172,25 +175,17 @@ function pollJob(jobId, panel, onDone) {
 async function referenceTab(c) {
   const base = `/api/campaigns/${c.slug}`;
   const list = h("div.rows");
+  let timer;
   const refresh = async () => {
+    clearTimeout(timer);
+    if (!list.isConnected && timer !== undefined) return;  // tab was left
     const sources = await api("GET", `${base}/sources`);
     list.replaceChildren(
       sources.length === 0 ? h("p.empty", "Nothing loaded yet. Upload the module PDF and any notes.") : "",
-      ...sources.map((s) => h("div.source",
-        h("div",
-          h("strong", s.title), " ",
-          h("span.badge", s.kind), s.dm_only ? h("span.badge.dm", "DM only") : "",
-          h("div.muted.small", `${s.chunks} chunks${s.first_page ? ` · pages ${s.first_page}–${s.last_page}` : ""}`)),
-        h("button.icon", {
-          title: "Remove", "aria-label": `Remove ${s.title}`,
-          onclick: async () => {
-            if (!confirm(`Remove ${s.title}?`)) return;
-            await api("DELETE", `${base}/sources/${s.id}`);
-            refresh();
-          },
-        }, "×"),
-      )),
+      ...sources.map((s) => sourceRow(c, s, refresh)),
     );
+    // Poll while anything is digesting.
+    timer = sources.some((s) => s.digest.running) ? setTimeout(refresh, 2000) : null;
   };
   await refresh();
 
@@ -198,6 +193,7 @@ async function referenceTab(c) {
   const title = h("input", { placeholder: "Title (defaults to file name)", "aria-label": "Title" });
   const kind = h("select", { "aria-label": "Kind" }, h("option", { value: "module" }, "Published module"), h("option", { value: "notes" }, "My notes"));
   const dmOnly = h("input", { type: "checkbox", checked: true });
+  const digestNow = h("input", { type: "checkbox", checked: true });
   kind.addEventListener("change", () => (dmOnly.checked = kind.value === "module"));
   const submit = h("button.primary", { type: "submit" }, "Upload");
   const form = h("form.card", {
@@ -208,13 +204,14 @@ async function referenceTab(c) {
       fd.append("title", title.value);
       fd.append("kind", kind.value);
       fd.append("dm_only", dmOnly.checked);
+      fd.append("digest_now", digestNow.checked);
       submit.disabled = true;
       submit.textContent = "Reading…";
       try {
         const r = await api("POST", `${base}/sources`, fd);
-        toast(`Loaded ${r.title}: ${r.chunks} chunks`);
+        toast(r.pending ? `Loaded: ${r.chunks} chunks, ${r.pending} sections to digest` : `Loaded: ${r.chunks} chunks, digest already cached`);
         form.reset();
-        dmOnly.checked = true;
+        dmOnly.checked = digestNow.checked = true;
         refresh();
       } catch (err) {
         toast(err.message, true);
@@ -227,6 +224,8 @@ async function referenceTab(c) {
     h("h2", "Add reference material"),
     h("div.identity", file, title, kind),
     h("label.check", dmOnly, " DM only ", h("span.muted.small", "(hidden from the assistant in player campaigns)")),
+    h("label.check", digestNow, " Digest with Claude now ",
+      h("span.muted.small", "(builds the outline and the NPC/monster/item catalog; only new or changed sections cost anything)")),
     h("div.actions", submit),
   );
 
@@ -254,6 +253,127 @@ async function referenceTab(c) {
   };
   return h("div", form, h("h2.section-title", "Loaded"), list,
     h("h2.section-title", "Search"), h("form.inline-form", { onsubmit: search }, q, h("button", { type: "submit" }, "Search")), results);
+}
+
+function digestLine(d) {
+  if (d.running) return h("span.digest-status.running", `Digesting… ${d.done}/${d.total} sections`);
+  if (!d.total) return h("span.digest-status", "Not digested");
+  if (d.done === d.total) {
+    const tokens = d.input_tokens + d.output_tokens;
+    return h("span.digest-status.done", `Digested · ${d.entities} entries${tokens ? ` · ${Math.round(tokens / 1000)}k tokens` : ""}`);
+  }
+  return h("span.digest-status.partial",
+    `${d.done}/${d.total} sections digested${d.failed ? `, ${d.failed} failed` : ""}`);
+}
+
+function sourceRow(c, s, refresh) {
+  const base = `/api/campaigns/${c.slug}`;
+  const d = s.digest;
+  const canDigest = s.kind !== "transcript" && !d.running && (d.total === 0 || d.done < d.total);
+  return h("div.source",
+    h("div",
+      h("a", { href: `#/campaigns/${c.slug}/source/${s.id}` }, h("strong", s.title)), " ",
+      h("span.badge", s.kind), s.dm_only ? h("span.badge.dm", "DM only") : "",
+      h("div.muted.small",
+        `${s.chunks} chunks${s.first_page ? ` · pages ${s.first_page}–${s.last_page}` : ""} · `,
+        s.has_original
+          ? h("a", { href: `${base}/sources/${s.id}/original` }, "original")
+          : h("span", { title: "Uploaded before originals were kept. Upload it again to enable re-indexing." }, "original not kept"),
+        s.kind !== "transcript" ? [" · ", digestLine(d)] : ""),
+    ),
+    h("div.source-actions",
+      canDigest && h("button", {
+        onclick: async () => {
+          try {
+            await api("POST", `${base}/sources/${s.id}/digest`);
+            refresh();
+          } catch (err) {
+            toast(err.message, true);
+          }
+        },
+      }, d.done ? "Resume digest" : "Digest"),
+      h("button.icon", {
+        title: "Remove", "aria-label": `Remove ${s.title}`,
+        onclick: async () => {
+          if (!confirm(`Remove ${s.title}? The digest cache is kept, so re-uploading it later is free.`)) return;
+          await api("DELETE", `${base}/sources/${s.id}`);
+          refresh();
+        },
+      }, "×"),
+    ),
+  );
+}
+
+// -- one source's digest -----------------------------------------------------------
+
+export async function sourceView(slug, sourceId) {
+  const base = `/api/campaigns/${slug}`;
+  const [campaigns, sources, outline, entities] = await Promise.all([
+    api("GET", "/api/campaigns"), api("GET", `${base}/sources`),
+    api("GET", `${base}/sources/${sourceId}/outline`), api("GET", `${base}/sources/${sourceId}/entities`),
+  ]);
+  const c = campaigns.find((x) => x.slug === slug);
+  const src = sources.find((x) => x.id === Number(sourceId));
+  if (!c || !src) throw new Error("No such source.");
+
+  const children = {};
+  outline.forEach((n) => (children[n.parent_id] ||= []).push(n));
+  const pages = (n) => (n.page_start ? (n.page_end && n.page_end !== n.page_start ? ` pp. ${n.page_start}–${n.page_end}` : ` p. ${n.page_start}`) : "");
+  const nodeEl = (n) => {
+    const kids = children[n.id] || [];
+    const head = h("summary",
+      h("strong", n.title), h("span.muted.small", pages(n)),
+      n.summary === null && h("span.badge", n.error ? "failed" : "pending"),
+      n.entity_count ? h("span.muted.small", ` · ${n.entity_count} entries`) : "");
+    const body = [
+      n.summary ? h("p.node-summary", n.summary) : n.error ? h("p.error-text", n.error) : "",
+      kids.map(nodeEl),
+    ];
+    return h("details.outline-node", { open: n.depth < 1 }, head, body);
+  };
+
+  const kinds = [...new Set(entities.map((e) => e.kind))].sort();
+  const kind = h("select", { "aria-label": "Kind" }, h("option", { value: "" }, "All kinds"), kinds.map((k) => h("option", { value: k }, kindLabel(k))));
+  const q = h("input", { type: "search", placeholder: "Filter by name or alias…", "aria-label": "Filter" });
+  const grid = h("div.entity-grid");
+  const render = () => {
+    const needle = q.value.toLowerCase();
+    const shown = entities.filter((e) => (!kind.value || e.kind === kind.value) &&
+      (!needle || [e.name, ...e.aliases, e.summary].some((x) => x.toLowerCase().includes(needle))));
+    grid.replaceChildren(shown.length ? "" : h("p.empty", entities.length ? "No matches." : "No catalog yet: it's built when the whole book is digested."),
+      ...shown.map(refCard));
+  };
+  kind.addEventListener("change", render);
+  q.addEventListener("input", render);
+  render();
+
+  return h("section.page",
+    h("div.page-head", h("a", { href: `#/campaigns/${slug}/reference` }, `← ${c.name}`)),
+    h("div.page-head", h("h1", src.title), src.kind !== "transcript" && digestLine(src.digest)),
+    h("h2.section-title", "Outline"),
+    outline.length ? h("div.outline", outline.filter((n) => n.parent_id === null).map(nodeEl)) : h("p.empty", "No outline yet."),
+    h("h2.section-title", `Catalog (${entities.length})`),
+    h("div.filters.two", kind, q),
+    grid,
+  );
+}
+
+function refCard(e) {
+  const sb = e.stat_block;
+  return h("div.card.entity",
+    h("div.entity-head", h("strong", e.name), h("span.badge", e.kind),
+      e.pages.length > 0 && h("span.muted.small", `p. ${e.pages.join(", ")}`)),
+    e.aliases.length > 0 && h("p.muted.small", "aka ", e.aliases.join(" · ")),
+    e.summary && h("p", e.summary),
+    e.facts.length > 0 && h("ul.facts", e.facts.map((f) => h("li", f))),
+    sb && h("details.statblock",
+      h("summary", `AC ${sb.armor_class} · HP ${sb.hit_points}${sb.challenge ? ` · CR ${sb.challenge}` : ""}`),
+      h("p.small", `Speed ${sb.speed}`),
+      h("div.stat-abilities", ["strength", "dexterity", "constitution", "intelligence", "wisdom", "charisma"].map((a) =>
+        h("div", h("span.label", a.slice(0, 3).toUpperCase()), h("span", sb[a] ?? "—")))),
+      [...sb.traits, ...sb.actions, ...sb.other].map((t) => h("p.small", t)),
+    ),
+  );
 }
 
 // FTS snippets mark matches with [ ]; render them as <mark> without innerHTML.

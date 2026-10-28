@@ -1,5 +1,4 @@
 import io
-import json
 import time
 from pathlib import Path
 
@@ -108,3 +107,39 @@ def test_ingest_job_runs_in_background(client, monkeypatch):
     assert client.get("/api/campaigns/strahd/journal").json()[0]["session"] == 1
     assert client.post("/api/campaigns/strahd/sessions/1/revert").json()["deleted"] == 1
     assert client.get("/api/campaigns/strahd/entities").json() == []
+
+
+def test_digest_endpoints_and_original_kept(client, monkeypatch):
+    from campaign import digest
+    from test_digest import BOOK, FakeDigest
+
+    monkeypatch.setattr(digest, "MIN_LEAF_CHARS", 1)
+    fake = FakeDigest()
+    monkeypatch.setattr(digest.anthropic, "Anthropic", lambda: fake)
+    client.post("/api/campaigns", json={"name": "Strahd", "role": "dm"})
+    book = BOOK.format(intro="", church="Donavich prays.").encode()
+    r = client.post("/api/campaigns/strahd/sources", files={"file": ("book.md", book)},
+                    data={"kind": "module", "digest_now": "true"}).json()
+    assert r["pending"] == 8 and r["digesting"] is True
+    for _ in range(100):
+        src = client.get("/api/campaigns/strahd/sources").json()[0]
+        if not src["digest"]["running"]:
+            break
+        time.sleep(0.05)
+    assert src["digest"]["done"] == src["digest"]["total"] == 8
+    assert src["digest"]["entities"] == 3 and src["has_original"]
+
+    outline = client.get(f"/api/campaigns/strahd/sources/{r['id']}/outline").json()
+    assert outline[0]["parent_id"] is None and outline[0]["summary"].startswith("Branch summary")
+    hits = client.get(f"/api/campaigns/strahd/sources/{r['id']}/entities", params={"q": "windmill hag"}).json()
+    assert "Morgantha" in [e["name"] for e in hits]
+    assert client.get(f"/api/campaigns/strahd/sources/{r['id']}/original").content == book
+
+    # Re-uploading the same file is free, and nothing is left to digest.
+    again = client.post("/api/campaigns/strahd/sources", files={"file": ("book.md", book)},
+                        data={"title": "book", "digest_now": "true"}).json()
+    assert again == {"id": r["id"], "chunks": r["chunks"], "pending": 0, "digesting": False}
+    assert client.post(f"/api/campaigns/strahd/sources/{r['id']}/digest").status_code == 202
+
+    info = client.get("/api/info").json()
+    assert info["schema_version"] >= 2 and info["originals"]["files"] == 1

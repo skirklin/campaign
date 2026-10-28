@@ -13,7 +13,6 @@ import typer
 from .charsheet import CharacterSheet, apply_hp, merge_patch, render, rest
 from .config import db_path
 from .db import Campaign, Store
-from .ingest import chunk_file
 
 app = typer.Typer(no_args_is_help=True, help="D&D campaign assistant.")
 char_app = typer.Typer(no_args_is_help=True, help="Character sheets.")
@@ -76,14 +75,82 @@ def add_source(
         Optional[bool],
         typer.Option("--dm-only/--party", help="Hide from the assistant in player campaigns. Default: modules are DM-only."),
     ] = None,
+    digest_now: Annotated[bool, typer.Option("--digest/--no-digest", help="Digest with Claude right away.")] = False,
 ) -> None:
-    """Load a PDF, Markdown or text file as reference material."""
+    """Load a PDF, Markdown or text file as reference material. The original is kept."""
+    from .library import add_reference
+
     s = store()
     c = pick(s, campaign)
-    chunks = chunk_file(path)
-    hidden = (kind == "module") if dm_only is None else dm_only
-    s.add_source(c, title or path.stem, kind, chunks, path=str(path.resolve()), dm_only=hidden)
-    typer.echo(f"Loaded {len(chunks)} chunks from {path.name} into {c.slug}.")
+    r = add_reference(s, c, path.read_bytes(), path.name, title, kind, dm_only)
+    typer.echo(f"Loaded {r['chunks']} chunks from {path.name} into {c.slug} (source {r['id']}).")
+    typer.echo(f"Digest: {r['pending']} sections to digest" + (" (all cached)" if not r["pending"] else ""))
+    if digest_now and r["pending"]:
+        _digest(s, r["id"])
+
+
+def _digest(s: Store, source_id: int) -> None:
+    from . import digest
+
+    def progress(st: dict) -> None:
+        typer.echo(
+            f"\r  digested {st['digested']}, cached {st['cached']}, failed {st['failed']} of {st['nodes']}",
+            nl=False, err=True,
+        )
+
+    stats = digest.run(s.path, source_id, on_progress=progress)
+    typer.echo(err=True)
+    show(stats | {"entities": s.digest_status(source_id)["entities"]})
+
+
+@app.command("digest")
+def digest_cmd(
+    source_id: Annotated[Optional[int], typer.Argument(help="Source id (see `sources`). Default: all.")] = None,
+    campaign: CampaignOpt = None,
+) -> None:
+    """Digest reference material into an outline and an entity catalog. Resumes; skips cached sections."""
+    s = store()
+    ids = [source_id] if source_id else [
+        x["id"] for x in s.sources(pick(s, campaign)) if x["kind"] != "transcript"
+    ]
+    for sid in ids:
+        typer.echo(f"Source {sid}: {s.source(sid)['title']}")
+        _digest(s, sid)
+
+
+@app.command()
+def outline(source_id: int, depth: int = 2) -> None:
+    """Print a source's digested outline."""
+    for n in store().digest_outline(source_id):
+        if n["depth"] > depth:
+            continue
+        pages = f" p{n['page_start']}-{n['page_end']}" if n["page_start"] else ""
+        mark = "" if n["summary"] else "  [not digested]"
+        typer.secho(f"{'  ' * n['depth']}{n['title']}{pages}{mark}", bold=n["depth"] == 0)
+        if n["summary"]:
+            typer.echo(f"{'  ' * n['depth']}  {n['summary'][:300]}")
+
+
+@app.command("reindex")
+def reindex_cmd(force: bool = typer.Option(False, help="Re-chunk everything, not just outdated sources.")) -> None:
+    """Re-chunk sources from their stored originals (after a chunker change). No API calls."""
+    from .library import reindex
+
+    done = reindex(store(), force=force)
+    show(done or "Everything is up to date.")
+
+
+@app.command()
+def info() -> None:
+    """Where your data lives and what's in it."""
+    s = store()
+    show({
+        "database": s.path,
+        "schema_version": s.schema_version,
+        "originals": s.blobs.stats(),
+        "backups": str(Path(s.path).parent / "backups"),
+        "campaigns": [c.slug for c in s.campaigns()],
+    })
 
 
 @app.command()

@@ -16,6 +16,13 @@ from pydantic import ValidationError
 from .charsheet import CharacterSheet, merge_patch
 from .db import Campaign, Store
 
+def _section(n: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": n["id"], "title": n["title"], "pages": [n["page_start"], n["page_end"]],
+        "summary": n["summary"] or "(not digested yet)",
+    }
+
+
 def _json(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False, indent=1)
 
@@ -74,6 +81,65 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         rows = store.read_pages(campaign, source, first_page, min(last_page, first_page + 5))
         return _json(rows) if rows else "Nothing on those pages."
 
+    def _visible(source_id: int) -> bool:
+        return any(src["id"] == source_id for src in store.sources(campaign)) and not (
+            campaign.spoiler_safe and store.source(source_id)["dm_only"]
+        )
+
+    def outline(section_id: int | None = None, source: str | None = None) -> str:
+        """Browse the digested outline of the reference material: section summaries with page ranges.
+
+        With no arguments: each book's summary and its top-level sections.
+        With section_id: that section's summary and its subsections. A
+        section without subsections gives its pages; read them with
+        read_pages for exact text.
+
+        Args:
+            section_id: A section id from an earlier outline result.
+            source: Show one source's top level (title from list_sources).
+        """
+        if section_id is None:
+            books = [o for o in store.source_overviews(campaign) if source in (None, o["source"])]
+            if not books:
+                return "Nothing has been digested yet; use search_reference instead."
+            return _json([
+                {"source": b["source"], "summary": b["summary"],
+                 "sections": [_section(s) for s in b["sections"]]}
+                for b in books
+            ])
+        source_id = store.digest_node_source(section_id)
+        if source_id is None or not _visible(source_id):
+            return f"No section {section_id}."
+        nodes = store.digest_outline(source_id)
+        node = next(n for n in nodes if n["id"] == section_id)
+        out = _section(node) | {"source": store.source(source_id)["title"]}
+        out["subsections"] = [_section(n) for n in nodes if n["parent_id"] == section_id]
+        return _json(out)
+
+    def lookup(name: str) -> str:
+        """Find what the book says about a person, creature, place, item or quest, and what has happened with it in this campaign.
+
+        Matches canonical names and aliases ("the hag", "the burgomaster"),
+        then falls back to search. Book entries include pages, key facts and
+        stat blocks.
+
+        Args:
+            name: A name, title or description, e.g. "Morgantha" or "the windmill hag".
+        """
+        book = store.lookup_ref(campaign, name)
+        names = {name.lower()} | {n.lower() for b in book for n in [b["name"], *b["aliases"]]}
+        state = [
+            {k: e[k] for k in ("kind", "name", "status", "summary", "data")}
+            for e in store.find_entities(campaign)
+            if e["name"].lower() in names
+        ]
+        if not book and not state:
+            return "No match in the catalog or campaign state. Try search_reference."
+        for b in book:
+            b.pop("id", None)
+            b.pop("source_id", None)
+        return _json({"book": book, "campaign": state})
+
     # -- campaign state ------------------------------------------------------
 
     def list_sessions() -> str:
@@ -114,6 +180,11 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
             {"session": h["session"], "reason": h["reason"], "status": h["snapshot"]["status"]}
             for h in history
             if h["reason"]
+        ]
+        wanted = e["name"].lower()
+        e["book"] = [
+            b for b in store.lookup_ref(campaign, e["name"])
+            if b["name"].lower() == wanted or wanted in (a.lower() for a in b["aliases"])
         ]
         return _json(e)
 
@@ -222,6 +293,8 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
 
     readers = [
         list_sources,
+        outline,
+        lookup,
         search_reference,
         read_reference,
         read_pages,
