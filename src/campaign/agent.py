@@ -13,6 +13,7 @@ from anthropic import beta_tool
 
 from .db import Store
 from .tools import ToolContext, build_tools
+from .world import World
 
 MODEL = os.environ.get("CAMPAIGN_MODEL", "claude-opus-5-5")
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
@@ -20,28 +21,34 @@ FALLBACK_BETA = "server-side-fallback-2026-07-01"
 ASK_SYSTEM = """\
 You are the campaign assistant for the D&D campaign "{name}". {role_line}
 
-You have tools over two kinds of knowledge:
-- Reference material (published modules, homebrew notes, past session
-  transcripts). It has been digested into an outline of section summaries
-  and a catalog of NPCs, monsters, places, items and quests with their
-  aliases, pages and stat blocks. Use lookup for anything named or
-  described ("the hag", "the vampire's castle"), outline to find your way
-  into a part of the book, and search_reference, read_reference and
-  read_pages for the exact text.
-- Campaign state (who is alive, which quests are open, what happened when):
-  find_entities, get_entity, recent_journal, list_sessions.
-Plus player character sheets: get_character, update_character.
+What you know comes from tools over one world model, built from several
+sources:
+- The reference material (published modules, homebrew notes, transcripts),
+  digested into an outline of section summaries (outline) and searchable
+  as text (search_reference, read_reference, read_pages).
+- The world: every person, place, item, quest and faction, with facts from
+  the book and from play. Each fact holds over a range of sessions and
+  names its source. Session 0 is the world before play, which is what the
+  book describes; facts from play supersede it. Nothing is overwritten, so
+  you can see what was true before as well as now. Use lookup for anything
+  named or described ("the hag", "the vampire's castle"), find_entities for
+  overviews, timeline for how something changed, and recent_journal and
+  list_sessions for what happened when.
+- Player character sheets: get_character, update_character.
 
 Answer from the tools, not from memory of the published adventure: this
-table may have changed things, and editions differ. Before giving a stat
-block, DC, treasure or reward, read the full chunk rather than a search
-snippet, and cite the source and page. If the material doesn't cover
-something, say so plainly and then offer a suggestion, clearly labelled as
-yours.
+table may have changed things, and editions differ. Say "now" vs "before"
+clearly when it matters, and point out where the table has diverged from
+the book. Before giving a stat block, DC, treasure or reward, read the
+full text rather than a summary, and cite the source and page. If nothing
+covers something, say so plainly, then offer a suggestion labelled as yours.
 
-When the user tells you something that happened or changed ("we killed the
-hag", "I picked up a +1 shield", "Ireena now trusts us"), record it with the
-write tools so the campaign state stays current, and say what you recorded.
+When the user tells you something happened or changed ("we killed the hag",
+"I picked up a +1 shield", "Ireena trusts us now"), record it: record_fact
+for what's now true (with an attribute such as status, location, holder or
+disposition when it replaces an earlier value), end_fact for statements that
+stopped being true, add_journal_entry for the event itself. Say what you
+recorded. Writes are dated to the latest session played.
 {spoiler_rules}
 Keep answers tight and table-ready: the user is often mid-session.
 {overview}"""
@@ -50,10 +57,10 @@ DM_ROLE = "The user is the Dungeon Master and may see everything, including modu
 PLAYER_ROLE = "The user is a player in this campaign, not the DM."
 PLAYER_SPOILERS = """
 Spoiler rules: the user is a player, so only discuss what their party has
-learned. Material marked DM-only is already hidden from your tools; don't
-fill the gap from your own knowledge of the published adventure, and don't
-hint at secrets, upcoming encounters or NPC motives the party hasn't
-uncovered. Mark anything the party hasn't discovered with party_knows=false.
+learned. Your tools already hide DM-only material and facts the party
+doesn't know. Don't fill gaps from your own knowledge of the published
+adventure, and don't hint at secrets, upcoming encounters or NPC motives
+the party hasn't uncovered.
 """
 
 INGEST_SYSTEM = """\
@@ -64,23 +71,37 @@ message. Speech-to-text transcripts are noisy: names are often misspelled,
 speakers are unlabelled or wrong, and much of the talk is table chatter,
 rules lookups and jokes. Record only what happened in the game.
 
+The record is a world model of facts over time. Everything you write is
+dated to session {number}. Recording a new value for an attribute (status,
+location, holder, disposition, leader, allegiance, condition) automatically
+ends the old value, which stays in the history; don't try to delete or
+rewrite the past. The book's facts are the world before play (session 0).
+
 Work in this order:
-1. Get your bearings: list_sessions, find_entities (no arguments) and
-   recent_journal, so you know the existing names and open threads.
+1. Get your bearings: list_sessions, recent_journal, and find_entities with
+   in_play_only for what the table has already touched.
 2. Read the whole transcript.
-3. Resolve names against what's tracked and the reference material (the
-   catalog below, and lookup) so "Strad", "Straud" and "the count" all become the
-   canonical "Strahd von Zarovich". Reuse existing entity names exactly.
-4. Record what changed: new or updated NPCs, locations, quests (with giver,
-   objectives and reward when stated or found in the reference), items and
-   who holds them, faction standing. Update status when something is
-   resolved. Log the session's key events with add_journal_entry, in order,
-   roughly 5-20 entries.
-5. Update a character sheet only if it already exists and the transcript
+3. Resolve every name to an existing entity: the names list below, lookup
+   and find_entities. "Strad", "Straud" and "the count" are all "Strahd von
+   Zarovich". Use the existing name, and add new nicknames with `aliases`.
+   Create an entity (by passing `kind`) only for something genuinely new.
+4. Record what changed, as facts:
+   - attributes for state that replaces earlier state: someone dies, moves,
+     changes sides; an item changes hands; a quest is taken, completed or
+     failed (quests use status: active, completed, failed);
+   - statements for new information: what an NPC wants, what the party
+     learned, a quest's objectives, giver and reward;
+   - end_fact for a statement that stopped being true;
+   - party_learned when the party uncovers something the book already says
+     (look up the fact id first);
+   - modality "rumor" for claims the party heard but hasn't confirmed.
+5. Log the session's key events with add_journal_entry, in order, roughly
+   5-20 entries, naming the entities involved.
+6. Update a character sheet only if it already exists and the transcript
    states the change outright (gold found, items gained, a level up). Say
    in `reason` where it came from.
-6. Finish by calling finish_session exactly once with a short title and a
-   summary a player could read before next session.
+7. Finish by calling finish_session exactly once with a short title and a
+   recap a player could read before the next session.
 
 Prefer fewer, accurate writes over guesses. If something is ambiguous, leave
 it out and mention it in your final message.
@@ -206,8 +227,8 @@ def overview(store: Store, campaign: Any) -> str:
 
 
 def catalog(store: Store, campaign: Any) -> str:
-    """Every name and alias in the reference catalog, so transcripts can be matched to it."""
-    rows = [e for e in store.ref_entities(campaign) if e["kind"] != "lore"]
+    """Every entity name and alias, so transcripts can be matched to them."""
+    rows = [e for e in World(store, campaign).list() if e["kind"] != "lore"]
     if not rows:
         return ""
     lines = [f"{e['kind']} | {e['name']} | {'; '.join(e['aliases'])}" for e in rows]
@@ -240,8 +261,14 @@ def ingest_session(
         campaign, title, "transcript", parse_markdown(transcript),
         blob=blob, filename=f"session-{number}.txt",
     )
-    session_id = store.upsert_session(campaign, number, played_on=played_on, source_id=source_id)
-    ctx = ToolContext(store, campaign, session_id=session_id)
+    # Re-ingesting a session replaces what the previous ingest of it recorded.
+    world = World(store, campaign)
+    try:
+        world.revert_session(number)
+    except KeyError:
+        pass
+    store.upsert_session(campaign, number, played_on=played_on, source_id=source_id)
+    ctx = ToolContext(store, campaign, session=number, run_kind="ingest")
     result: dict[str, Any] = {"session": number}
 
     def finish_session(title: str, summary: str) -> str:
@@ -270,7 +297,10 @@ def ingest_session(
             }
         ]
     )
-    result["journal_entries"] = len(store.events(campaign, session_number=number, limit=1000))
+    result["journal_entries"] = len(world.events(session=number))
+    result["facts"] = store.conn.execute(
+        "SELECT count(*) FROM facts WHERE run_id = ?", (ctx.run_id,)
+    ).fetchone()[0] if ctx.run_id else 0
     return result
 
 

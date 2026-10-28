@@ -359,3 +359,23 @@ mark { background: color-mix(in srgb, var(--warn) 30%, transparent); color: inhe
 .statblock p { margin: .25rem 0; }
 .stat-abilities { display: grid; grid-template-columns: repeat(6, 1fr); gap: .2rem; margin: .3rem 0; text-align: center; }
 .stat-abilities div { display: flex; flex-direction: column; }
+
+/* -- world model ------------------------------------------------------------ */
+
+a.card.entity { color: inherit; text-decoration: none; display: block; }
+a.card.entity:hover { border-color: var(--accent); }
+.as-of { display: flex; align-items: center; gap: .8rem; }
+.as-of input { flex: 1; accent-color: var(--accent); }
+.as-of-label { font-weight: 600; min-width: 11rem; }
+.entity-body { display: flex; flex-direction: column; gap: .8rem; }
+.summary p { margin: 0 0 .4rem; }
+ul.facts { list-style: none; padding: 0; margin: .2rem 0; }
+li.fact { display: grid; grid-template-columns: 1fr auto; gap: .1rem .6rem; padding: .35rem 0; border-bottom: 1px dotted var(--border); }
+li.fact > .fact-meta { grid-column: 1; }
+li.fact > button { grid-column: 2; grid-row: 1 / span 2; align-self: center; }
+.fact-meta { font-size: .78rem; color: var(--muted); }
+ul.facts.past li.fact > span:first-child { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--border); }
+ol.events { margin: .2rem 0; padding-left: 0; list-style: none; }
+ol.events li { padding: .2rem 0; }
+.add-fact input { margin-top: .4rem; }
+.event-entities { color: var(--muted); font-size: .88rem; }

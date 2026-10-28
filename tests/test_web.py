@@ -77,8 +77,9 @@ def test_reference_upload_and_search(client):
 
 def test_ingest_job_runs_in_background(client, monkeypatch):
     fake = FakeClient([
-        ([tool_use("t1", "record_entity", kind="npc", name="Ismark", reason="met", status="alive")], "tool_use"),
-        ([tool_use("t2", "add_journal_entry", text="Met Ismark at the tavern.")], "tool_use"),
+        ([tool_use("t1", "record_fact", entity="Ismark", kind="npc", statement="Ismark is alive",
+                   attribute="status", value="alive")], "tool_use"),
+        ([tool_use("t2", "add_journal_entry", text="Met Ismark at the tavern.", entities=["Ismark"])], "tool_use"),
         ([tool_use("t3", "finish_session", title="Blood on the Vine", summary="They met Ismark.")], "tool_use"),
         ([text("All recorded.")], "end_turn"),
     ])
@@ -99,14 +100,18 @@ def test_ingest_job_runs_in_background(client, monkeypatch):
         time.sleep(0.05)
     assert job["status"] == "done", job
     assert job["result"]["title"] == "Blood on the Vine"
-    assert any(e["kind"] == "tool" and "record_entity" in e["text"] for e in job["log"])
+    assert any(e["kind"] == "tool" and "record_fact" in e["text"] for e in job["log"])
 
     sessions = client.get("/api/campaigns/strahd/sessions").json()
     assert sessions["sessions"][0]["played_on"] == "2026-10-25" and sessions["next"] == 2
-    assert client.get("/api/campaigns/strahd/entities").json()[0]["name"] == "Ismark"
+    ismark = client.get("/api/campaigns/strahd/entities").json()["entities"][0]
+    assert ismark["name"] == "Ismark" and ismark["current"] == {"status": "alive"}
+    detail = client.get(f"/api/campaigns/strahd/entities/{ismark['id']}").json()
+    assert detail["events"] == [{"session": 1, "text": "Met Ismark at the tavern."}]
+
     assert client.get("/api/campaigns/strahd/journal").json()[0]["session"] == 1
-    assert client.post("/api/campaigns/strahd/sessions/1/revert").json()["deleted"] == 1
-    assert client.get("/api/campaigns/strahd/entities").json() == []
+    assert client.post("/api/campaigns/strahd/sessions/1/revert").json()["entities_removed"] == 1
+    assert client.get("/api/campaigns/strahd/entities").json()["entities"] == []
 
 
 def test_digest_endpoints_and_original_kept(client, monkeypatch):

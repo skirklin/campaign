@@ -6,6 +6,7 @@ import pytest
 
 from campaign import agent as agent_mod
 from campaign.db import Store
+from campaign.world import World
 
 
 def text(t):
@@ -68,11 +69,11 @@ def test_ingest_records_state_and_finishes(store, monkeypatch):
             ([text("Checking state."), tool_use("t1", "find_entities")], "tool_use"),
             (
                 [
-                    tool_use("t2", "record_entity", kind="npc", name="Ireena Kolyana",
-                             reason="met at the burgomaster's house", status="alive"),
+                    tool_use("t2", "record_fact", entity="Ireena Kolyana", kind="npc",
+                             statement="Ireena is alive and in Barovia village", attribute="status", value="alive"),
                     tool_use("t3", "add_journal_entry", text="The party met Ireena.",
                              entities=["Ireena Kolyana"]),
-                    tool_use("t4", "record_entity", kind="npc", name="Bad", reason="x", data="not a dict"),
+                    tool_use("t4", "record_fact", entity="Bad", statement=["not", "a", "string"]),
                 ],
                 "tool_use",
             ),
@@ -85,8 +86,11 @@ def test_ingest_records_state_and_finishes(store, monkeypatch):
     assert result["session"] == 1 and result["title"] == "Into the Mists"
     assert result["journal_entries"] == 1
     assert store.sessions(c)[0]["summary"] == "They arrived."
-    assert store.get_entity(c, "npc", "Ireena Kolyana")["status"] == "alive"
-    assert store.revert_session(c, 1)["deleted"] == 1
+    world = World(store, c)
+    assert world.lookup("Ireena Kolyana")[0]["current"] == {"status": "alive"}
+    assert result["facts"] == 1
+    assert world.revert_session(1)["entities_removed"] == 1
+    assert world.lookup("Ireena Kolyana") == []
 
     # all three results go back in one user message; the bad input is an error result
     results = client.requests[2]["messages"][-1]["content"]

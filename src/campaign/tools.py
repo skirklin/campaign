@@ -15,6 +15,8 @@ from pydantic import ValidationError
 
 from .charsheet import CharacterSheet, merge_patch
 from .db import Campaign, Store
+from .world import World
+
 
 def _section(n: dict[str, Any]) -> dict[str, Any]:
     return {
@@ -31,11 +33,28 @@ def _json(obj: Any) -> str:
 class ToolContext:
     store: Store
     campaign: Campaign
-    session_id: int | None = None  # set while ingesting a session; tags every write
+    session: int | None = None  # the session being ingested; otherwise the latest one
+    run_kind: str = "chat"
+    run_id: int | None = None
+
+    @property
+    def world(self) -> World:
+        return World(self.store, self.campaign)
+
+    @property
+    def clock(self) -> int:
+        """The session that writes are dated to."""
+        return self.session if self.session is not None else self.store.current_session(self.campaign)
+
+    def run(self) -> int:
+        """This conversation's or ingest's run, started on its first write."""
+        if self.run_id is None:
+            self.run_id = self.world.start_run(self.run_kind, session=self.clock)
+        return self.run_id
 
 
 def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., str]]:
-    store, campaign = ctx.store, ctx.campaign
+    store, campaign, world = ctx.store, ctx.campaign, ctx.world
 
     # -- reference material --------------------------------------------------
 
@@ -116,142 +135,146 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         out["subsections"] = [_section(n) for n in nodes if n["parent_id"] == section_id]
         return _json(out)
 
-    def lookup(name: str) -> str:
-        """Find what the book says about a person, creature, place, item or quest, and what has happened with it in this campaign.
+    # -- campaign state ------------------------------------------------------
 
-        Matches canonical names and aliases ("the hag", "the burgomaster"),
-        then falls back to search. Book entries include pages, key facts and
-        stat blocks.
+    def find_entities(kind: str | None = None, query: str | None = None, in_play_only: bool = False) -> str:
+        """List people, places and things in the campaign with their current status and location.
+
+        Call with no arguments for an overview. Check here before recording
+        facts about something new, so you add to the existing entity rather
+        than creating a duplicate under a slightly different name.
+
+        Args:
+            kind: npc, pc, monster, location, item, quest, faction or lore.
+            query: Part of a name, alias or anything said about it.
+            in_play_only: Only things the table has interacted with, not everything from the book.
+        """
+        rows = world.list(kind=kind, q=query, in_play=in_play_only)
+        if not rows:
+            return "Nothing matches."
+        return _json([
+            {k: r[k] for k in ("kind", "name", "aliases", "current", "headline")} for r in rows[:200]
+        ])
+
+    def lookup(name: str, as_of_session: int | None = None) -> str:
+        """Everything known about a person, creature, place, item or quest: true now, true before, and possible.
+
+        Matches names and aliases ("the hag", "the burgomaster"), then partial
+        names, then what's been said about things. Each fact shows the
+        sessions it held for (0 = before play, e.g. "3-7" or "5-" for still
+        true) and its source (a book page, a session, chat). Book material is
+        the starting state; facts from play supersede it.
 
         Args:
             name: A name, title or description, e.g. "Morgantha" or "the windmill hag".
+            as_of_session: See the world as it was at the end of this session instead of now.
         """
-        book = store.lookup_ref(campaign, name)
-        names = {name.lower()} | {n.lower() for b in book for n in [b["name"], *b["aliases"]]}
-        state = [
-            {k: e[k] for k in ("kind", "name", "status", "summary", "data")}
-            for e in store.find_entities(campaign)
-            if e["name"].lower() in names
-        ]
-        if not book and not state:
-            return "No match in the catalog or campaign state. Try search_reference."
-        for b in book:
-            b.pop("id", None)
-            b.pop("source_id", None)
-        return _json({"book": book, "campaign": state})
+        hits = world.lookup(name, as_of=as_of_session)
+        return _json(hits) if hits else "No match. Try find_entities or search_reference."
 
-    # -- campaign state ------------------------------------------------------
+    def timeline(name: str) -> str:
+        """How one entity changed session by session: facts beginning and ending, and the events it was in.
+
+        Args:
+            name: Name or alias.
+        """
+        e = world.resolve(name)
+        if e is None or world.view(e["id"]) is None:
+            return f"No entity called {name!r}."
+        return _json({"name": e["name"], "timeline": world.timeline(e["id"])})
 
     def list_sessions() -> str:
-        """List played sessions with their summaries, oldest first."""
+        """List played sessions with their recaps, oldest first."""
         return _json(store.sessions(campaign))
 
-    def find_entities(kind: str | None = None, name: str | None = None, status: str | None = None) -> str:
-        """Look up tracked campaign state: NPCs, quests, locations, items, factions and so on.
-
-        Call with no arguments for an overview of everything tracked. Check
-        here before creating an entity so you update the existing one rather
-        than making a duplicate under a slightly different name.
-
-        Args:
-            kind: One of npc, pc, location, quest, item, faction, monster, lore.
-            name: Substring of the name or summary.
-            status: Exact status, e.g. "active", "completed", "dead".
-        """
-        rows = store.find_entities(campaign, kind=kind, name=name, status=status)
-        if not rows:
-            return "Nothing tracked matches."
-        return _json(
-            [{k: r[k] for k in ("id", "kind", "name", "status", "summary")} for r in rows]
-        )
-
-    def get_entity(kind: str, name: str) -> str:
-        """Full record for one entity: summary, structured data, and how it has changed over sessions.
-
-        Args:
-            kind: Entity kind.
-            name: Exact entity name.
-        """
-        e = store.get_entity(campaign, kind, name)
-        if e is None:
-            return f"No {kind} named {name!r}."
-        history = store.entity_history(e["id"])
-        e["history"] = [
-            {"session": h["session"], "reason": h["reason"], "status": h["snapshot"]["status"]}
-            for h in history
-            if h["reason"]
-        ]
-        wanted = e["name"].lower()
-        e["book"] = [
-            b for b in store.lookup_ref(campaign, e["name"])
-            if b["name"].lower() == wanted or wanted in (a.lower() for a in b["aliases"])
-        ]
-        return _json(e)
-
     def recent_journal(session: int | None = None, limit: int = 40) -> str:
-        """Read the campaign journal: the ordered log of what has happened.
+        """Read the campaign journal: the ordered log of what happened.
 
         Args:
             session: Only events from this session number.
             limit: Most recent N events.
         """
-        rows = store.events(campaign, session_number=session, limit=limit)
+        rows = world.events(session=session, limit=limit)
         return _json(rows) if rows else "The journal is empty."
 
-    def record_entity(
-        kind: str,
-        name: str,
-        reason: str,
-        status: str | None = None,
-        summary: str | None = None,
-        data: dict[str, Any] | None = None,
-        party_knows: bool | None = None,
+    def record_fact(
+        entity: str,
+        statement: str,
+        kind: str | None = None,
+        attribute: str | None = None,
+        value: str | None = None,
+        aliases: list[str] | None = None,
+        party_knows: bool = True,
+        modality: str = "fact",
     ) -> str:
-        """Create or update a tracked entity. Only the fields you pass change.
+        """Record something true about a person, place or thing, from the current session on.
 
-        Write `summary` as the current truth in 1-3 sentences (rewrite it, don't
-        append). Put structured detail in `data`, which merges key by key
-        (a null value deletes a key). Useful keys: for quests "giver",
-        "objectives", "reward", "location"; for NPCs "disposition", "location",
-        "wants", "secrets"; for items "holder", "properties".
+        Write `statement` as a standalone sentence ("Ireena is staying at the
+        Blue Water Inn"). For a property that has one value at a time, also
+        give `attribute` and `value`: recording a new value ends the old one,
+        which stays in the history. Common attributes: status (alive, dead,
+        missing, active, completed, failed), location, holder (who has an
+        item), disposition (toward the party), leader, allegiance, condition.
+        Leave `attribute` out for everything else; use end_fact when such a
+        statement stops being true.
 
         Args:
-            kind: One of npc, pc, location, quest, item, faction, monster, lore.
-            name: Canonical name. Reuse the existing name when updating.
-            reason: Why this changed, e.g. "party accepted the quest from Ismark". Shown in history.
-            status: Short state, e.g. "active", "completed", "failed", "alive", "dead", "missing".
-            summary: Current 1-3 sentence description.
-            data: Structured fields to merge.
-            party_knows: False for things the players have not discovered yet.
+            entity: Name or alias of the entity. Created if new, in which case `kind` is required.
+            statement: The fact as a sentence.
+            kind: npc, pc, monster, location, item, quest, faction or lore. Needed only for new entities.
+            attribute: Single-valued property this sets, if any.
+            value: Short value for the attribute, e.g. "dead" or "Vallaki".
+            aliases: Other names this entity goes by, to remember.
+            party_knows: False if this is true but the party hasn't learned it.
+            modality: "fact", or "rumor" for unconfirmed claims, or "possible" for plans and threats that haven't happened.
         """
-        e = store.upsert_entity(
-            campaign,
-            kind,
-            name,
-            status=status,
-            summary=summary,
-            data=data,
-            party_knows=party_knows,
-            session_id=ctx.session_id,
-            reason=reason,
-        )
-        return f"Saved {e['kind']} {e['name']!r} (id {e['id']}, status {e['status'] or '-'})."
+        e = world.resolve(entity, kind)
+        if e is None:
+            if not kind:
+                return f"No entity called {entity!r}. Check find_entities, or pass kind to create it."
+            e = world.ensure_entity(entity, kind)
+        if modality not in ("fact", "rumor", "possible"):
+            return "modality must be fact, rumor or possible."
+        run = ctx.run()
+        for alias in aliases or []:
+            world.add_alias(e["id"], alias, run)
+        r = world.record(e["id"], statement, run, ctx.clock, attribute=attribute, value=value,
+                         modality=modality, party_knows=party_knows)
+        ended = f"; ended the previous {attribute}" if r["ended"] else ""
+        return f"Recorded fact {r['id']} about {e['name']} as of session {ctx.clock}{ended}."
+
+    def end_fact(fact_id: int) -> str:
+        """Mark a fact as no longer true as of the current session. It stays in the history.
+
+        Args:
+            fact_id: The fact_id shown by lookup.
+        """
+        ok = world.end_fact(fact_id, ctx.run(), ctx.clock)
+        return f"Ended fact {fact_id} at session {ctx.clock}." if ok else f"No open fact {fact_id}."
+
+    def party_learned(fact_id: int) -> str:
+        """Note that the party has now learned an existing fact (for example a secret from the book).
+
+        Args:
+            fact_id: The fact_id shown by lookup.
+        """
+        ok = world.party_learned(fact_id, ctx.clock)
+        return f"The party knows fact {fact_id} as of session {ctx.clock}." if ok else "Nothing to change."
 
     def add_journal_entry(text: str, entities: list[str] | None = None) -> str:
-        """Append an event to the campaign journal, e.g. "The party killed the hag Morgantha and freed the children."
+        """Append an event to the journal, e.g. "The party killed Morgantha and freed the children."
 
-        One entry per meaningful event, in the order they happened.
+        One entry per meaningful event, in the order they happened. Record
+        the resulting changes (Morgantha's status, the children's location)
+        with record_fact as well.
 
         Args:
             text: What happened, in past tense, naming who was involved.
-            entities: Names of tracked entities involved.
+            entities: Names or aliases of the entities involved.
         """
-        ids = []
-        for name in entities or []:
-            matches = [e for e in store.find_entities(campaign, name=name) if e["name"].lower() == name.lower()]
-            ids += [m["id"] for m in matches]
-        event_id = store.add_event(campaign, text, session_id=ctx.session_id, entity_ids=ids)
-        return f"Logged event {event_id}."
+        ids = [e["id"] for e in (world.resolve(n) for n in entities or []) if e]
+        event_id = world.add_event(text, ctx.clock, ctx.run(), ids)
+        return f"Logged event {event_id} in session {ctx.clock}."
 
     # -- characters ----------------------------------------------------------
 
@@ -295,15 +318,14 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         list_sources,
         outline,
         lookup,
+        find_entities,
+        timeline,
         search_reference,
         read_reference,
         read_pages,
         list_sessions,
-        find_entities,
-        get_entity,
         recent_journal,
         get_character,
     ]
-    writers = [record_entity, add_journal_entry, update_character]
+    writers = [record_fact, end_fact, party_learned, add_journal_entry, update_character]
     return readers + (writers if writable else [])
-

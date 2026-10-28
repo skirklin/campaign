@@ -66,46 +66,10 @@ def test_search_and_spoiler_filter(store, tmp_path):
     assert store.search(dm, "Rose's \"gate\" (AND)")
 
 
-def test_entity_merge_history_and_revert(store):
-    c = store.create_campaign("Test", "dm")
-    store.upsert_entity(c, "npc", "Ireena", status="alive", data={"location": "Barovia"}, reason="met")
-    s1 = store.upsert_session(c, 1)
-    store.upsert_entity(c, "npc", "Ireena", data={"location": "Vallaki", "trust": "high"}, session_id=s1, reason="escorted")
-    store.upsert_entity(c, "quest", "Escort Ireena", status="active", session_id=s1, reason="accepted")
-    store.add_event(c, "Escorted Ireena to Vallaki", session_id=s1)
-    e = store.get_entity(c, "npc", "ireena")
-    assert e["data"] == {"location": "Vallaki", "trust": "high"} and e["status"] == "alive"
-    assert store.revert_session(c, 1) == {"restored": 1, "deleted": 1, "events": 1}
-    assert store.get_entity(c, "npc", "Ireena")["data"] == {"location": "Barovia"}
-    assert store.get_entity(c, "quest", "Escort Ireena") is None
-
-
-def test_player_campaign_hides_undiscovered_entities(store):
-    c = store.create_campaign("P", "player")
-    store.upsert_entity(c, "npc", "Secret villain", party_knows=False)
-    store.upsert_entity(c, "npc", "Innkeeper")
-    assert [e["name"] for e in store.find_entities(c)] == ["Innkeeper"]
-    assert store.get_entity(c, "npc", "Secret villain") is None
-
-
-def test_tools_round_trip(store):
-    store.create_campaign("Tools", "dm")
-    t = tools(store, "tools")
-    assert "Saved quest" in t["record_entity"](
-        kind="quest", name="Find the Tome", reason="given by Kolyan", status="active",
-        data={"reward": "500 gp"},
-    )
-    t["add_journal_entry"](text="Accepted the quest", entities=["Find the Tome"])
-    entity = json.loads(t["get_entity"](kind="quest", name="Find the Tome"))
-    assert entity["data"]["reward"] == "500 gp"
-    assert entity["history"][0]["reason"] == "given by Kolyan"
-    assert json.loads(t["recent_journal"]())[0]["entity_ids"] == [entity["id"]]
-
-
 def test_read_only_tools_exclude_writers(store):
     store.create_campaign("RO", "dm")
     names = {f.__name__ for f in build_tools(ToolContext(store, store.campaign("ro")), writable=False)}
-    assert "record_entity" not in names and "search_reference" in names
+    assert "record_fact" not in names and "search_reference" in names and "lookup" in names
 
 
 def test_character_sheet_derived_and_patch(store):

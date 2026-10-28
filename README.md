@@ -38,9 +38,13 @@ pulling, switching branches, reinstalling or re-cloning never touches it:
   be downloaded again from the web UI. When the chunker improves,
   `campaign reindex` rebuilds chunks from the originals. The web server does
   this at startup too. Neither makes any API calls.
-- **Schema changes are migrations.** The schema is versioned
-  (`PRAGMA user_version`). Opening a database with a newer build snapshots it
-  to `backups/`, then upgrades it in place, one transaction per step.
+- **Schema changes are migrations or a clean start.** The schema is
+  versioned (`PRAGMA user_version`). Small changes are migrations: opening
+  the database with a newer build snapshots it to `backups/`, then upgrades
+  it in place. Big changes start clean instead. The old database is moved to
+  `backups/`, and the new one keeps everything that isn't world state:
+  campaigns, character sheets, reference uploads (re-read from the stored
+  originals) and the digest cache. Sessions and world state start empty.
 - `campaign info` and the Campaigns page show where the data is.
 
 ## Web UI
@@ -62,9 +66,16 @@ uv run campaign web            # http://127.0.0.1:8765
     recording. Each past session has its recap and a **Revert** button.
   - **Reference**: upload module PDFs and notes, mark them DM-only, and
     search the text directly.
-  - **World state**: tracked NPCs, quests, locations and items, filterable
-    by kind and status.
-  - **Journal**: events grouped by session.
+  - **World state**: every person, place, item and quest, from the book and
+    from play, with their current status and location. Filter it to what
+    the table has touched. Each entry opens to a page with:
+    - what's true now, what's no longer true, and rumors, each with its
+      session range and source;
+    - an "as of session N" slider;
+    - its events;
+    - a synthesized summary;
+    - forms to add or end facts by hand, and to merge duplicates.
+  - **Journal**: events by session, linked to the entities involved.
 
 There's no login. By default it listens only on this machine. Pass
 `--host 0.0.0.0` to reach it from a phone on your network, and put it
@@ -114,9 +125,9 @@ The digest turns a module into two things the assistant can use:
   system prompt. The `outline` tool drills into deeper sections.
 - **A catalog** of NPCs, monsters, locations, items, quests, factions and
   lore. Each entry has aliases ("the hag", "the burgomaster"), pages, key
-  facts with exact numbers, and a stat block where there is one. The
-  `lookup` tool finds entries by any name. Session ingest gets the full name
-  list, so it can match "Straud" to Strahd von Zarovich.
+  facts with exact numbers, and a stat block where there is one. The catalog
+  becomes the world model's starting state (session 0; see
+  [The world model](#the-world-model)).
 
 See [How the digest works](#how-the-digest-works) for the caching rules.
 
@@ -135,18 +146,16 @@ Add `--read-only` to expose only the lookup tools.
 
 ```
  PDF / notes ──chunk by heading──▶ chunks + FTS5 index ◀── search_reference / read_reference
- transcript ──Claude + tools────▶ entities (+ revisions), journal, session summary
+ digest ─────apply as session 0──▶ world model: entities, aliases, facts over sessions, events
+ transcript ──Claude + tools────▶ the same world model, dated to that session; session recap
  chat ────────Claude + tools────▶ same tools; reads and writes
  character sheet (JSON, validated) ◀── update_character / `campaign char …`
 ```
 
 - **Storage** (`db.py`): one SQLite file. Reference text is split into
   chunks at headings, so a stat block or a room stays together. The chunks
-  are indexed with FTS5 (BM25). Campaign state is held as *entities* (npc,
-  quest, location, item, faction, …), each with a status, a short summary
-  and free-form JSON `data`, plus an append-only *journal*. Every entity
-  write is saved as a revision tagged with its session, which is what makes
-  `revert` possible.
+  are indexed with FTS5 (BM25). Campaign state is the world model
+  (`world.py`, below).
 - **Retrieval** is agentic and doesn't use embeddings. Claude searches, then
   reads the full chunk or page before quoting numbers. Proper nouns and game
   terms dominate D&D questions, and keyword search handles those well.
@@ -156,11 +165,47 @@ Add `--read-only` to expose only the lookup tools.
   to known entities, records what changed, and writes a recap. Sheets are
   updated only when the transcript states a change outright.
 - **Spoiler safety** is enforced in the database layer, not just in the
-  prompt. In player campaigns, `dm_only` sources and entities with
-  `party_knows=false` are filtered out of every query.
+  prompt. In player campaigns, `dm_only` sources are hidden, and so is every
+  fact the party hadn't learned by the session in question.
 - **Model**: Claude Opus 5.5 with adaptive thinking (`CAMPAIGN_MODEL` to
   override), with server-side refusal fallback enabled. Prompt caching keeps
   the repeated transcript cheap across the ingest tool loop.
+
+## The world model
+
+All sources feed one model of the world (`world.py`):
+
+- **Entities** are identity only: a kind, a canonical name and aliases. The
+  book, transcripts and chat all attach to the same entity, so "Morgantha",
+  "the windmill hag" and "the baker" are one record.
+- **Facts** are true over a range of sessions, according to a source.
+  Session numbers are the clock, and session 0 is the world before play,
+  which is what the book describes.
+  - A fact with an **attribute** (status, location, holder, disposition,
+    leader, allegiance, condition…) fills a single-valued slot. Recording a
+    new value ends the old one at that session.
+  - A fact without one is a statement that holds until it's ended.
+  - Nothing is overwritten, so the assistant, the UI and the CLI
+    (`campaign entity NAME --as-of 4`) can show the world as it was at any
+    session, and where play diverged from the book.
+  - Facts can also be **rumors** or **possibilities** rather than
+    established facts.
+- **Knowledge is per fact.** Each fact records since when the party has
+  known it, so a player campaign can know Morgantha runs a bakery long
+  before learning she's a hag.
+- **Events** are the journal: what happened in which session, linked to the
+  entities involved.
+- **Runs** record who wrote what: a digest being applied, a session ingest,
+  a chat, a manual edit. Undo works per run. Reverting a session removes
+  exactly what its ingest recorded and reopens the facts it ended.
+  Re-ingesting a session replaces the previous ingest of it.
+- **Re-applying the book is safe.** It happens when a digest changes and is
+  skipped when nothing did. Entities are matched by name and alias, so facts
+  from play stay attached, and a book fact the table ended or learned keeps
+  that history.
+- **Summaries are synthesized** from all of an entity's facts and events,
+  and cached under a hash of them, so they're rewritten only when something
+  changed.
 
 ## How the digest works
 
@@ -204,9 +249,10 @@ also free.
 ## Status and next steps
 
 Working and tested (`uv run pytest`): storage, PDF/Markdown chunking and
-section trees, search, spoiler filtering, revisions and revert, character
+section trees, search, the world model (supersession, as-of queries,
+per-fact spoilers, run-based revert, merges, book re-application), character
 sheets, CLI, MCP tool registration, the web API including background ingest
-and digest jobs, schema migration from the first release, and the agent loop
+and digest jobs, the clean-start path for old databases, and the agent loop
 and digest cache rules against a scripted fake API. The web UI was also exercised in
 headless Chromium at desktop and phone widths.
 
@@ -219,8 +265,7 @@ here). Likely next steps:
 - **Speaker diarization** for recordings, so the transcript says who spoke.
 - **Ask from the web UI**: a chat box on the campaign page, using the same
   agent as `campaign chat`.
-- **Editing world state by hand** in the web UI. Today it's read-only there;
-  corrections go through chat or a revert.
+- **In-game dates** as a finer clock than session numbers.
 - **Review before commit** for ingest: show proposed changes and approve
   them, as an alternative to ingest-then-revert.
 - **Scanned PDFs** need OCR. Text-layer PDFs work as they are.

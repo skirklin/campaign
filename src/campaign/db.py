@@ -1,14 +1,14 @@
-"""SQLite storage for campaigns, reference material, campaign state and characters.
+"""SQLite storage: campaigns, reference material, the digest cache, sessions and characters.
 
-One database file holds every campaign. Reference text is chunked and indexed
-with FTS5 so the agent can search it; campaign state is a set of entities
-(NPCs, quests, locations, ...) plus an append-only journal of events. Every
-entity write keeps a revision so a bad session ingest can be inspected and
-rolled back.
+The world model (entities, facts, events) lives in world.py on the same
+database. Everything is in one file under the data directory (config.py).
 
-The schema is versioned with `PRAGMA user_version`. Opening a database runs
-any pending migrations, after snapshotting the file to `backups/`, so data
-uploaded with an older build keeps working with a newer one.
+The schema is versioned with `PRAGMA user_version`. Small changes are
+migrations appended to MIGRATIONS. A database older than BASELINE is
+retired instead: it's moved to backups/ and a fresh one is started,
+carrying over what isn't world state and is costly to recreate (campaigns,
+character sheets, reference uploads re-read from their stored originals,
+and the digest cache).
 """
 
 from __future__ import annotations
@@ -25,8 +25,8 @@ from typing import Any, Callable, Iterable
 from .blobs import BlobStore
 from .ingest import CHUNKER_VERSION, ParsedDoc
 
-SCHEMA_V1 = """
-CREATE TABLE IF NOT EXISTS campaigns (
+SCHEMA = """
+CREATE TABLE campaigns (
     id          INTEGER PRIMARY KEY,
     slug        TEXT NOT NULL UNIQUE,
     name        TEXT NOT NULL,
@@ -35,109 +35,21 @@ CREATE TABLE IF NOT EXISTS campaigns (
     created_at  TEXT NOT NULL
 );
 
--- A document the campaign draws on: a published module, homebrew notes,
--- or a session transcript. `dm_only` sources are hidden from the agent in
--- player campaigns so it can't spoil the module.
-CREATE TABLE IF NOT EXISTS sources (
-    id           INTEGER PRIMARY KEY,
-    campaign_id  INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
-    title        TEXT NOT NULL,
-    kind         TEXT NOT NULL CHECK (kind IN ('module', 'notes', 'transcript')),
-    path         TEXT,
-    dm_only      INTEGER NOT NULL DEFAULT 0,
-    created_at   TEXT NOT NULL,
+-- A document the campaign draws on: a published module, homebrew notes, or
+-- a session transcript. `dm_only` sources are hidden in player campaigns.
+CREATE TABLE sources (
+    id               INTEGER PRIMARY KEY,
+    campaign_id      INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    title            TEXT NOT NULL,
+    kind             TEXT NOT NULL CHECK (kind IN ('module', 'notes', 'transcript')),
+    path             TEXT,
+    dm_only          INTEGER NOT NULL DEFAULT 0,
+    blob             TEXT,                 -- SHA-256 of the original upload
+    filename         TEXT,
+    chunker_version  INTEGER NOT NULL DEFAULT 1,
+    created_at       TEXT NOT NULL,
     UNIQUE (campaign_id, title)
 );
-
-CREATE TABLE IF NOT EXISTS chunks (
-    id         INTEGER PRIMARY KEY,
-    source_id  INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
-    seq        INTEGER NOT NULL,
-    page       INTEGER,
-    heading    TEXT NOT NULL DEFAULT '',
-    text       TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS chunks_source ON chunks(source_id, seq);
-
-CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
-    heading, text, content='chunks', content_rowid='id', tokenize='porter unicode61'
-);
-CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
-    INSERT INTO chunks_fts(rowid, heading, text) VALUES (new.id, new.heading, new.text);
-END;
-CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
-    INSERT INTO chunks_fts(chunks_fts, rowid, heading, text)
-    VALUES ('delete', old.id, old.heading, old.text);
-END;
-
-CREATE TABLE IF NOT EXISTS sessions (
-    id           INTEGER PRIMARY KEY,
-    campaign_id  INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
-    number       INTEGER NOT NULL,
-    played_on    TEXT,
-    title        TEXT NOT NULL DEFAULT '',
-    summary      TEXT NOT NULL DEFAULT '',
-    source_id    INTEGER REFERENCES sources(id) ON DELETE SET NULL,
-    UNIQUE (campaign_id, number)
-);
-
--- Anything in the world worth tracking. `data` holds kind-specific detail
--- (quest objectives and rewards, NPC disposition, ...) as JSON.
-CREATE TABLE IF NOT EXISTS entities (
-    id           INTEGER PRIMARY KEY,
-    campaign_id  INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
-    kind         TEXT NOT NULL,
-    name         TEXT NOT NULL,
-    status       TEXT NOT NULL DEFAULT '',
-    summary      TEXT NOT NULL DEFAULT '',
-    data         TEXT NOT NULL DEFAULT '{}',
-    party_knows  INTEGER NOT NULL DEFAULT 1,
-    updated_at   TEXT NOT NULL,
-    UNIQUE (campaign_id, kind, name)
-);
-
-CREATE TABLE IF NOT EXISTS entity_revisions (
-    id          INTEGER PRIMARY KEY,
-    entity_id   INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
-    session_id  INTEGER REFERENCES sessions(id) ON DELETE SET NULL,
-    snapshot    TEXT NOT NULL,
-    reason      TEXT NOT NULL DEFAULT '',
-    created_at  TEXT NOT NULL
-);
-
--- The campaign journal: what happened, in order.
-CREATE TABLE IF NOT EXISTS events (
-    id           INTEGER PRIMARY KEY,
-    campaign_id  INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
-    session_id   INTEGER REFERENCES sessions(id) ON DELETE SET NULL,
-    text         TEXT NOT NULL,
-    entity_ids   TEXT NOT NULL DEFAULT '[]',
-    created_at   TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS characters (
-    id           INTEGER PRIMARY KEY,
-    campaign_id  INTEGER REFERENCES campaigns(id) ON DELETE SET NULL,
-    name         TEXT NOT NULL UNIQUE,
-    sheet        TEXT NOT NULL,
-    updated_at   TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS character_log (
-    id            INTEGER PRIMARY KEY,
-    character_id  INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
-    change        TEXT NOT NULL,
-    reason        TEXT NOT NULL DEFAULT '',
-    created_at    TEXT NOT NULL
-);
-"""
-
-
-# v2: keep originals, a section tree per source, and the digest.
-SCHEMA_V2 = """
-ALTER TABLE sources ADD COLUMN blob TEXT;          -- SHA-256 of the original upload
-ALTER TABLE sources ADD COLUMN filename TEXT;
-ALTER TABLE sources ADD COLUMN chunker_version INTEGER NOT NULL DEFAULT 1;
 
 -- The document's own structure: outline entries, Markdown headings, or page ranges.
 CREATE TABLE nodes (
@@ -151,7 +63,26 @@ CREATE TABLE nodes (
     page_end    INTEGER
 );
 CREATE INDEX nodes_source ON nodes(source_id, seq);
-ALTER TABLE chunks ADD COLUMN node_id INTEGER REFERENCES nodes(id) ON DELETE SET NULL;
+
+CREATE TABLE chunks (
+    id         INTEGER PRIMARY KEY,
+    source_id  INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    node_id    INTEGER REFERENCES nodes(id) ON DELETE SET NULL,
+    seq        INTEGER NOT NULL,
+    page       INTEGER,
+    heading    TEXT NOT NULL DEFAULT '',
+    text       TEXT NOT NULL
+);
+CREATE INDEX chunks_source ON chunks(source_id, seq);
+CREATE VIRTUAL TABLE chunks_fts USING fts5(
+    heading, text, content='chunks', content_rowid='id', tokenize='porter unicode61'
+);
+CREATE TRIGGER chunks_ai AFTER INSERT ON chunks BEGIN
+    INSERT INTO chunks_fts(rowid, heading, text) VALUES (new.id, new.heading, new.text);
+END;
+CREATE TRIGGER chunks_ad AFTER DELETE ON chunks BEGIN
+    INSERT INTO chunks_fts(chunks_fts, rowid, heading, text) VALUES ('delete', old.id, old.heading, old.text);
+END;
 
 -- Digest outputs, addressed by a hash of everything that went into them.
 -- Not tied to a source: re-uploading or re-chunking a document, or loading
@@ -166,8 +97,7 @@ CREATE TABLE digests (
     created_at     TEXT NOT NULL
 );
 
--- The digest tree for a source as last planned: which node maps to which
--- digest key. Rebuilt on every plan; cheap, since outputs live in `digests`.
+-- The digest tree for a source as last planned: which node maps to which key.
 CREATE TABLE digest_nodes (
     id          INTEGER PRIMARY KEY,
     source_id   INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
@@ -184,38 +114,134 @@ CREATE TABLE digest_nodes (
 );
 CREATE INDEX digest_nodes_source ON digest_nodes(source_id, seq);
 
--- What the book says about each NPC, monster, place, item and quest,
--- materialized from the root digest. Campaign state stays in `entities`.
-CREATE TABLE ref_entities (
-    id          INTEGER PRIMARY KEY,
-    source_id   INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
-    kind        TEXT NOT NULL,
-    name        TEXT NOT NULL,
-    aliases     TEXT NOT NULL DEFAULT '[]',
-    summary     TEXT NOT NULL DEFAULT '',
-    pages       TEXT NOT NULL DEFAULT '[]',
-    facts       TEXT NOT NULL DEFAULT '[]',
-    stat_block  TEXT
+-- Sessions are the world's clock: facts are true from one session number
+-- to another. Session 0 is the state of the world before play begins.
+CREATE TABLE sessions (
+    id           INTEGER PRIMARY KEY,
+    campaign_id  INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    number       INTEGER NOT NULL,
+    played_on    TEXT,
+    title        TEXT NOT NULL DEFAULT '',
+    summary      TEXT NOT NULL DEFAULT '',
+    source_id    INTEGER REFERENCES sources(id) ON DELETE SET NULL,
+    UNIQUE (campaign_id, number)
 );
-CREATE INDEX ref_entities_source ON ref_entities(source_id);
-CREATE VIRTUAL TABLE ref_entities_fts USING fts5(
-    name, aliases, summary, content='ref_entities', content_rowid='id', tokenize='porter unicode61'
+
+-- Everything that writes to the world model does so as a run: a digest
+-- being applied, a session ingest, a chat, a manual edit. Deleting a run
+-- undoes it (see the triggers and cascades below).
+CREATE TABLE runs (
+    id           INTEGER PRIMARY KEY,
+    campaign_id  INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    kind         TEXT NOT NULL CHECK (kind IN ('book', 'ingest', 'chat', 'manual')),
+    session      INTEGER,
+    source_id    INTEGER REFERENCES sources(id) ON DELETE CASCADE,
+    input_key    TEXT,                     -- for book runs: the digest that was applied
+    label        TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL
 );
-CREATE TRIGGER ref_entities_ai AFTER INSERT ON ref_entities BEGIN
-    INSERT INTO ref_entities_fts(rowid, name, aliases, summary) VALUES (new.id, new.name, new.aliases, new.summary);
+
+-- Identity only: one row per person, place or thing, whichever source
+-- mentions it. What's true about it lives in facts.
+CREATE TABLE entities (
+    id           INTEGER PRIMARY KEY,
+    campaign_id  INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    kind         TEXT NOT NULL,
+    name         TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    UNIQUE (campaign_id, kind, name)
+);
+
+CREATE TABLE aliases (
+    id         INTEGER PRIMARY KEY,
+    entity_id  INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    alias      TEXT NOT NULL COLLATE NOCASE,
+    run_id     INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    UNIQUE (entity_id, alias)
+);
+
+-- A fact is true over a range of sessions, according to a source.
+-- With an `attribute` it fills a single-valued slot (status, location,
+-- holder, ...): recording a new value ends the old one, which stays as
+-- history. Without one it's a statement that holds until explicitly ended.
+CREATE TABLE facts (
+    id                INTEGER PRIMARY KEY,
+    campaign_id       INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    entity_id         INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    attribute         TEXT,
+    value             TEXT,
+    statement         TEXT NOT NULL,
+    modality          TEXT NOT NULL DEFAULT 'fact' CHECK (modality IN ('fact', 'possible', 'rumor')),
+    valid_from        INTEGER NOT NULL,      -- session it became true; 0 = before play
+    valid_to          INTEGER,               -- session it stopped being true; NULL = still true
+    party_knows_from  INTEGER,               -- session the party learned it; NULL = they don't know
+    source_id         INTEGER REFERENCES sources(id) ON DELETE CASCADE,
+    pages             TEXT NOT NULL DEFAULT '[]',
+    run_id            INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    closed_by_run     INTEGER REFERENCES runs(id) ON DELETE SET NULL,
+    created_at        TEXT NOT NULL
+);
+CREATE INDEX facts_entity ON facts(entity_id, attribute, valid_to);
+CREATE VIRTUAL TABLE facts_fts USING fts5(
+    statement, content='facts', content_rowid='id', tokenize='porter unicode61'
+);
+CREATE TRIGGER facts_ai AFTER INSERT ON facts BEGIN
+    INSERT INTO facts_fts(rowid, statement) VALUES (new.id, new.statement);
 END;
-CREATE TRIGGER ref_entities_ad AFTER DELETE ON ref_entities BEGIN
-    INSERT INTO ref_entities_fts(ref_entities_fts, rowid, name, aliases, summary)
-    VALUES ('delete', old.id, old.name, old.aliases, old.summary);
+CREATE TRIGGER facts_ad AFTER DELETE ON facts BEGIN
+    INSERT INTO facts_fts(facts_fts, rowid, statement) VALUES ('delete', old.id, old.statement);
 END;
+-- Undoing a run reopens the facts it ended.
+CREATE TRIGGER runs_bd BEFORE DELETE ON runs BEGIN
+    UPDATE facts SET valid_to = NULL, closed_by_run = NULL WHERE closed_by_run = old.id;
+END;
+
+-- What happened, in order.
+CREATE TABLE events (
+    id           INTEGER PRIMARY KEY,
+    campaign_id  INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    session      INTEGER NOT NULL,
+    text         TEXT NOT NULL,
+    run_id       INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    created_at   TEXT NOT NULL
+);
+CREATE TABLE event_entities (
+    event_id   INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+    entity_id  INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    PRIMARY KEY (event_id, entity_id)
+);
+
+-- Synthesized entity summaries, keyed by a hash of the facts they were written from.
+CREATE TABLE summaries (
+    key         TEXT PRIMARY KEY,
+    text        TEXT NOT NULL,
+    created_at  TEXT NOT NULL
+);
+
+CREATE TABLE characters (
+    id           INTEGER PRIMARY KEY,
+    campaign_id  INTEGER REFERENCES campaigns(id) ON DELETE SET NULL,
+    name         TEXT NOT NULL UNIQUE,
+    sheet        TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+);
+
+CREATE TABLE character_log (
+    id            INTEGER PRIMARY KEY,
+    character_id  INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+    change        TEXT NOT NULL,
+    reason        TEXT NOT NULL DEFAULT '',
+    created_at    TEXT NOT NULL
+);
 """
 
+# Databases older than this are retired and replaced, not migrated.
+BASELINE = 3
 
-# Append only. Each step runs in its own transaction, then user_version is
-# set to its number; a database is migrated by running every later step.
+# Append only, for changes small enough to migrate. Each step runs in its
+# own transaction and then sets user_version to its number.
 MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
-    (1, SCHEMA_V1),
-    (2, SCHEMA_V2),
+    (BASELINE, SCHEMA),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 
@@ -264,14 +290,18 @@ class Store:
             else:
                 blob_dir = Path(self.path).parent / "blobs"
         self.blobs = BlobStore(Path(blob_dir))
+        self._carry_over: Path | None = None
+        self._connect()
+        self._migrate()
+
+    def _connect(self) -> None:
         self.conn = sqlite3.connect(self.path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.execute("PRAGMA busy_timeout = 5000")
-        if not memory:
+        if self.path != ":memory:":
             # Lets the web UI read while a background job is writing.
             self.conn.execute("PRAGMA journal_mode = WAL")
-        self._migrate()
 
     @property
     def schema_version(self) -> int:
@@ -279,13 +309,16 @@ class Store:
 
     def _migrate(self) -> None:
         current = self.schema_version
+        has_tables = self.conn.execute(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table'"
+        ).fetchone()[0]
+        if has_tables and current < BASELINE:
+            self._retire()
+            current = 0
         pending = [(v, step) for v, step in MIGRATIONS if v > current]
         if not pending:
             return
-        has_data = self.conn.execute(
-            "SELECT count(*) FROM sqlite_master WHERE type = 'table'"
-        ).fetchone()[0]
-        if has_data and self.path != ":memory:":
+        if current and self.path != ":memory:":
             self.backup(f"pre-v{pending[-1][0]}")
         for version, step in pending:
             try:
@@ -301,6 +334,53 @@ class Store:
             except Exception:
                 self.conn.rollback()
                 raise
+        if self._carry_over:
+            self._restore_from(self._carry_over)
+
+    def _retire(self) -> None:
+        """Move a pre-baseline database to backups/ and start an empty one in its place."""
+        self._carry_over = self.backup("retired")
+        self.conn.close()
+        for suffix in ("", "-wal", "-shm"):
+            Path(self.path + suffix).unlink(missing_ok=True)
+        self._connect()
+
+    def _restore_from(self, old_db: Path) -> None:
+        """Bring back campaigns, character sheets, the digest cache and reference uploads.
+
+        World state, sessions and transcripts are not carried over. Reference
+        sources are re-read from their stored originals, which re-plans their
+        digests and re-applies the book's facts without any API calls.
+        """
+        self._carry_over = None
+        old = sqlite3.connect(old_db)
+        old.row_factory = sqlite3.Row
+        tables = {r[0] for r in old.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        with self.conn:
+            for r in old.execute("SELECT id, slug, name, role, notes, created_at FROM campaigns"):
+                self.conn.execute("INSERT INTO campaigns VALUES (?, ?, ?, ?, ?, ?)", tuple(r))
+            for r in old.execute("SELECT id, campaign_id, name, sheet, updated_at FROM characters"):
+                self.conn.execute("INSERT INTO characters VALUES (?, ?, ?, ?, ?)", tuple(r))
+            for r in old.execute("SELECT id, character_id, change, reason, created_at FROM character_log"):
+                self.conn.execute("INSERT INTO character_log VALUES (?, ?, ?, ?, ?)", tuple(r))
+            if "digests" in tables:
+                for r in old.execute("SELECT * FROM digests"):
+                    self.conn.execute("INSERT INTO digests VALUES (?, ?, ?, ?, ?, ?, ?)", tuple(r))
+        sources = []
+        if "blob" in {r[1] for r in old.execute("PRAGMA table_info(sources)")}:
+            sources = old.execute(
+                "SELECT s.*, c.slug FROM sources s JOIN campaigns c ON c.id = s.campaign_id"
+                " WHERE s.kind != 'transcript' AND s.blob IS NOT NULL ORDER BY s.id"
+            ).fetchall()
+        old.close()
+        from .library import add_reference  # library -> digest -> db
+
+        for src in sources:
+            if self.blobs.exists(src["blob"]):
+                add_reference(
+                    self, self.campaign(src["slug"]), self.blobs.get(src["blob"]),
+                    src["filename"] or f"{src['title']}.pdf", src["title"], src["kind"], bool(src["dm_only"]),
+                )
 
     def backup(self, label: str = "manual") -> Path:
         """Snapshot the database into backups/, keeping the 20 most recent."""
@@ -335,6 +415,12 @@ class Store:
         ).fetchone()
         if row is None:
             raise KeyError(f"no campaign {slug!r}")
+        return Campaign(**dict(row))
+
+    def campaign_by_id(self, campaign_id: int) -> Campaign:
+        row = self.conn.execute(
+            "SELECT id, slug, name, role, notes FROM campaigns WHERE id = ?", (campaign_id,)
+        ).fetchone()
         return Campaign(**dict(row))
 
     def campaigns(self) -> list[Campaign]:
@@ -549,10 +635,7 @@ class Store:
             " WHERE n.source_id = ?",
             (source_id,),
         ).fetchone()
-        entities = self.conn.execute(
-            "SELECT count(*) FROM ref_entities WHERE source_id = ?", (source_id,)
-        ).fetchone()[0]
-        return {**dict(row), "entities": entities}
+        return {**dict(row), "entities": len(self.source_catalog(source_id))}
 
     def digest_outline(self, source_id: int) -> list[dict[str, Any]]:
         """The digest tree with each node's summary (None until digested)."""
@@ -575,70 +658,14 @@ class Store:
         row = self.conn.execute("SELECT source_id FROM digest_nodes WHERE id = ?", (node_id,)).fetchone()
         return None if row is None else row["source_id"]
 
-    def replace_ref_entities(self, source_id: int, entities: list[dict[str, Any]]) -> None:
-        with self.conn:
-            self.conn.execute("DELETE FROM ref_entities WHERE source_id = ?", (source_id,))
-            self.conn.executemany(
-                "INSERT INTO ref_entities (source_id, kind, name, aliases, summary, pages, facts, stat_block)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                [
-                    (source_id, e["kind"], e["name"], json.dumps(e.get("aliases", [])), e.get("summary", ""),
-                     json.dumps(e.get("pages", [])), json.dumps(e.get("facts", [])),
-                     json.dumps(e["stat_block"]) if e.get("stat_block") else None)
-                    for e in entities
-                ],
-            )
-
-    @staticmethod
-    def _ref(row: sqlite3.Row) -> dict[str, Any]:
-        d = dict(row)
-        for k in ("aliases", "pages", "facts"):
-            d[k] = json.loads(d[k])
-        d["stat_block"] = json.loads(d["stat_block"]) if d["stat_block"] else None
-        return d
-
-    def ref_entities(
-        self, campaign: Campaign, source_id: int | None = None, kind: str | None = None,
-        q: str | None = None, limit: int = 1000,
-    ) -> list[dict[str, Any]]:
-        sql = (
-            "SELECT r.*, s.title AS source FROM ref_entities r JOIN sources s ON s.id = r.source_id"
-            f" WHERE {self._visible_sources_clause(campaign)}"
-        )
-        params: list[Any] = [campaign.id]
-        if source_id is not None:
-            sql += " AND r.source_id = ?"
-            params.append(source_id)
-        if kind:
-            sql += " AND r.kind = ?"
-            params.append(kind)
-        if q and (fq := fts_query(q)):
-            sql += " AND r.id IN (SELECT rowid FROM ref_entities_fts WHERE ref_entities_fts MATCH ?)"
-            params.append(fq)
-        sql += " ORDER BY r.kind, r.name LIMIT ?"
-        params.append(limit)
-        return [self._ref(r) for r in self.conn.execute(sql, params)]
-
-    def lookup_ref(self, campaign: Campaign, name: str, limit: int = 5) -> list[dict[str, Any]]:
-        """Reference entities called `name`, by canonical name or alias first, then by search."""
-        needle = name.strip().lower()
-        exact = [
-            e for e in self.ref_entities(campaign, q=name, limit=200)
-            if e["name"].lower() == needle or needle in (a.lower() for a in e["aliases"])
-        ]
-        if exact:
-            return exact[:limit]
-        q = fts_query(name)
-        if not q:
-            return []
-        rows = self.conn.execute(
-            "SELECT r.*, s.title AS source FROM ref_entities_fts f"
-            " JOIN ref_entities r ON r.id = f.rowid JOIN sources s ON s.id = r.source_id"
-            f" WHERE ref_entities_fts MATCH ? AND {self._visible_sources_clause(campaign)}"
-            " ORDER BY bm25(ref_entities_fts, 5.0, 3.0, 1.0) LIMIT ?",
-            (q, campaign.id, limit),
-        )
-        return [self._ref(r) for r in rows]
+    def source_catalog(self, source_id: int) -> list[dict[str, Any]]:
+        """The entities the digest found in a source, once its root is digested."""
+        row = self.conn.execute(
+            "SELECT d.output FROM digest_nodes n JOIN digests d ON d.key = n.digest_key"
+            " WHERE n.source_id = ? AND n.parent_id IS NULL",
+            (source_id,),
+        ).fetchone()
+        return json.loads(row["output"])["entities"] if row else []
 
     def source_overviews(self, campaign: Campaign) -> list[dict[str, Any]]:
         """Root and top-level summaries for each digested, visible source."""
@@ -697,215 +724,19 @@ class Store:
         )
         return [dict(r) for r in rows]
 
+    def current_session(self, campaign: Campaign) -> int:
+        """The latest session played, or 0 before the first one."""
+        row = self.conn.execute(
+            "SELECT coalesce(max(number), 0) AS n FROM sessions WHERE campaign_id = ?", (campaign.id,)
+        ).fetchone()
+        return row["n"]
+
     def next_session_number(self, campaign: Campaign) -> int:
         row = self.conn.execute(
             "SELECT coalesce(max(number), 0) + 1 AS n FROM sessions WHERE campaign_id = ?",
             (campaign.id,),
         ).fetchone()
         return row["n"]
-
-    # -- entities ------------------------------------------------------------
-
-    @staticmethod
-    def _entity(row: sqlite3.Row) -> dict[str, Any]:
-        d = dict(row)
-        d["data"] = json.loads(d["data"])
-        d["party_knows"] = bool(d["party_knows"])
-        return d
-
-    def find_entities(
-        self,
-        campaign: Campaign,
-        kind: str | None = None,
-        name: str | None = None,
-        status: str | None = None,
-    ) -> list[dict[str, Any]]:
-        sql = "SELECT * FROM entities WHERE campaign_id = ?"
-        params: list[Any] = [campaign.id]
-        if campaign.spoiler_safe:
-            sql += " AND party_knows = 1"
-        if kind:
-            sql += " AND kind = ?"
-            params.append(kind)
-        if name:
-            sql += " AND (name LIKE ? OR summary LIKE ?)"
-            params += [f"%{name}%", f"%{name}%"]
-        if status:
-            sql += " AND status = ?"
-            params.append(status)
-        sql += " ORDER BY kind, name"
-        return [self._entity(r) for r in self.conn.execute(sql, params)]
-
-    def get_entity(self, campaign: Campaign, kind: str, name: str) -> dict[str, Any] | None:
-        row = self.conn.execute(
-            "SELECT * FROM entities WHERE campaign_id = ? AND kind = ? AND name = ? COLLATE NOCASE",
-            (campaign.id, kind, name),
-        ).fetchone()
-        if row is None or (campaign.spoiler_safe and not row["party_knows"]):
-            return None
-        return self._entity(row)
-
-    def upsert_entity(
-        self,
-        campaign: Campaign,
-        kind: str,
-        name: str,
-        *,
-        status: str | None = None,
-        summary: str | None = None,
-        data: dict[str, Any] | None = None,
-        party_knows: bool | None = None,
-        session_id: int | None = None,
-        reason: str = "",
-    ) -> dict[str, Any]:
-        """Create or update an entity. `data` is merged key-by-key (None deletes a key)."""
-        existing = self.conn.execute(
-            "SELECT * FROM entities WHERE campaign_id = ? AND kind = ? AND name = ? COLLATE NOCASE",
-            (campaign.id, kind, name),
-        ).fetchone()
-        with self.conn:
-            if existing is None:
-                cur = self.conn.execute(
-                    "INSERT INTO entities (campaign_id, kind, name, status, summary, data,"
-                    " party_knows, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        campaign.id,
-                        kind,
-                        name,
-                        status or "",
-                        summary or "",
-                        json.dumps({k: v for k, v in (data or {}).items() if v is not None}),
-                        int(True if party_knows is None else party_knows),
-                        now(),
-                    ),
-                )
-                entity_id = cur.lastrowid
-            else:
-                entity_id = existing["id"]
-                merged = json.loads(existing["data"])
-                for k, v in (data or {}).items():
-                    if v is None:
-                        merged.pop(k, None)
-                    else:
-                        merged[k] = v
-                self.conn.execute(
-                    "UPDATE entities SET status = ?, summary = ?, data = ?, party_knows = ?,"
-                    " updated_at = ? WHERE id = ?",
-                    (
-                        existing["status"] if status is None else status,
-                        existing["summary"] if summary is None else summary,
-                        json.dumps(merged),
-                        existing["party_knows"] if party_knows is None else int(party_knows),
-                        now(),
-                        entity_id,
-                    ),
-                )
-            row = self.conn.execute("SELECT * FROM entities WHERE id = ?", (entity_id,)).fetchone()
-            entity = self._entity(row)
-            self.conn.execute(
-                "INSERT INTO entity_revisions (entity_id, session_id, snapshot, reason, created_at)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (entity_id, session_id, json.dumps(entity), reason, now()),
-            )
-        return entity
-
-    def entity_history(self, entity_id: int) -> list[dict[str, Any]]:
-        rows = self.conn.execute(
-            "SELECT r.id, r.created_at, r.reason, r.snapshot, s.number AS session"
-            " FROM entity_revisions r LEFT JOIN sessions s ON s.id = r.session_id"
-            " WHERE r.entity_id = ? ORDER BY r.id",
-            (entity_id,),
-        )
-        return [{**dict(r), "snapshot": json.loads(r["snapshot"])} for r in rows]
-
-    def revert_session(self, campaign: Campaign, number: int) -> dict[str, int]:
-        """Undo everything an ingest of session `number` wrote to entities and the journal.
-
-        Each touched entity goes back to its last revision from before the
-        session, or is deleted if the session created it. Later sessions'
-        edits to the same entity are lost, so revert newest-first.
-        """
-        session = self.conn.execute(
-            "SELECT id FROM sessions WHERE campaign_id = ? AND number = ?", (campaign.id, number)
-        ).fetchone()
-        if session is None:
-            raise KeyError(f"no session {number}")
-        sid = session["id"]
-        touched = self.conn.execute(
-            "SELECT entity_id, min(id) AS first_rev FROM entity_revisions"
-            " WHERE session_id = ? GROUP BY entity_id",
-            (sid,),
-        ).fetchall()
-        restored = deleted = 0
-        with self.conn:
-            for t in touched:
-                prior = self.conn.execute(
-                    "SELECT snapshot FROM entity_revisions WHERE entity_id = ? AND id < ?"
-                    " ORDER BY id DESC LIMIT 1",
-                    (t["entity_id"], t["first_rev"]),
-                ).fetchone()
-                if prior is None:
-                    self.conn.execute("DELETE FROM entities WHERE id = ?", (t["entity_id"],))
-                    deleted += 1
-                    continue
-                snap = json.loads(prior["snapshot"])
-                self.conn.execute(
-                    "UPDATE entities SET status = ?, summary = ?, data = ?, party_knows = ?,"
-                    " updated_at = ? WHERE id = ?",
-                    (
-                        snap["status"],
-                        snap["summary"],
-                        json.dumps(snap["data"]),
-                        int(snap["party_knows"]),
-                        now(),
-                        t["entity_id"],
-                    ),
-                )
-                self.conn.execute(
-                    "DELETE FROM entity_revisions WHERE entity_id = ? AND id >= ?",
-                    (t["entity_id"], t["first_rev"]),
-                )
-                restored += 1
-            events = self.conn.execute("DELETE FROM events WHERE session_id = ?", (sid,)).rowcount
-            self.conn.execute(
-                "UPDATE sessions SET summary = '', title = '' WHERE id = ?", (sid,)
-            )
-        return {"restored": restored, "deleted": deleted, "events": events}
-
-    # -- journal -------------------------------------------------------------
-
-    def add_event(
-        self,
-        campaign: Campaign,
-        text: str,
-        session_id: int | None = None,
-        entity_ids: list[int] | None = None,
-    ) -> int:
-        with self.conn:
-            cur = self.conn.execute(
-                "INSERT INTO events (campaign_id, session_id, text, entity_ids, created_at)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (campaign.id, session_id, text, json.dumps(entity_ids or []), now()),
-            )
-        return cur.lastrowid
-
-    def events(
-        self, campaign: Campaign, session_number: int | None = None, limit: int = 50
-    ) -> list[dict[str, Any]]:
-        sql = (
-            "SELECT e.id, e.text, e.entity_ids, s.number AS session, e.created_at FROM events e"
-            " LEFT JOIN sessions s ON s.id = e.session_id WHERE e.campaign_id = ?"
-        )
-        params: list[Any] = [campaign.id]
-        if session_number is not None:
-            sql += " AND s.number = ?"
-            params.append(session_number)
-        sql += " ORDER BY e.id DESC LIMIT ?"
-        params.append(limit)
-        rows = [dict(r) for r in self.conn.execute(sql, params)]
-        for r in rows:
-            r["entity_ids"] = json.loads(r["entity_ids"])
-        return list(reversed(rows))
 
     # -- characters ----------------------------------------------------------
 

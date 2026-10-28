@@ -244,40 +244,62 @@ def ingest(
     )
     typer.echo(f"\nSession {result['session']}: {result.get('title', '(untitled)')}")
     typer.echo(result.get("summary", ""))
-    typer.echo(f"\n{result['journal_entries']} journal entries recorded. Undo with: campaign revert {result['session']}")
+    typer.echo(f"\n{result['facts']} facts and {result['journal_entries']} journal entries recorded."
+               f" Undo with: campaign revert {result['session']}")
 
 
 @app.command()
 def revert(number: int, campaign: CampaignOpt = None) -> None:
-    """Undo the state changes an ingest made for one session."""
+    """Undo what the ingest of one session recorded."""
+    from .world import World
+
     s = store()
-    show(s.revert_session(pick(s, campaign), number))
+    show(World(s, pick(s, campaign)).revert_session(number))
 
 
 @app.command()
 def state(
     campaign: CampaignOpt = None,
     kind: Optional[str] = None,
-    status: Optional[str] = None,
+    query: Annotated[Optional[str], typer.Option("--query", "-q")] = None,
+    in_play: Annotated[bool, typer.Option(help="Only what the table has interacted with.")] = False,
 ) -> None:
-    """Show tracked NPCs, quests, locations, items…"""
+    """Show people, places and things with their current status and location."""
+    from .world import World
+
     s = store()
-    for e in s.find_entities(pick(s, campaign), kind=kind, status=status):
-        typer.echo(f"[{e['kind']}] {e['name']} ({e['status'] or '-'})\n    {e['summary']}")
-        if e["data"]:
-            typer.echo("    " + json.dumps(e["data"], ensure_ascii=False))
+    w = World(s, pick(s, campaign))
+    for e in w.list(kind=kind, q=query, in_play=in_play):
+        attrs = ", ".join(f"{k}: {v}" for k, v in e["current"].items())
+        typer.echo(f"[{e['kind']}] {e['name']}" + (f" ({attrs})" if attrs else ""))
+        if e["headline"]:
+            typer.echo(f"    {e['headline']}")
 
 
 @app.command()
-def journal(campaign: CampaignOpt = None, session: Optional[int] = None, limit: int = 50) -> None:
+def entity(name: str, campaign: CampaignOpt = None, as_of: Optional[int] = None) -> None:
+    """Show everything known about one entity, optionally as of a past session."""
+    from .world import World
+
+    s = store()
+    hits = World(s, pick(s, campaign)).lookup(name, as_of=as_of)
+    show(hits[0] if hits else f"No entity called {name!r}.")
+
+
+@app.command()
+def journal(campaign: CampaignOpt = None, session: Optional[int] = None) -> None:
     """Show the campaign journal."""
+    from .world import World
+
     s = store()
     c = pick(s, campaign)
-    if session is None:
-        for sess in s.sessions(c):
-            typer.secho(f"Session {sess['number']}: {sess['title']}", bold=True)
-    for e in s.events(c, session_number=session, limit=limit):
-        typer.echo(f"  S{e['session'] or '-'}  {e['text']}")
+    titles = {x["number"]: x["title"] for x in s.sessions(c)}
+    current = None
+    for e in World(s, c).events(session=session):
+        if e["session"] != current:
+            current = e["session"]
+            typer.secho(f"Session {current}: {titles.get(current, '')}", bold=True)
+        typer.echo(f"  {e['text']}")
 
 
 @app.command()

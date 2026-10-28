@@ -1,9 +1,10 @@
 import { characterList, sheetView } from "./sheet.js";
-import { campaignList, campaignView, sourceView } from "./campaigns.js";
+import { campaignList, campaignView, entityView, sourceView } from "./campaigns.js";
 
 const routes = [
   [/^#\/characters\/(.+)$/, (m) => sheetView(decodeURIComponent(m[1])), "characters"],
   [/^#\/campaigns\/([^/]+)\/source\/(\d+)$/, (m) => sourceView(m[1], m[2]), "campaigns"],
+  [/^#\/campaigns\/([^/]+)\/entity\/(\d+)$/, (m) => entityView(m[1], m[2]), "campaigns"],
   [/^#\/campaigns\/([^/]+)(?:\/(\w+))?$/, (m) => campaignView(m[1], m[2] || "ingest"), "campaigns"],
   [/^#\/campaigns\/?$/, () => campaignList(), "campaigns"],
   [/^.*$/, () => characterList(), "characters"],

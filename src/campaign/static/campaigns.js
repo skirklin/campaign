@@ -75,7 +75,7 @@ async function sessionsTab(c) {
           onclick: async () => {
             if (!confirm(`Undo everything the ingest of session ${s.number} recorded?`)) return;
             const r = await api("POST", `${base}/sessions/${s.number}/revert`);
-            toast(`Reverted: ${r.restored} restored, ${r.deleted} removed, ${r.events} journal entries`);
+            toast(`Reverted session ${s.number}: ${r.facts} facts and ${r.events} journal entries removed, ${r.reopened} earlier facts reopened`);
             renderSessions((await api("GET", `${base}/sessions`)).sessions);
           },
         }, "Revert"),
@@ -162,7 +162,7 @@ function pollJob(jobId, panel, onDone) {
     if (job.status === "done" && job.result) {
       panel.append(h("div.job-result",
         h("h3", `Session ${job.result.session}: ${job.result.title || "(untitled)"}`),
-        h("p.muted", `${job.result.journal_entries} journal ${job.result.journal_entries === 1 ? "entry" : "entries"} recorded.`),
+        h("p.muted", `${job.result.facts} facts and ${job.result.journal_entries} journal ${job.result.journal_entries === 1 ? "entry" : "entries"} recorded.`),
       ));
     }
     onDone(job);
@@ -384,54 +384,213 @@ function highlight(snippet) {
 
 // -- world state ---------------------------------------------------------------------
 
+const KIND_LABELS = { npc: "NPCs", pc: "Player characters", lore: "Lore" };
+const kindLabel = (k) => KIND_LABELS[k] || `${k}s`;
+const range = (f) => (f.valid_to === null ? `since session ${f.valid_from}`
+  : f.valid_to === f.valid_from ? `during session ${f.valid_from}` : `sessions ${f.valid_from}–${f.valid_to}`);
+const ORIGINS = { ingest: (f) => `session ${f.run_session}`, chat: () => "chat", manual: () => "edited by hand" };
+const sourceLabel = (f) => (f.origin === "book" || !ORIGINS[f.origin] ? f.source || f.origin : ORIGINS[f.origin](f))
+  + (f.pages?.length ? ` p. ${f.pages.join(", ")}` : "");
+
 async function stateTab(c) {
   const base = `/api/campaigns/${c.slug}`;
-  const all = await api("GET", `${base}/entities`);
-  const kinds = [...new Set(all.map((e) => e.kind))].sort();
-  const statuses = [...new Set(all.map((e) => e.status).filter(Boolean))].sort();
-  const kind = h("select", { "aria-label": "Kind" }, h("option", { value: "" }, "All kinds"), kinds.map((k) => h("option", { value: k }, k)));
-  const status = h("select", { "aria-label": "Status" }, h("option", { value: "" }, "Any status"), statuses.map((s) => h("option", { value: s }, s)));
-  const q = h("input", { type: "search", placeholder: "Filter by name…", "aria-label": "Filter" });
+  const inPlay = h("input", { type: "checkbox" });
+  const kind = h("select", { "aria-label": "Kind" }, h("option", { value: "" }, "All kinds"));
+  const status = h("select", { "aria-label": "Status" }, h("option", { value: "" }, "Any status"));
+  const q = h("input", { type: "search", placeholder: "Filter by name, alias or fact…", "aria-label": "Filter" });
   const out = h("div");
+  let all = [];
 
+  const load = async () => {
+    all = (await api("GET", `${base}/entities${inPlay.checked ? "?in_play=true" : ""}`)).entities;
+    const fill = (sel, values, label) => {
+      const keep = sel.value;
+      sel.replaceChildren(h("option", { value: "" }, label), values.map((v) => h("option", { value: v }, v)));
+      sel.value = values.includes(keep) ? keep : "";
+    };
+    fill(kind, [...new Set(all.map((e) => e.kind))].sort(), "All kinds");
+    fill(status, [...new Set(all.map((e) => e.current.status).filter(Boolean))].sort(), "Any status");
+    render();
+  };
   const render = () => {
     const needle = q.value.toLowerCase();
     const shown = all.filter((e) =>
-      (!kind.value || e.kind === kind.value) && (!status.value || e.status === status.value) &&
-      (!needle || e.name.toLowerCase().includes(needle) || e.summary.toLowerCase().includes(needle)));
+      (!kind.value || e.kind === kind.value) && (!status.value || e.current.status === status.value) &&
+      (!needle || [e.name, ...e.aliases, e.headline || ""].some((x) => x.toLowerCase().includes(needle))));
     const groups = {};
     shown.forEach((e) => (groups[e.kind] ||= []).push(e));
     out.replaceChildren(
-      all.length === 0 ? h("p.empty", "Nothing tracked yet. Ingest a session, or tell the assistant what happened in `campaign chat`.") : "",
+      all.length === 0 ? h("p.empty", inPlay.checked
+        ? "Nothing in play yet. Ingest a session, or tell the assistant what happened."
+        : "The world is empty. Digest a module or ingest a session.") : "",
       ...Object.entries(groups).map(([k, items]) => h("div",
         h("h2.section-title", `${kindLabel(k)} (${items.length})`),
-        h("div.entity-grid", items.map(entityCard)))),
+        h("div.entity-grid", items.map((e) => worldCard(c, e))))),
     );
   };
+  inPlay.addEventListener("change", load);
   [kind, status].forEach((el) => el.addEventListener("change", render));
   q.addEventListener("input", render);
-  render();
-  return h("div", h("div.filters", kind, status, q), out);
+  await load();
+  return h("div",
+    h("div.filters", kind, status, q),
+    h("label.check", inPlay, " Only what the table has interacted with"),
+    out);
 }
 
-const KIND_LABELS = { npc: "NPCs", pc: "Player characters", lore: "Lore" };
-const kindLabel = (k) => KIND_LABELS[k] || `${k}s`;
-
-function entityCard(e) {
-  const data = Object.entries(e.data);
-  return h("div.card.entity",
+function worldCard(c, e) {
+  const attrs = Object.entries(e.current);
+  return h("a.card.entity", { href: `#/campaigns/${c.slug}/entity/${e.id}` },
     h("div.entity-head", h("strong", e.name),
-      e.status && h(`span.badge.status-${e.status.replace(/\W+/g, "-")}`, e.status),
-      !e.party_knows && h("span.badge.dm", "party doesn't know")),
-    e.summary && h("p", e.summary),
-    data.length > 0 && h("dl", data.flatMap(([k, v]) => [h("dt", k.replace(/_/g, " ")), h("dd", formatValue(v))])),
+      e.current.status && h(`span.badge.status-${e.current.status.replace(/\W+/g, "-")}`, e.current.status)),
+    e.aliases.length > 0 && h("p.muted.small", "aka ", e.aliases.slice(0, 4).join(" · ")),
+    attrs.filter(([k]) => k !== "status").length > 0 && h("dl", attrs.filter(([k]) => k !== "status")
+      .flatMap(([k, v]) => [h("dt", k), h("dd", v)])),
+    e.headline && h("p", e.headline),
+    h("p.muted.small", `${e.current_facts} current · ${e.past_facts} past${e.table_activity ? "" : " · from the book only"}`),
   );
 }
 
-function formatValue(v) {
-  if (Array.isArray(v)) return v.length && typeof v[0] !== "object" ? v.join(", ") : h("ul", v.map((x) => h("li", formatValue(x))));
-  if (v && typeof v === "object") return Object.entries(v).map(([k, x]) => `${k}: ${typeof x === "object" ? JSON.stringify(x) : x}`).join("; ");
-  return String(v);
+export async function entityView(slug, id) {
+  const base = `/api/campaigns/${slug}`;
+  const [campaigns, e, list] = await Promise.all([
+    api("GET", "/api/campaigns"), api("GET", `${base}/entities/${id}`), api("GET", `${base}/entities`),
+  ]);
+  const c = campaigns.find((x) => x.slug === slug);
+  const now = e.as_of;
+  const body = h("div.entity-body");
+
+  const slider = h("input", { type: "range", min: 0, max: Math.max(now, 0), value: now, "aria-label": "As of session" });
+  const sliderLabel = h("span.as-of-label");
+  const renderAt = () => {
+    const t = Number(slider.value);
+    sliderLabel.textContent = t === now ? `Now (session ${now})` : `As of session ${t}`;
+    body.replaceChildren(...factSections(c, e, t, t === now));
+  };
+  slider.addEventListener("input", renderAt);
+
+  const summary = h("div.card.summary",
+    e.summary ? h("p", e.summary) : h("p.muted", "No summary for the current facts yet."),
+    h("button", {
+      onclick: async (ev) => {
+        ev.target.disabled = true;
+        ev.target.textContent = "Writing…";
+        try {
+          const r = await api("POST", `${base}/entities/${id}/summary`);
+          summary.firstChild.replaceWith(h("p", r.summary));
+          ev.target.remove();
+        } catch (err) {
+          toast(err.message, true);
+          ev.target.disabled = false;
+          ev.target.textContent = "Write summary";
+        }
+      },
+    }, e.summary ? "" : "Write summary"),
+  );
+  if (e.summary) summary.lastChild.remove();
+
+  const others = list.entities.filter((x) => x.id !== e.id);
+  const mergeInput = h("input", { list: "merge-options", placeholder: "Another entity's name", "aria-label": "Entity to merge" });
+  const merge = h("form.inline-form", {
+    onsubmit: async (ev) => {
+      ev.preventDefault();
+      const other = others.find((x) => x.name === mergeInput.value);
+      if (!other) return toast("Pick an entity from the list", true);
+      if (!confirm(`Merge ${other.name} into ${e.name}? Its facts, aliases and events move here.`)) return;
+      await api("POST", `${base}/entities/${id}/merge`, { other_id: other.id });
+      location.reload();
+    },
+  }, mergeInput, h("datalist", { id: "merge-options" }, others.map((x) => h("option", { value: x.name }, x.kind))),
+    h("button", { type: "submit" }, "Merge into this"));
+
+  renderAt();
+  return h("section.page",
+    h("div.page-head", h("a", { href: `#/campaigns/${slug}/state` }, `← ${c.name}`)),
+    h("div.page-head", h("h1", e.name), h("span.badge", e.kind)),
+    e.aliases.length > 0 && h("p.muted", "Also known as ", e.aliases.join(" · ")),
+    summary,
+    now > 0 && h("div.as-of", sliderLabel, slider),
+    body,
+    h("details.card", h("summary", "Same thing as another entry?"), h("p.muted.small", "Merging keeps both histories; the other name becomes an alias."), merge),
+  );
+}
+
+function factSections(c, e, t, isNow) {
+  const base = `/api/campaigns/${c.slug}`;
+  const facts = e.all_facts.filter((f) => f.valid_from <= t);
+  const openAt = (f) => f.valid_to === null || f.valid_to > t;
+  const current = facts.filter((f) => openAt(f) && f.modality === "fact");
+  const attrs = current.filter((f) => f.attribute && f.attribute !== "stat_block");
+  const statements = current.filter((f) => !f.attribute);
+  const statBlocks = current.filter((f) => f.attribute === "stat_block");
+  const maybe = facts.filter((f) => openAt(f) && f.modality !== "fact");
+  const past = facts.filter((f) => !openAt(f));
+  const events = e.all_events.filter((ev) => ev.session <= t);
+
+  const endButton = (f) => isNow && openAt(f) && h("button.icon", {
+    title: "No longer true", "aria-label": "Mark as no longer true",
+    onclick: async () => {
+      await api("POST", `${base}/facts/${f.id}/end`);
+      location.reload();
+    },
+  }, "×");
+  const factRow = (f, text) => h("li.fact",
+    h("span", text || f.statement),
+    h("span.fact-meta", range(f), " · ", sourceLabel(f), f.party_knows_from === null ? " · party doesn't know" : ""),
+    endButton(f));
+
+  const add = isNow && (() => {
+    const statement = h("input", { placeholder: "Something that's now true", required: true, "aria-label": "Statement" });
+    const attribute = h("input", { list: "attr-options", placeholder: "attribute (optional)", "aria-label": "Attribute" });
+    const value = h("input", { placeholder: "value", "aria-label": "Value" });
+    const known = h("input", { type: "checkbox", checked: true });
+    return h("form.card.add-fact", {
+      onsubmit: async (ev) => {
+        ev.preventDefault();
+        try {
+          await api("POST", `${base}/entities/${e.id}/facts`, {
+            statement: statement.value, attribute: attribute.value || null, value: value.value || null, party_knows: known.checked,
+          });
+          location.reload();
+        } catch (err) {
+          toast(err.message, true);
+        }
+      },
+    },
+      h("h2", "Add a fact"),
+      statement,
+      h("div.identity", attribute, value),
+      h("datalist", { id: "attr-options" }, ["status", "location", "holder", "disposition", "leader", "allegiance", "condition"].map((a) => h("option", { value: a }))),
+      h("label.check", known, " The party knows this"),
+      h("p.muted.small", "With an attribute, this replaces the current value, which moves to history."),
+      h("div.actions", h("button.primary", { type: "submit" }, "Add")),
+    );
+  })();
+
+  return [
+    h("section.card",
+      h("h2", isNow ? "True now" : `True at the end of session ${t}`),
+      attrs.length > 0 && h("ul.facts.attrs", attrs.map((f) => factRow(f, h("span", h("strong", f.attribute), ": ", f.value)))),
+      statements.length ? h("ul.facts", statements.map((f) => factRow(f))) : h("p.empty", "Nothing recorded."),
+      statBlocks.map((f) => statBlockEl(JSON.parse(f.value), sourceLabel(f))),
+    ),
+    maybe.length > 0 && h("section.card", h("h2", "Rumors and possibilities"),
+      h("ul.facts", maybe.map((f) => factRow(f, `${f.modality === "rumor" ? "Rumor: " : "Possible: "}${f.statement}`)))),
+    past.length > 0 && h("section.card", h("h2", "No longer true"), h("ul.facts.past", past.map((f) => factRow(f)))),
+    events.length > 0 && h("section.card", h("h2", "Events"),
+      h("ol.events", events.map((ev) => h("li", h("span.session-num", `S${ev.session}`), " ", ev.text)))),
+    add,
+  ];
+}
+
+function statBlockEl(sb, source) {
+  return h("details.statblock",
+    h("summary", `Stat block: AC ${sb.armor_class} · HP ${sb.hit_points}${sb.challenge ? ` · CR ${sb.challenge}` : ""}`, h("span.fact-meta", ` ${source}`)),
+    h("p.small", `Speed ${sb.speed}`),
+    h("div.stat-abilities", ["strength", "dexterity", "constitution", "intelligence", "wisdom", "charisma"].map((a) =>
+      h("div", h("span.label", a.slice(0, 3).toUpperCase()), h("span", sb[a] ?? "—")))),
+    [...sb.traits, ...sb.actions, ...sb.other].map((x) => h("p.small", x)),
+  );
 }
 
 // -- journal ---------------------------------------------------------------------------
@@ -443,12 +602,13 @@ async function journalTab(c) {
   const titles = Object.fromEntries(sessions.map((s) => [s.number, s.title]));
   const groups = new Map();
   events.forEach((e) => {
-    const key = e.session ?? "other";
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(e);
+    if (!groups.has(e.session)) groups.set(e.session, []);
+    groups.get(e.session).push(e);
   });
   return h("div.journal", [...groups.entries()].reverse().map(([n, items]) => h("section",
-    h("h2.section-title", n === "other" ? "Between sessions" : `Session ${n}${titles[n] ? ` — ${titles[n]}` : ""}`),
-    h("ol", items.map((e) => h("li", e.text))),
+    h("h2.section-title", n === 0 ? "Before play" : `Session ${n}${titles[n] ? ` — ${titles[n]}` : ""}`),
+    h("ol", items.map((e) => h("li", e.text,
+      e.entities.length > 0 && h("span.event-entities", " — ",
+        e.entities.map((x, i) => [i ? ", " : "", h("a", { href: `#/campaigns/${c.slug}/entity/${x.id}` }, x.name)]))))),
   )));
 }

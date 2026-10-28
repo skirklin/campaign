@@ -2,17 +2,17 @@
 
 import json
 import re
-import sqlite3
 from types import SimpleNamespace as NS
 
 import pymupdf
 import pytest
 
 from campaign import digest, library
-from campaign.db import SCHEMA_V1, SCHEMA_VERSION, Store
+from campaign.db import BASELINE, SCHEMA_VERSION, Store
 from campaign.digest import BranchOutput, Entity, LeafOutput, Merge
 from campaign.ingest import parse_pdf
 from campaign.tools import ToolContext, build_tools
+from campaign.world import World
 
 from test_agent import FakeStream
 
@@ -102,10 +102,16 @@ def test_full_digest_then_everything_cached(env):
     order = [t for _, t in fake.calls]
     assert order.index("Church") < order.index("Chapter 1") < order.index("Book")
 
-    ents = {e["name"]: e for e in store.ref_entities(camp)}
+    ents = {e["name"]: e for e in store.source_catalog(r["id"])}
     assert set(ents) == {"Ismark", "Donavich", "Morgantha"}
     assert ents["Ismark"]["facts"] == ["seen in Village", "seen in Windmill"]  # exact-name merge
     assert "The Windmill Hag" in ents["Morgantha"]["aliases"]  # Claude-proposed merge
+
+    # ...and the catalog is now the world before play.
+    hag = World(store, camp).lookup("the windmill hag")[0]
+    assert hag["name"] == "Morgantha"
+    assert {f["statement"] for f in hag["facts"]} >= {"Morgantha, merged", "seen in Windmill", "seen in Old Bonegrinder"}
+    assert all(f["sessions"] == "0-" and f["source"] == "Book" for f in hag["facts"])
 
     again = FakeDigest()
     assert digest.run(db, r["id"], client=again)["cached"] == 8 and again.calls == []
@@ -118,7 +124,7 @@ def test_same_book_in_another_campaign_is_free(env):
     other = store.create_campaign("Second table", "dm")
     r = upload(store, other)
     assert r["pending"] == 0
-    assert len(store.ref_entities(other)) == 3
+    assert len(World(store, other).list()) == 3
 
 
 def test_editing_one_section_redigests_only_its_path_to_the_root(env):
@@ -164,12 +170,12 @@ def test_failure_is_isolated_and_resumable(env):
     assert outline["Windmill"]["error"] == "boom"
     assert outline["Chapter 2"]["error"] == "waiting on a failed subsection"
     assert outline["Chapter 1"]["summary"] == "Branch summary of Chapter 1"
-    assert store.ref_entities(camp) == []  # no root yet
+    assert World(store, camp).list() == []  # nothing applied until the root is done
 
     fake = FakeDigest()
     digest.run(db, r["id"], client=fake)
     assert fake.calls == [("leaf", "Windmill"), ("branch", "Chapter 2"), ("branch", "Book")]
-    assert len(store.ref_entities(camp)) == 3
+    assert len(World(store, camp).list()) == 3
 
 
 def test_packing_small_siblings(tmp_path):
@@ -197,15 +203,19 @@ def test_tools_use_digest(env):
     digest.run(db, r["id"], client=FakeDigest())
     tools = {f.__name__: f for f in build_tools(ToolContext(store, camp))}
     hit = json.loads(tools["lookup"](name="the windmill hag"))
-    assert hit["book"][0]["name"] == "Morgantha"
+    assert hit[0]["name"] == "Morgantha"
     top = json.loads(tools["outline"]())
     assert [s["title"] for s in top[0]["sections"]] == ["Book (introduction)", "Chapter 1", "Chapter 2"]
     ch2 = json.loads(tools["outline"](section_id=top[0]["sections"][2]["id"]))
     assert [s["title"] for s in ch2["subsections"]] == ["Windmill", "Old Bonegrinder"]
 
-    store.upsert_entity(camp, "npc", "Morgantha", status="dead", reason="slain")
-    assert json.loads(tools["lookup"](name="the windmill hag"))["campaign"][0]["status"] == "dead"
-    assert json.loads(tools["get_entity"](kind="npc", name="Morgantha"))["book"][0]["facts"]
+    store.upsert_session(camp, 4)
+    assert "Recorded" in tools["record_fact"](entity="the windmill hag", statement="Morgantha was slain", attribute="status", value="dead")
+    now = json.loads(tools["lookup"](name="Morgantha"))[0]
+    assert now["current"] == {"status": "dead"}
+    assert any(f["source"] == "Book" for f in now["facts"])  # the book's facts still stand alongside
+    before = json.loads(tools["lookup"](name="Morgantha", as_of_session=3))[0]
+    assert before["current"] == {}
 
     from campaign.agent import overview, catalog
     assert "Branch summary of Chapter 2" in overview(store, camp)
@@ -219,6 +229,7 @@ def test_player_campaign_cannot_see_dm_only_digest(env):
     digest.run(db, r["id"], client=FakeDigest())
     tools = {f.__name__: f for f in build_tools(ToolContext(store, player))}
     assert "No match" in tools["lookup"](name="Morgantha")
+    assert World(store, player).list() == []  # DM-only book facts are invisible to players
     assert "Nothing has been digested" in tools["outline"]()
     assert tools["outline"](section_id=store.digest_outline(r["id"])[0]["id"]).startswith("No section")
 
@@ -235,24 +246,28 @@ def test_reindex_from_original_keeps_id_and_cache(env, monkeypatch):
     assert store.blobs.get(src["blob"]) == BOOK.format(intro="", church="Donavich prays.").encode()
 
 
-def test_v1_database_is_migrated_with_backup(tmp_path):
-    db = tmp_path / "old.db"
-    conn = sqlite3.connect(db)
-    conn.executescript(SCHEMA_V1)  # what the first release created (user_version 0)
-    conn.execute("INSERT INTO campaigns (slug, name, role, created_at) VALUES ('old', 'Old', 'dm', 'x')")
-    conn.execute("INSERT INTO sources (campaign_id, title, kind, created_at) VALUES (1, 'Notes', 'notes', 'x')")
-    conn.execute("INSERT INTO chunks (source_id, seq, heading, text) VALUES (1, 0, 'Barovia', 'Mist everywhere.')")
-    conn.commit()
-    conn.close()
-
-    store = Store(db)
-    assert store.schema_version == SCHEMA_VERSION
-    assert list((tmp_path / "backups").glob("campaign-*-v0-pre-v*.db"))
-    camp = store.campaign("old")
-    assert store.search(camp, "mist")[0]["source"] == "Notes"
-    root = digest.plan(store, 1)  # no tree: the whole source is one leaf
-    assert root.is_leaf and digest.pending_calls(root) == 1
+def test_pre_baseline_database_is_retired_and_restored(env, monkeypatch):
+    store, camp, db = env
+    r = upload(store, camp)
+    digest.run(db, r["id"], client=FakeDigest())
+    store.save_character("Brannoc", {"name": "Brannoc"}, campaign=camp, reason="made")
+    store.upsert_session(camp, 1)
+    run = World(store, camp).start_run("ingest", session=1)
+    World(store, camp).add_event("Something happened", 1, run)
+    store.conn.execute(f"PRAGMA user_version = {BASELINE - 1}")  # pretend it's an old database
     store.close()
+
+    fresh = Store(db)
+    assert fresh.schema_version == SCHEMA_VERSION
+    assert list((db.parent / "backups").glob("campaign-*-retired.db"))
+    assert fresh.character("Brannoc") == {"name": "Brannoc"}
+    camp2 = fresh.campaign("strahd")
+    src = fresh.sources(camp2)[0]
+    assert src["title"] == "Book" and src["has_original"]
+    assert fresh.digest_status(src["id"])["done"] == 8  # digest cache carried over: nothing to redo
+    world = World(fresh, camp2)
+    assert world.lookup("Morgantha") and world.events() == [] and fresh.sessions(camp2) == []
+    fresh.close()
     assert Store(db).schema_version == SCHEMA_VERSION  # reopening is a no-op
 
 

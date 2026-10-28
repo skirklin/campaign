@@ -10,7 +10,8 @@ The document's section tree (see ingest.py) is reduced bottom-up:
   entities are the same thing under different names. The merge itself is
   done in code.
 
-The root's entities become the source's reference catalog (`ref_entities`).
+The root's entities become the source's catalog, which is applied to the
+campaign's world model as facts true from session 0 (see world.py).
 
 Caching works like a Merkle tree. Every node's output is stored under a
 hash of exactly what produced it:
@@ -448,7 +449,11 @@ def digest_node(client: Any, node: DNode, model: str, effort: str) -> tuple[dict
 
 
 def _materialize(store: Store, source_id: int, root: DNode) -> None:
-    store.replace_ref_entities(source_id, root.output["entities"])
+    """Apply the book's catalog to its campaign's world model as the state before play."""
+    from .world import World
+
+    campaign = store.campaign_by_id(store.source(source_id)["campaign_id"])
+    World(store, campaign).apply_book(source_id, root.output["entities"], key=root.key)
 
 
 def plan(store: Store, source_id: int, model: str = MODEL) -> DNode | None:

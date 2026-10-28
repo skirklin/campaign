@@ -26,6 +26,7 @@ from . import digest
 from .charsheet import CharacterSheet, apply_hp, rest
 from .db import Campaign, Store, slugify
 from .library import add_reference, reindex
+from .world import World
 
 STATIC = Path(__file__).parent / "static"
 AUDIO = {".mp3", ".m4a", ".wav", ".ogg", ".flac", ".opus", ".webm"}
@@ -70,6 +71,18 @@ class HpChange(BaseModel):
 
 class RestRequest(BaseModel):
     long: bool = True
+
+
+class NewFact(BaseModel):
+    statement: str
+    attribute: str | None = None
+    value: str | None = None
+    party_knows: bool = True
+    modality: str = "fact"
+
+
+class MergeRequest(BaseModel):
+    other_id: int
 
 
 def create_app(db: Path | str) -> FastAPI:
@@ -203,7 +216,12 @@ def create_app(db: Path | str) -> FastAPI:
         slug: str, source_id: int, q: str | None = None, kind: str | None = None, s: Store = Depends(store),
     ) -> list[dict[str, Any]]:
         source_or_404(s, slug, source_id)
-        return s.ref_entities(s.campaign(slug), source_id=source_id, kind=kind or None, q=q or None)
+        needle = (q or "").lower()
+        return [
+            e for e in s.source_catalog(source_id)
+            if (not kind or e["kind"] == kind)
+            and (not needle or any(needle in x.lower() for x in [e["name"], *e["aliases"], e["summary"]]))
+        ]
 
     @app.get("/api/campaigns/{slug}/sources/{source_id}/original")
     def source_original(slug: str, source_id: int, s: Store = Depends(store)) -> FileResponse:
@@ -231,23 +249,77 @@ def create_app(db: Path | str) -> FastAPI:
         running = [vars(j) | {"log": None} for j in jobs.values() if j.campaign == slug and j.status == "running"]
         return {"sessions": s.sessions(c), "next": s.next_session_number(c), "running": running}
 
+    def world_or_404(s: Store, slug: str) -> World:
+        return World(s, campaign_or_404(s, slug))
+
     @app.post("/api/campaigns/{slug}/sessions/{number}/revert")
     def revert(slug: str, number: int, s: Store = Depends(store)) -> dict[str, int]:
         try:
-            return s.revert_session(campaign_or_404(s, slug), number)
+            return world_or_404(s, slug).revert_session(number)
         except KeyError:
             raise HTTPException(404, f"no session {number}")
 
     @app.get("/api/campaigns/{slug}/entities")
     def entities(
-        slug: str, kind: str | None = None, status: str | None = None, q: str | None = None,
+        slug: str, kind: str | None = None, q: str | None = None, in_play: bool = False,
         s: Store = Depends(store),
-    ) -> list[dict[str, Any]]:
-        return s.find_entities(campaign_or_404(s, slug), kind=kind or None, status=status or None, name=q or None)
+    ) -> dict[str, Any]:
+        w = world_or_404(s, slug)
+        return {"now": w.now, "entities": w.list(kind=kind or None, q=q or None, in_play=in_play)}
+
+    def entity_or_404(w: World, entity_id: int) -> dict[str, Any]:
+        view = w.view(entity_id)
+        if view is None:
+            raise HTTPException(404, "no such entity")
+        return view
+
+    @app.get("/api/campaigns/{slug}/entities/{entity_id}")
+    def entity(slug: str, entity_id: int, s: Store = Depends(store)) -> dict[str, Any]:
+        w = world_or_404(s, slug)
+        view = entity_or_404(w, entity_id)
+        # All facts, so the page can show the world as of any session without asking again.
+        view["all_facts"] = w.facts(entity_id)
+        view["timeline"] = w.timeline(entity_id)
+        view["all_events"] = w.events(entity_id=entity_id)
+        return view
+
+    @app.post("/api/campaigns/{slug}/entities/{entity_id}/facts", status_code=201)
+    def add_fact(slug: str, entity_id: int, body: NewFact, s: Store = Depends(store)) -> dict[str, Any]:
+        w = world_or_404(s, slug)
+        entity_or_404(w, entity_id)
+        if not body.statement.strip() or body.modality not in ("fact", "rumor", "possible"):
+            raise HTTPException(422, "a statement is required; modality is fact, rumor or possible")
+        run = w.start_run("manual", session=w.now, label="edited in the web UI")
+        return w.record(entity_id, body.statement, run, w.now, attribute=body.attribute or None,
+                        value=body.value or None, modality=body.modality, party_knows=body.party_knows)
+
+    @app.post("/api/campaigns/{slug}/facts/{fact_id}/end")
+    def end_fact(slug: str, fact_id: int, s: Store = Depends(store)) -> dict[str, bool]:
+        w = world_or_404(s, slug)
+        run = w.start_run("manual", session=w.now, label="edited in the web UI")
+        if not w.end_fact(fact_id, run, w.now):
+            raise HTTPException(404, "no open fact with that id")
+        return {"ended": True}
+
+    @app.post("/api/campaigns/{slug}/entities/{entity_id}/merge")
+    def merge(slug: str, entity_id: int, body: MergeRequest, s: Store = Depends(store)) -> dict[str, Any]:
+        try:
+            return world_or_404(s, slug).merge(entity_id, body.other_id)
+        except KeyError as err:
+            raise HTTPException(404, str(err))
+
+    @app.post("/api/campaigns/{slug}/entities/{entity_id}/summary")
+    def summarize(slug: str, entity_id: int, s: Store = Depends(store)) -> dict[str, str]:
+        w = world_or_404(s, slug)
+        entity_or_404(w, entity_id)
+        try:
+            return {"summary": w.synthesize(entity_id)}
+        except Exception as err:
+            raise HTTPException(502, f"couldn't write a summary: {err}")
 
     @app.get("/api/campaigns/{slug}/journal")
     def journal(slug: str, session: int | None = None, s: Store = Depends(store)) -> list[dict[str, Any]]:
-        return s.events(campaign_or_404(s, slug), session_number=session, limit=500)
+        return world_or_404(s, slug).events(session=session)
 
     # -- session ingest ------------------------------------------------------
 
