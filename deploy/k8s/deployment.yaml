@@ -27,8 +27,20 @@ spec:
           image: ghcr.io/skirklin/campaign:latest
           ports:
             - {name: http, containerPort: 8000}
-          envFrom:
-            - secretRef: {name: campaign-env}
+          env:
+            - {name: CAMPAIGN_AUTH, value: google}
+            - {name: CAMPAIGN_PUBLIC_URL, value: "https://campaign.kirkl.in"}
+            # From the Google Cloud OAuth client (docs/deploy.md, step 1).
+            - {name: GOOGLE_CLIENT_ID, value: "REPLACE_ME.apps.googleusercontent.com"}
+            # Comma-separated. Only these Google accounts can sign in.
+            - {name: CAMPAIGN_ALLOWED_EMAILS, value: "REPLACE_ME@example.com"}
+            # Credentials: the campaign-secrets Secret, created by hand (docs/deploy.md, step 2).
+            - name: ANTHROPIC_API_KEY
+              valueFrom: {secretKeyRef: {name: campaign-secrets, key: ANTHROPIC_API_KEY}}
+            - name: GOOGLE_CLIENT_SECRET
+              valueFrom: {secretKeyRef: {name: campaign-secrets, key: GOOGLE_CLIENT_SECRET}}
+            - name: CAMPAIGN_SESSION_SECRET
+              valueFrom: {secretKeyRef: {name: campaign-secrets, key: CAMPAIGN_SESSION_SECRET}}
           volumeMounts:
             - {name: data, mountPath: /data}
             - {name: tmp, mountPath: /tmp}

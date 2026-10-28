@@ -48,39 +48,51 @@ In [Google Cloud Console](https://console.cloud.google.com/) → APIs & Services
 
 ### 2. Cluster resources (needs admin credentials)
 
+Settings live in two places:
+
+- **In `deploy/k8s/deployment.yaml`**, committed, like your other apps'
+  plain `env` values: `CAMPAIGN_AUTH`, `CAMPAIGN_PUBLIC_URL`,
+  `GOOGLE_CLIENT_ID` and `CAMPAIGN_ALLOWED_EMAILS`. Replace the two
+  `REPLACE_ME` values before the first apply. To change the allowlist
+  later, commit the edit and deploy.
+- **In the `campaign-secrets` Secret**, created by hand, for the three
+  credentials:
+
+  | Key | Value |
+  |---|---|
+  | `ANTHROPIC_API_KEY` | a key just for this app, so its spending is separate and it can be revoked on its own |
+  | `GOOGLE_CLIENT_SECRET` | from step 1 |
+  | `CAMPAIGN_SESSION_SECRET` | `openssl rand -hex 32`; changing it signs everyone out |
+
+  The Secret is per namespace, so `campaign` can't share the homelab's
+  `api-secrets`.
+
+With admin credentials, apply the manifests:
+
 ```bash
 kubectl apply -k deploy/k8s
 ```
 
-Then create the app's settings:
+Copy the template:
 
 ```bash
-cp deploy/k8s/env.example deploy/k8s/env
+cp deploy/k8s/secrets.env.example deploy/k8s/secrets.env
 ```
 
-Fill in `deploy/k8s/env` (it's gitignored), then load it as a Secret:
+Fill in `deploy/k8s/secrets.env` (it's gitignored), then create the Secret:
 
 ```bash
-kubectl -n campaign create secret generic campaign-env --from-env-file=deploy/k8s/env
+kubectl -n campaign create secret generic campaign-secrets --from-env-file=deploy/k8s/secrets.env
 ```
 
-The settings:
-
-| Setting | Value |
-|---|---|
-| `ANTHROPIC_API_KEY` | for the digest, ingest, chat and summaries |
-| `CAMPAIGN_AUTH` | `google` |
-| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | from step 1 |
-| `CAMPAIGN_PUBLIC_URL` | `https://campaign.kirkl.in` |
-| `CAMPAIGN_ALLOWED_EMAILS` | comma-separated |
-| `CAMPAIGN_SESSION_SECRET` | `openssl rand -hex 32`; changing it signs everyone out |
-
-To change a setting later, edit the file and re-create the Secret, then
-restart:
+The pod starts once the Secret exists. To change a credential later, edit
+the file and re-create the Secret:
 
 ```bash
-kubectl -n campaign create secret generic campaign-env --from-env-file=deploy/k8s/env --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n campaign create secret generic campaign-secrets --from-env-file=deploy/k8s/secrets.env --dry-run=client -o yaml | kubectl apply -f -
 ```
+
+Then restart:
 
 ```bash
 kubectl -n campaign rollout restart deployment/campaign
