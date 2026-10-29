@@ -455,3 +455,38 @@ def test_two_servers_overlapping_take_turns(env):
     while new.reconcile_once():
         pass
     assert store.digest_status(r["id"])["done"] == 8 and len(new_calls.calls) == 8
+
+
+def test_merges_only_join_the_same_kind_of_thing():
+    def c(name, kind):
+        return {"name": name, "kind": kind, "aliases": [], "summary": "", "pages": [1], "facts": [], "stat_block": None}
+
+    cands = [c("Heleka", "npc"), c("the giantess", "monster"), c("Lutheria", "location"), c("the Titan", "npc")]
+    out = digest.apply_merges(cands, [
+        Merge(ids=["e0", "e1"], name="Heleka", summary="A giantess."),  # npc + monster: one creature
+        Merge(ids=["e2", "e3"], name="Lutheria", summary="lumped"),  # a place into a person: refused
+    ])
+    assert sorted(e["name"] for e in out) == ["Heleka", "Lutheria", "the Titan"]
+    many = [c(f"Guard {i}", "npc") for i in range(digest.MAX_MERGE + 1)]
+    out = digest.apply_merges(many, [Merge(ids=[f"e{i}" for i in range(len(many))], name="Guard", summary="")])
+    assert len(out) == len(many)  # too many to be one thing
+
+
+def test_a_new_reconciler_reapplies_catalogs_under_new_rules(env, monkeypatch):
+    import campaign.world as world_mod
+
+    store, camp, db = env
+    r = upload(store, camp)
+    store.set_digest_target(r["id"], digest.MODEL, "medium")
+    first = digest.Reconciler(db, client_factory=FakeDigest)
+    while first.pass_once():
+        pass
+    applied = store.conn.execute("SELECT input_key FROM runs WHERE kind = 'book'").fetchone()[0]
+    monkeypatch.setattr(world_mod, "APPLY_VERSION", world_mod.APPLY_VERSION + 1)
+    fake = FakeDigest()
+    store.conn.execute("UPDATE leases SET expires_at = 0")
+    store.conn.commit()
+    again = digest.Reconciler(db, client_factory=lambda: fake)
+    again.pass_once()
+    assert fake.calls == []  # all from the cache
+    assert store.conn.execute("SELECT input_key FROM runs WHERE kind = 'book'").fetchone()[0] != applied

@@ -252,3 +252,63 @@ def test_v4_database_migrates_characters_into_campaigns(tmp_path):
     eid = store.link_character(1)  # linked the first time it's touched
     assert World(store, store.campaign("strahd")).entity(eid)["name"] == "Bram"
     assert list((tmp_path / "backups").glob(f"campaign-*-pre-v{SCHEMA_VERSION}.db"))
+
+
+def _entry(name, kind="npc", aliases=(), facts=()):
+    return {"name": name, "kind": kind, "aliases": list(aliases), "summary": f"{name}.", "pages": [1],
+            "facts": list(facts), "stat_block": None}
+
+
+def test_a_shared_title_doesnt_snowball_entities_together():
+    store = Store(":memory:")
+    camp = store.create_campaign("Titans", "dm")
+    src = store.add_source(camp, "Book", "module", [{"heading": "", "text": "x", "page": 1}])
+    w = World(store, camp)
+    w.apply_book(src, [
+        _entry("Gaius", aliases=["the Titan", "the king"]),
+        _entry("Sydon", aliases=["the Titan", "the king"]),
+        _entry("Heleka", aliases=["the Titan"]),
+        _entry("boar", "monster", aliases=["Boar"]),
+        _entry("Dread Boar", "monster", aliases=["the boar"]),
+        _entry("Lutheria", "location", aliases=["the Titan's city"]),
+        _entry("Lutherian guard", aliases=["Lutheria"]),
+    ], key="v1")
+    names = {r["name"] for r in w.list()}
+    assert names == {"Gaius", "Sydon", "Heleka", "boar", "Dread Boar", "Lutheria", "Lutherian guard"}
+    assert w.resolve("Lutheria")["kind"] == "location"  # its own name wins over someone's alias
+    assert w.resolve("Sydon")["name"] == "Sydon"
+
+
+def test_a_new_apply_version_reapplies_a_cached_catalog(monkeypatch):
+    import campaign.world as world_mod
+
+    store, camp, w, src = setup()
+    assert w.apply_book(src, BOOK, key="v1") is None
+    monkeypatch.setattr(world_mod, "APPLY_VERSION", world_mod.APPLY_VERSION + 1)
+    assert w.apply_book(src, BOOK, key="v1")
+    assert len(w.list()) == 2
+
+
+def test_lookup_and_find_entities_stay_a_readable_size():
+    import json
+
+    from campaign.tools import PAGE, ToolContext, build_tools
+
+    store = Store(":memory:")
+    camp = store.create_campaign("Big", "dm")
+    src = store.add_source(camp, "Book", "module", [{"heading": "", "text": "x", "page": 1}])
+    w = World(store, camp)
+    many = [_entry("Hub", "location", aliases=[f"hub alias {i}" for i in range(30)],
+                   facts=[f"fact number {i}" for i in range(80)])]
+    many += [_entry(f"Goblin {i}", "monster") for i in range(100)]
+    w.apply_book(src, many, key="v1")
+    tools = {t.__name__: t for t in build_tools(ToolContext(store, camp))}
+    hub = json.loads(tools["lookup"]("Hub"))[0]
+    assert len(hub["aliases"]) == 12 and hub["aliases_not_shown"] == 18
+    assert len(hub["facts"]) == 40 and hub["facts_not_shown"] > 0
+    overview = json.loads(tools["find_entities"]())
+    assert overview["counts_by_kind"] == {"location": 1, "monster": 100}
+    page = json.loads(tools["find_entities"](kind="monster"))
+    assert page["total"] == 100 and len(page["entities"]) == PAGE and page["next_offset"] == PAGE
+    rest = json.loads(tools["find_entities"](kind="monster", offset=PAGE))
+    assert len(rest["entities"]) == 100 - PAGE and "next_offset" not in rest

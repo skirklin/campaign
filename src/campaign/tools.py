@@ -29,6 +29,40 @@ def _json(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False, indent=1)
 
 
+PAGE = 60  # entities per find_entities page
+# Most of an entity a lookup shows; what's past these is counted, not shown.
+CAPS = {"aliases": 12, "facts": 40, "past": 15, "possible": 15}
+
+
+def _capped(view: dict[str, Any]) -> dict[str, Any]:
+    """An entity's view cut to a size that fits in a conversation."""
+    out = dict(view)
+    for k, n in CAPS.items():
+        if len(out.get(k) or []) > n:
+            out[f"{k}_not_shown"] = len(out[k]) - n
+            out[k] = out[k][:n]
+    return out
+
+
+def _brief_entity(r: dict[str, Any]) -> dict[str, Any]:
+    aliases = r["aliases"]
+    headline = r["headline"] or ""
+    return {
+        "kind": r["kind"], "name": r["name"],
+        "aliases": "; ".join(aliases[:5]) + (f" (+{len(aliases) - 5} more)" if len(aliases) > 5 else ""),
+        "current": r["current"],
+        "headline": headline if len(headline) <= 200 else headline[:197] + "…",
+    }
+
+
+def _page(items: list[Any], offset: int, name: str) -> dict[str, Any]:
+    offset = max(offset, 0)
+    out: dict[str, Any] = {"total": len(items), name: items[offset:offset + PAGE]}
+    if offset + PAGE < len(items):
+        out["next_offset"] = offset + PAGE
+    return out
+
+
 @dataclass
 class ToolContext:
     store: Store
@@ -138,24 +172,35 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
 
     # -- campaign state ------------------------------------------------------
 
-    def find_entities(kind: str | None = None, query: str | None = None, in_play_only: bool = False) -> str:
+    def find_entities(
+        kind: str | None = None, query: str | None = None, in_play_only: bool = False, offset: int = 0,
+    ) -> str:
         """List people, places and things in the campaign with their current status and location.
 
-        Call with no arguments for an overview. Check here before recording
-        facts about something new, so you add to the existing entity rather
-        than creating a duplicate under a slightly different name.
+        Call with no arguments for an overview: how many of each kind there
+        are, and what the table has interacted with. Check here before
+        recording facts about something new, so you add to the existing
+        entity rather than creating a duplicate under a slightly different name.
 
         Args:
             kind: npc, pc, monster, location, item, quest, faction or lore.
             query: Part of a name, alias or anything said about it.
             in_play_only: Only things the table has interacted with, not everything from the book.
+            offset: Skip this many, to page through a long list.
         """
-        rows = world.list(kind=kind, q=query, in_play=in_play_only)
+        overview = kind is None and query is None and not in_play_only
+        rows = world.list(kind=kind, q=query, in_play=in_play_only or overview)
+        if overview:
+            counts: dict[str, int] = {}
+            for r in world.list():
+                counts[r["kind"]] = counts.get(r["kind"], 0) + 1
+            if not counts:
+                return "Nothing in this campaign's world yet."
+            head = {"counts_by_kind": counts, "note": "Pass a kind or a query to list the rest."}
+            return _json(head | _page([_brief_entity(r) for r in rows], offset, "in_play"))
         if not rows:
             return "Nothing matches."
-        return _json([
-            {k: r[k] for k in ("kind", "name", "aliases", "current", "headline")} for r in rows[:200]
-        ])
+        return _json(_page([_brief_entity(r) for r in rows], offset, "entities"))
 
     def lookup(name: str, as_of_session: int | None = None) -> str:
         """Everything known about a person, creature, place, item or quest: true now, true before, and possible.
@@ -171,7 +216,7 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
             as_of_session: See the world as it was at the end of this session instead of now.
         """
         hits = world.lookup(name, as_of=as_of_session)
-        return _json(hits) if hits else "No match. Try find_entities or search_reference."
+        return _json([_capped(h) for h in hits]) if hits else "No match. Try find_entities or search_reference."
 
     def timeline(name: str) -> str:
         """How one entity changed session by session: facts beginning and ending, and the events it was in.
