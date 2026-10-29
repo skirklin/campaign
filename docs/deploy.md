@@ -5,8 +5,12 @@ This runs the web UI at `https://campaign.kirkl.in` on the homelab cluster.
 - **Hosting** follows the `werewolf` pattern: this repo publishes an image to
   GHCR, the cluster runs it with a persistent volume, and the homelab Caddy
   proxies a public hostname to it.
-- **Its own namespace:** it gets a `campaign` namespace, the "tenant"
-  layout `infra/EXTERNAL.md` describes.
+- **Its own namespace:** it runs in a `campaign` namespace, the "tenant"
+  layout the homelab repo's `infra/EXTERNAL.md` describes. Homelab owns the
+  envelope: the namespace, its quota and default limits, the `deployer`
+  ServiceAccount CI uses, and the Caddy route
+  (`infra/k8s/tenants/campaign.yaml`, `infra/k8s/caddy.yaml`). This repo
+  owns what runs inside it: the Deployment, Service and PVC.
 - **Sign-in** is Google, and invite-only. People join a campaign through an
   invite link, as a DM or a player, and the app's users and memberships
   live in its database, not in config.
@@ -15,7 +19,7 @@ This runs the web UI at `https://campaign.kirkl.in` on the homelab cluster.
 browser ──https──▶ Caddy (homelab ns, Let's Encrypt) ──▶ campaign.campaign.svc:8000 ──▶ /data (PVC)
                                                           └─ Google sign-in, invite-only
 GitHub Actions: push to main ─▶ test ─▶ ghcr.io/skirklin/campaign:sha-…
-                tag v* / manual ─────────────────────────────▶ deploy (kubectl set image, as `deployer`)
+                tag v* / manual ─────────────────────────────▶ deploy (kubectl apply -k, as `deployer`)
 ```
 
 ## What's protected, and how
@@ -38,8 +42,8 @@ GitHub Actions: push to main ─▶ test ─▶ ghcr.io/skirklin/campaign:sha-�
   localhost unless sign-in is configured or `--no-auth` is passed.
 - **The container is locked down.** It runs as a non-root user with a
   read-only root filesystem and no service-account token. The `deployer`
-  account that CI uses can only update this one Deployment's image and
-  watch the rollout, in this namespace.
+  account that CI uses can manage Deployments, Services and PVCs and read
+  pods and logs, in this namespace only. It can't read Secrets.
 
 ## One-time setup
 
@@ -55,14 +59,14 @@ In [Google Cloud Console](https://console.cloud.google.com/) → APIs & Services
    `https://campaign.kirkl.in/auth/callback`.
 3. Keep the client ID and secret for step 2.
 
-### 2. Cluster resources (needs admin credentials)
+### 2. The app's settings and credentials
 
 Settings live in two places:
 
 - **In `deploy/k8s/deployment.yaml`**, committed, like your other apps'
   plain `env` values: `CAMPAIGN_AUTH`, `CAMPAIGN_PUBLIC_URL` and
   `GOOGLE_CLIENT_ID`. Replace the `REPLACE_ME` client ID before the first
-  apply.
+  deploy.
 - **In the `campaign-secrets` Secret**, created by hand, for the three
   credentials:
 
@@ -75,13 +79,8 @@ Settings live in two places:
   The Secret is per namespace, so `campaign` can't share the homelab's
   `api-secrets`.
 
-With admin credentials, apply the manifests:
-
-```bash
-kubectl apply -k deploy/k8s
-```
-
-Copy the template:
+The `campaign` namespace comes from the homelab repo, so it must be deployed
+there first. Then, on the VPS, copy the template:
 
 ```bash
 cp deploy/k8s/secrets.env.example deploy/k8s/secrets.env
@@ -93,7 +92,7 @@ Fill in `deploy/k8s/secrets.env` (it's gitignored), then create the Secret:
 kubectl -n campaign create secret generic campaign-secrets --from-env-file=deploy/k8s/secrets.env
 ```
 
-The pod starts once the Secret exists. To change a credential later, edit
+Create it before the first deploy: the pod can't start without it. To change a credential later, edit
 the file and re-create the Secret:
 
 ```bash
@@ -108,7 +107,7 @@ kubectl -n campaign rollout restart deployment/campaign
 
 ### 3. Make yourself the first admin
 
-Once the pod is running, add yourself from inside it:
+After the first deploy (steps 4-6, then [Releasing](#releasing)), add yourself from inside it:
 
 ```bash
 kubectl -n campaign exec deploy/campaign -- campaign users add you@gmail.com --admin --claim-unowned
@@ -128,19 +127,18 @@ packages start private: either make it public (the package's settings
 page → Change visibility), as werewolf's is, or add an `imagePullSecret`
 to the Deployment.
 
-### 5. Caddy (in the homelab repo)
+### 5. Homelab
 
-Add a site block to the Caddyfile, and a line to `infra/EXTERNAL.md`:
+The homelab repo provides the namespace and its quota (one PVC of up to
+2 GiB; ephemeral storage counted, with defaults from a LimitRange), the
+`deployer` ServiceAccount and its token, and the Caddy route for
+`campaign.kirkl.in` with a 200 MB upload cap. See `campaign` in its
+`infra/EXTERNAL.md`. DNS needs nothing: the `*.kirkl.in` wildcard covers
+it, and Caddy gets the certificate itself.
 
-```
-# EXTERNAL: deployed from skirklin/campaign into its own `campaign` namespace.
-campaign.kirkl.in {
-    reverse_proxy campaign.campaign.svc.cluster.local:8000
-}
-```
-
-Then add a DNS record for `campaign.kirkl.in` pointing where the other
-`*.kirkl.in` hosts do. Caddy gets the certificate itself.
+A manifest here that outgrows the envelope (a second PVC, a bigger one,
+another kind of object the deployer can't create) needs a homelab change
+first.
 
 ### 6. GitHub (this repo → Settings)
 
@@ -191,8 +189,10 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-The Release workflow tests, builds and pushes the image, rolls the
-Deployment to it by digest, and checks `/healthz` through the public URL.
+The Release workflow tests, builds and pushes the image, applies
+`deploy/k8s` with the image pinned to that digest, waits for the rollout,
+and checks `/healthz` through the public URL. Manifest changes ship the
+same way.
 Running the workflow by hand from the Actions tab deploys the current
 `main`. Pushes to `main` only publish an image.
 

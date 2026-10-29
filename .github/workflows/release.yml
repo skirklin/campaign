@@ -67,6 +67,7 @@ jobs:
       group: deploy-production
       cancel-in-progress: false
     steps:
+      - uses: actions/checkout@v4
       - uses: azure/setup-kubectl@v4
       - name: Connect to the cluster as the campaign deployer
         env:
@@ -77,12 +78,19 @@ jobs:
           kubectl config set-credentials deployer --token="$KUBE_TOKEN"
           kubectl config set-context deploy --cluster=homelab --user=deployer --namespace=campaign
           kubectl config use-context deploy
-      - name: Roll out the new image
+      - name: Apply the manifests with the new image
         env:
           # By digest, so the cluster runs exactly the image this run built.
-          IMAGE: ghcr.io/${{ github.repository }}@${{ needs.image.outputs.digest }}
+          IMAGE: ghcr.io/${{ github.repository }}
+          DIGEST: ${{ needs.image.outputs.digest }}
         run: |
-          kubectl set image deployment/campaign campaign="$IMAGE"
+          cat >> deploy/k8s/kustomization.yaml <<EOF
+          images:
+            - name: ghcr.io/skirklin/campaign
+              newName: $IMAGE
+              digest: $DIGEST
+          EOF
+          kubectl apply -k deploy/k8s
           kubectl rollout status deployment/campaign --timeout=5m
       - name: Check it's serving
         env:

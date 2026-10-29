@@ -1,4 +1,5 @@
 # The database, original uploads and pre-migration backups (CAMPAIGN_HOME=/data).
+# 2Gi is the whole of the tenant's storage quota.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -8,4 +9,4 @@ spec:
   accessModes: [ReadWriteOnce]
   resources:
     requests:
-      storage: 5Gi
+      storage: 2Gi
