@@ -20,9 +20,10 @@ import tempfile
 import threading
 import traceback
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, AsyncIterator, Callable, Iterator
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
@@ -33,6 +34,9 @@ from . import digest, sheetscan
 from .accounts import Accounts, at_least
 from .auth import AuthConfig
 from .auth import install as install_auth
+from .mcp_server import remote_server
+from .oauth import Provider
+from .oauth import install as install_oauth
 from .charsheet import CharacterSheet, apply_hp, rest
 from .db import Campaign, Store
 from .library import add_reference, reindex
@@ -118,10 +122,22 @@ class AdminUpdate(BaseModel):
 
 def create_app(db: Path | str, auth: AuthConfig | None = None, exchange: Callable | None = None) -> FastAPI:
     """`exchange` replaces the call to Google's token endpoint (for tests)."""
+    # With sign-in on, the remote MCP endpoint (and its OAuth) is served too.
+    mcp = remote_server(db, auth) if auth is not None else None
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        if mcp is None:
+            yield
+            return
+        async with mcp[0].session_manager.run():
+            yield
+
     # No interactive API docs: they'd be one more surface to protect.
-    app = FastAPI(title="campaign", docs_url=None, redoc_url=None, openapi_url=None)
+    app = FastAPI(title="campaign", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     if auth is not None:
         install_auth(app, auth, db, **({"exchange": exchange} if exchange else {}))
+        install_oauth(app, Provider(db, auth))
     local = auth is None
     jobs: dict[str, Job] = {}
     digesting: dict[int, threading.Thread] = {}
@@ -186,6 +202,16 @@ def create_app(db: Path | str, auth: AuthConfig | None = None, exchange: Callabl
             return {"local": True}
         user = user_of(request)
         return {"id": user["id"], "email": user["email"], "is_admin": bool(user["is_admin"])}
+
+    @app.get("/api/me/apps")
+    def connected_apps(request: Request, s: Store = Depends(store)) -> list[dict[str, Any]]:
+        """Apps (like the Claude app) you've connected to your account over MCP."""
+        return s.oauth_sessions(signed_in(request)["id"])
+
+    @app.delete("/api/me/apps/{client_id}", status_code=204)
+    def disconnect_app(client_id: str, request: Request, s: Store = Depends(store)) -> None:
+        if not s.revoke_oauth_client(signed_in(request)["id"], client_id):
+            raise HTTPException(404, "no such connected app")
 
     @app.get("/api/info")
     def info(s: Store = Depends(store), _: Any = Depends(admin)) -> dict[str, Any]:
@@ -776,6 +802,9 @@ def create_app(db: Path | str, auth: AuthConfig | None = None, exchange: Callabl
     def index() -> FileResponse:
         return FileResponse(STATIC / "index.html")
 
+    if mcp is not None:
+        # Last, so it only gets what nothing above matched: /mcp and the OAuth endpoints.
+        app.mount("/", mcp[1])
     return app
 
 

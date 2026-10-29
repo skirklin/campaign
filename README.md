@@ -167,10 +167,29 @@ measured token counts. While a digest runs, the source's page refreshes on
 its own: sections fill in as they finish, each one's entities can be opened
 before the whole book is done, and the status line shows what's been spent.
 
-### Using it from Claude Code or Claude Desktop (MCP)
+### Using it from the Claude app (remote MCP)
 
-The same tools are also available over MCP. Claude Code or Claude Desktop
-can then be the assistant, and no API key is needed:
+When the web app runs with sign-in on, it also serves the tools over MCP at
+`<public url>/mcp`, for every campaign you belong to. In claude.ai (desktop
+or mobile), add it under Settings → Connectors as a custom connector; the
+**Account** page (click your email) shows the URL. Claude sends you to the
+app to sign in with Google and asks you to allow it, then acts as you:
+
+- **Your view of each campaign.** Every tool takes the campaign's slug
+  (`list_campaigns`); in a campaign where you're a player it gets the
+  spoiler-filtered world, and changing the world needs editor access.
+  Anyone in a campaign can add their own character (`create_character`),
+  which is how a photographed or scanned paper sheet gets entered.
+- **OAuth 2.1** (`oauth.py`): dynamic client registration, PKCE, codes and
+  tokens stored as hashes, access tokens for an hour and rotating refresh
+  tokens for 30 days, all tied to your user. The Account page lists
+  connected apps and disconnects them; removing a user revokes theirs.
+
+### Using it locally from Claude Code or Claude Desktop (MCP over stdio)
+
+The same tools are also available over local MCP, against the database on
+this machine. Claude Code or Claude Desktop can then be the assistant, and
+no API key is needed:
 
 ```bash
 claude mcp add strahd -- uv --directory /path/to/campaign run campaign mcp -c curse-of-strahd
