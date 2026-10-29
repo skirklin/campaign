@@ -13,9 +13,10 @@ from typing import Any, Callable
 
 from pydantic import ValidationError
 
+from . import tables
 from .charsheet import CharacterSheet, PartyStash, merge_patch
 from .db import Campaign, Store
-from .world import World
+from .world import TREASURE, World
 
 
 def _section(n: dict[str, Any]) -> dict[str, Any]:
@@ -25,8 +26,59 @@ def _section(n: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def format_stat_block(name: str, sb: dict[str, Any]) -> str:
+    def mod(score: int) -> str:
+        return f"{score} ({(score - 10) // 2:+d})"
+
+    abilities = [(a[:3].upper(), sb.get(a)) for a in
+                 ("strength", "dexterity", "constitution", "intelligence", "wisdom", "charisma")]
+    lines = [name, f"AC {sb['armor_class']} · HP {sb['hit_points']} · Speed {sb['speed']}"
+             + (f" · CR {sb['challenge']}" if sb.get("challenge") else "")]
+    if any(v is not None for _, v in abilities):
+        lines.append("  ".join(f"{a} {mod(v) if v is not None else '—'}" for a, v in abilities))
+    lines += sb.get("other") or []
+    for title, items in (("Traits", sb.get("traits")), ("Actions", sb.get("actions"))):
+        if items:
+            lines += ["", f"{title}:", *(f"- {i}" for i in items)]
+    return "\n".join(lines)
+
+
 def _json(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False, indent=1)
+
+
+PAGE = 60  # entities per find_entities page
+# Most of an entity a lookup shows; what's past these is counted, not shown.
+CAPS = {"aliases": 12, "facts": 40, "past": 15, "possible": 15}
+
+
+def _capped(view: dict[str, Any]) -> dict[str, Any]:
+    """An entity's view cut to a size that fits in a conversation."""
+    out = dict(view)
+    for k, n in CAPS.items():
+        if len(out.get(k) or []) > n:
+            out[f"{k}_not_shown"] = len(out[k]) - n
+            out[k] = out[k][:n]
+    return out
+
+
+def _brief_entity(r: dict[str, Any]) -> dict[str, Any]:
+    aliases = r["aliases"]
+    headline = r["headline"] or ""
+    return {
+        "kind": r["kind"], "name": r["name"],
+        "aliases": "; ".join(aliases[:5]) + (f" (+{len(aliases) - 5} more)" if len(aliases) > 5 else ""),
+        "current": r["current"],
+        "headline": headline if len(headline) <= 200 else headline[:197] + "…",
+    }
+
+
+def _page(items: list[Any], offset: int, name: str) -> dict[str, Any]:
+    offset = max(offset, 0)
+    out: dict[str, Any] = {"total": len(items), name: items[offset:offset + PAGE]}
+    if offset + PAGE < len(items):
+        out["next_offset"] = offset + PAGE
+    return out
 
 
 @dataclass
@@ -138,24 +190,35 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
 
     # -- campaign state ------------------------------------------------------
 
-    def find_entities(kind: str | None = None, query: str | None = None, in_play_only: bool = False) -> str:
+    def find_entities(
+        kind: str | None = None, query: str | None = None, in_play_only: bool = False, offset: int = 0,
+    ) -> str:
         """List people, places and things in the campaign with their current status and location.
 
-        Call with no arguments for an overview. Check here before recording
-        facts about something new, so you add to the existing entity rather
-        than creating a duplicate under a slightly different name.
+        Call with no arguments for an overview: how many of each kind there
+        are, and what the table has interacted with. Check here before
+        recording facts about something new, so you add to the existing
+        entity rather than creating a duplicate under a slightly different name.
 
         Args:
             kind: npc, pc, monster, location, item, quest, faction or lore.
             query: Part of a name, alias or anything said about it.
             in_play_only: Only things the table has interacted with, not everything from the book.
+            offset: Skip this many, to page through a long list.
         """
-        rows = world.list(kind=kind, q=query, in_play=in_play_only)
+        overview = kind is None and query is None and not in_play_only
+        rows = world.list(kind=kind, q=query, in_play=in_play_only or overview)
+        if overview:
+            counts: dict[str, int] = {}
+            for r in world.list():
+                counts[r["kind"]] = counts.get(r["kind"], 0) + 1
+            if not counts:
+                return "Nothing in this campaign's world yet."
+            head = {"counts_by_kind": counts, "note": "Pass a kind or a query to list the rest."}
+            return _json(head | _page([_brief_entity(r) for r in rows], offset, "in_play"))
         if not rows:
             return "Nothing matches."
-        return _json([
-            {k: r[k] for k in ("kind", "name", "aliases", "current", "headline")} for r in rows[:200]
-        ])
+        return _json(_page([_brief_entity(r) for r in rows], offset, "entities"))
 
     def lookup(name: str, as_of_session: int | None = None) -> str:
         """Everything known about a person, creature, place, item or quest: true now, true before, and possible.
@@ -171,7 +234,71 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
             as_of_session: See the world as it was at the end of this session instead of now.
         """
         hits = world.lookup(name, as_of=as_of_session)
-        return _json(hits) if hits else "No match. Try find_entities or search_reference."
+        return _json([_capped(h) for h in hits]) if hits else "No match. Try find_entities or search_reference."
+
+    def stat_block(name: str) -> str:
+        """The full stat block of a creature or NPC, as the book prints it, ready to run in combat.
+
+        Args:
+            name: Name or alias, e.g. "Morgantha" or "dread boar".
+        """
+        e = world.resolve(name)
+        view = world.view(e["id"]) if e else None
+        if view is None:
+            hits = world.lookup(name, limit=1)
+            view = hits[0] if hits else None
+        if view is None:
+            return f"No creature called {name!r}. Try find_entities(kind='monster')."
+        blocks = world.attribute_values(view["id"], "stat_block")
+        if not blocks:
+            return f"{view['name']} has no stat block in the digested material. Try search_reference."
+        return "\n\n".join(format_stat_block(view["name"], json.loads(b)) for b in blocks)
+
+    def treasure(place: str) -> str:
+        """What the book puts at a place or on a creature (coins, items, magic), still there unless taken.
+
+        When the party takes some, end that fact (end_fact) and add it to the
+        party stash (update_party_stash) or to whoever took it.
+
+        Args:
+            place: A location, keyed area ("C3"), creature or NPC, by name or alias.
+        """
+        e = world.resolve(place)
+        view = world.view(e["id"]) if e else None
+        if view is None:
+            return f"Nothing called {place!r}. Try find_entities(kind='location')."
+        found = [f for f in view["facts"] if f["statement"].startswith(TREASURE)]
+        taken = [f for f in view["past"] if f["statement"].startswith(TREASURE)]
+        if not found and not taken:
+            return f"The book lists no treasure at {view['name']}."
+        return _json({"name": view["name"], "treasure": found, "already_taken": taken})
+
+    def roll_table(name: str, roll: int | None = None) -> str:
+        """Roll on one of the book's tables (random encounters, treasure, rumors), or list them.
+
+        Args:
+            name: Part of the table's name, e.g. "random encounters" or "trinkets". Empty to list every table.
+            roll: Use this roll instead of rolling, e.g. one the player made at the table.
+        """
+        every = store.roll_tables(campaign)
+        q = name.strip().lower()
+        hits = [t for t in every if q in t["name"].lower()] if q else every
+        if not q or len(hits) != 1:
+            exact = [t for t in hits if t["name"].lower() == q]
+            if len(exact) == 1:
+                hits = exact
+            else:
+                listed = [{"name": t["name"], "dice": t["dice"], "source": t["source"], "pages": t["pages"]} for t in hits]
+                return _json({"tables": listed[:PAGE]}) if hits else "No such table. Call with an empty name to list them."
+        t = hits[0]
+        try:
+            n = roll if roll is not None else tables.roll(t["dice"])
+        except ValueError:
+            return _json({"table": t, "note": f"Can't roll {t['dice']!r} automatically; pick a row."})
+        row = tables.row_for(t, n)
+        return _json({"table": t["name"], "source": t["source"], "pages": t["pages"], "dice": t["dice"], "roll": n,
+                      "result": row["result"] if row else None,
+                      **({} if row else {"note": "No row matches that roll.", "rows": t["rows"]})})
 
     def timeline(name: str) -> str:
         """How one entity changed session by session: facts beginning and ending, and the events it was in.
@@ -442,6 +569,9 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         lookup,
         find_entities,
         timeline,
+        stat_block,
+        treasure,
+        roll_table,
         search_reference,
         read_reference,
         read_pages,

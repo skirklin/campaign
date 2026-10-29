@@ -34,6 +34,7 @@ import json
 import os
 import re
 import time
+import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -45,8 +46,8 @@ from pydantic import BaseModel
 from .db import Store
 from .loops import LeasedLoop
 
-LEAF_VERSION = 1
-BRANCH_VERSION = 1
+LEAF_VERSION = 2  # 2: rollable tables, keyed areas, read-aloud text, treasure
+BRANCH_VERSION = 2  # 2: stricter merge rules (no merging across kinds, members into groups, shared titles)
 MODEL = os.environ.get("CAMPAIGN_DIGEST_MODEL", os.environ.get("CAMPAIGN_MODEL", "claude-opus-5-5"))
 EFFORT = os.environ.get("CAMPAIGN_DIGEST_EFFORT", "medium")
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
@@ -91,11 +92,27 @@ class Entity(BaseModel):
     pages: list[int]
     facts: list[str]
     stat_block: StatBlock | None
+    area_key: str | None  # a keyed area's map key, e.g. "C3"
+    read_aloud: str | None  # boxed text to read to the players
+    treasure: list[str]  # what can be found here, or what it carries
+
+
+class TableRow(BaseModel):
+    roll: str  # "1-4", "05", "00", "18+"
+    result: str
+
+
+class RollTable(BaseModel):
+    name: str
+    dice: str  # "d20", "d100", "2d6"
+    pages: list[int]
+    rows: list[TableRow]
 
 
 class LeafOutput(BaseModel):
     summary: str
     entities: list[Entity]
+    tables: list[RollTable]
 
 
 class Merge(BaseModel):
@@ -134,6 +151,18 @@ Return:
   appears on; facts, short standalone statements with numbers copied
   exactly ("Reward: 50 gp each from Ismark", "DC 15 Wisdom save or be
   charmed"); and stat_block only when the full stat block is in this text.
+  For a keyed area (a numbered or lettered room or site on a map), also give
+  area_key, the key as printed ("C3", "12", "K20a"), and put its traps,
+  hazards, locks and checks with their DCs in facts. For anything, give
+  read_aloud, the boxed or read-aloud text exactly as printed, if there is
+  some, and treasure: each thing of value found there or carried, with
+  amounts copied exactly ("3 potions of healing", "a pouch with 25 gp",
+  "+1 longsword in the sarcophagus"). Otherwise leave these empty.
+- tables: every table meant to be rolled on (random encounters, treasure,
+  rumors, wild magic and the like), with its name, the dice to roll ("d20",
+  "d100", "2d6"), its pages, and every row: the roll exactly as printed
+  ("1-4", "05", "00", "18+") and the result in full. Not other tables
+  (price lists, stat summaries).
 
 Skip mundane things (doors, furniture, unnamed guards) unless the text makes
 them matter. Copy numbers exactly and never invent them.
@@ -149,11 +178,20 @@ Return:
   summaries: what it covers, the main NPCs and threats, important treasure,
   and how it connects to the rest of the adventure. 3-6 sentences; for a
   whole book, up to three short paragraphs.
-- merges: groups of entity ids that are the same thing under different names
-  or kinds (for example "Morgantha" and "the hag of Old Bonegrinder", or one
-  item described in two rooms). For each group give the best canonical name
-  (the book's proper name) and a 1-2 sentence summary combining what's known.
-  Only merge when you're confident. Leave everything else out.
+- merges: groups of entity ids that are the same single thing under
+  different names (for example "Morgantha" and "the hag of Old
+  Bonegrinder", or one item described in two rooms). For each group give the
+  best canonical name (the book's proper name) and a 1-2 sentence summary
+  combining what's known. Only merge when the text makes clear they are one
+  and the same. Never merge:
+  - different individuals who share a title, role or epithet ("the Titan",
+    "the king", "her father" can each be several people);
+  - a member, leader or servant into the group they belong to, or a group
+    into its leader;
+  - a creature with the place it lives in, the treasure it guards, or the
+    kind of creature it is (a named dragon is not "dragons");
+  - things of different kinds (a person and an item, a place and a faction).
+  Leave everything else out.
 """
 
 
@@ -345,6 +383,10 @@ def _dedupe(items: list[str]) -> list[str]:
 def combine(group: list[dict[str, Any]], name: str | None = None, summary: str | None = None) -> dict[str, Any]:
     name = name or group[0]["name"]
     aliases = _dedupe([e["name"] for e in group] + [a for e in group for a in e["aliases"]])
+
+    def first(field: str) -> Any:
+        return next((e[field] for e in group if e.get(field)), None)
+
     return {
         "name": name,
         "kind": group[0]["kind"],
@@ -352,7 +394,10 @@ def combine(group: list[dict[str, Any]], name: str | None = None, summary: str |
         "summary": summary or max((e["summary"] for e in group), key=len),
         "pages": sorted({p for e in group for p in e["pages"]}),
         "facts": _dedupe([f for e in group for f in e["facts"]]),
-        "stat_block": next((e["stat_block"] for e in group if e.get("stat_block")), None),
+        "stat_block": first("stat_block"),
+        "area_key": first("area_key"),
+        "read_aloud": first("read_aloud"),
+        "treasure": _dedupe([t for e in group for t in e.get("treasure") or []]),
     }
 
 
@@ -365,13 +410,23 @@ def premerge(children: list[DNode]) -> list[dict[str, Any]]:
     return [combine(g) if len(g) > 1 else g[0] for g in groups.values()]
 
 
+def _family(kind: str) -> str:
+    return "creature" if kind in ("npc", "monster") else kind
+
+
+MAX_MERGE = 6  # more than this many entries being "one thing" is a sign of lumping, not merging
+
+
 def apply_merges(candidates: list[dict[str, Any]], merges: list[Merge]) -> list[dict[str, Any]]:
+    """Combine the groups Claude says are one thing, within limits checked here: only
+    entries of the same kind of thing (a named creature may be an npc or a monster),
+    and only small groups. A group that breaks them is left unmerged."""
     index = {f"e{i}": i for i in range(len(candidates))}
     merged_into: dict[int, int] = {}  # candidate -> first candidate of its group
     groups: dict[int, tuple[list[int], Merge]] = {}
     for m in merges:
         ids = [index[i] for i in dict.fromkeys(m.ids) if i in index and index[i] not in merged_into]
-        if len(ids) < 2:
+        if len(ids) < 2 or len(ids) > MAX_MERGE or len({_family(candidates[i]["kind"]) for i in ids}) > 1:
             continue
         for i in ids:
             merged_into[i] = ids[0]
@@ -449,10 +504,12 @@ def digest_node(client: Any, node: DNode, model: str, effort: str) -> tuple[dict
         for e in entities:
             groups.setdefault((e["kind"], _norm(e["name"])), []).append(e)
         entities = [combine(g) if len(g) > 1 else {**g[0], "pages": sorted(set(g[0]["pages"]))} for g in groups.values()]
-        return {"summary": parsed.summary, "entities": entities}, i, o
+        tables = [t.model_dump() for t in parsed.tables if t.rows]
+        return {"summary": parsed.summary, "entities": entities, "tables": tables}, i, o
     candidates = premerge(node.children)
     parsed, i, o = _call(client, BRANCH_SYSTEM, branch_prompt(node, candidates), BranchOutput, model, effort)
-    return {"summary": parsed.summary, "entities": apply_merges(candidates, parsed.merges)}, i, o
+    tables = [t for c in node.children for t in c.output.get("tables", [])]  # passed up as they are
+    return {"summary": parsed.summary, "entities": apply_merges(candidates, parsed.merges), "tables": tables}, i, o
 
 
 # -- planning and running ------------------------------------------------------------
@@ -756,7 +813,32 @@ class Reconciler(LeasedLoop):
             s.close()
 
     def pass_once(self) -> bool:
+        if not self._replanned:
+            self.replan()
         return self.reconcile_once()
+
+    _replanned = False
+
+    def replan(self) -> None:
+        """Once per start: plan every source with a target again (no API calls).
+
+        A new version of the digest (LEAF_VERSION, BRANCH_VERSION) or of how a
+        catalog is applied to the world (world.APPLY_VERSION) changes the
+        keys; planning saves the new ones, so changed sections get digested,
+        and a cached catalog is applied again under the new rules.
+        """
+        s = Store(self.db)
+        try:
+            for t in s.digest_targets():
+                if self.stopping:
+                    return
+                try:
+                    plan(s, t["id"], t["model"])
+                except Exception:  # one bad source shouldn't stop the rest
+                    traceback.print_exc()
+        finally:
+            s.close()
+        self._replanned = True
 
     def reconcile_once(self) -> bool:
         """One pass over every source with a target. True if it digested anything."""

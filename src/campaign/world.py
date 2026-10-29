@@ -29,6 +29,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 from typing import Any
 
@@ -37,6 +38,30 @@ from .db import Campaign, Store, now
 # Common single-valued attributes. Any attribute works; these are suggested.
 ATTRIBUTES = ("status", "location", "holder", "disposition", "leader", "allegiance", "condition")
 SUMMARY_VERSION = 1
+# How a book's catalog is matched onto the world. Bump it when that changes,
+# and every digested book is applied again (from the cache: no API calls).
+APPLY_VERSION = 3
+
+# Aliases that describe rather than name ("the Titan", "her father") or are a
+# map's keys ("M1"): kept for finding things, never used to decide that two
+# entries are one thing, since many different things answer to them.
+_DESCRIPTIVE = re.compile(r"^(the|a|an|his|her|their|its|our|my|this|that|these|those)\s", re.IGNORECASE)
+_MAP_KEY = re.compile(r"^[a-z]{0,3}\d+[a-z]?$", re.IGNORECASE)
+
+
+TREASURE = "Treasure: "  # starts the statement of each thing of value the book puts somewhere
+BULKY = ("stat_block", "read_aloud")  # attributes too long to list among an entity's current values
+
+
+def _naming(alias: str) -> bool:
+    """Whether an alias names one thing, rather than describing it."""
+    a = alias.strip()
+    return len(a) > 2 and not _DESCRIPTIVE.match(a) and not _MAP_KEY.match(a)
+
+
+def _family(kind: str) -> str:
+    """Kinds that can be one thing: a named creature may be filed as an npc or a monster."""
+    return "creature" if kind in ("npc", "monster") else kind
 SUMMARY_MODEL = os.environ.get("CAMPAIGN_MODEL", "claude-opus-5-5")
 
 FACT_COLUMNS = (
@@ -141,8 +166,9 @@ class World:
         alias_filter = "" if every_alias else self._alias_filter
         rows = self.conn.execute(
             "SELECT e.id, e.kind FROM entities e WHERE e.campaign_id = ? AND (e.name = ? COLLATE NOCASE"
-            f" OR e.id IN (SELECT entity_id FROM aliases WHERE alias = ?{alias_filter})) ORDER BY e.id",
-            (self.campaign.id, name.strip(), name.strip()),
+            f" OR e.id IN (SELECT entity_id FROM aliases WHERE alias = ?{alias_filter}))"
+            " ORDER BY e.name = ? COLLATE NOCASE DESC, e.id",  # its own name before someone's alias
+            (self.campaign.id, name.strip(), name.strip(), name.strip()),
         ).fetchall()
         if not rows:
             return None
@@ -362,7 +388,7 @@ class World:
         cur = [f for f in facts if f["valid_to"] is None and f["modality"] == "fact"]
         e.update(
             as_of=self.now if as_of is None else as_of,
-            current={f["attribute"]: f["value"] for f in cur if f["attribute"] and f["attribute"] != "stat_block"},
+            current={f["attribute"]: f["value"] for f in cur if f["attribute"] and f["attribute"] not in BULKY},
             facts=[_brief(f) for f in cur],
             past=[_brief(f) for f in facts if f["valid_to"] is not None],
             possible=[_brief(f) for f in facts if f["modality"] != "fact" and f["valid_to"] is None],
@@ -370,6 +396,11 @@ class World:
             summary=self.cached_summary(entity_id) if as_of is None else None,
         )
         return e
+
+    def attribute_values(self, entity_id: int, attribute: str) -> list[str]:
+        """The current values of one attribute, as this viewer may see them (a stat block, read-aloud text)."""
+        return [f["value"] for f in self.facts(entity_id) if f["attribute"] == attribute
+                and f["valid_to"] is None and f["modality"] == "fact" and f["value"]]
 
     def list(self, kind: str | None = None, q: str | None = None, in_play: bool = False) -> list[dict[str, Any]]:
         """Entities with their current attributes and fact counts.
@@ -386,7 +417,7 @@ class World:
             " (SELECT count(*) FROM facts f JOIN runs r ON r.id = f.run_id WHERE f.entity_id = e.id AND r.kind != 'book')"
             " + (SELECT count(*) FROM event_entities WHERE entity_id = e.id) AS table_activity,"
             f" (SELECT json_group_object(f.attribute, f.value) FROM facts f WHERE f.entity_id = e.id"
-            f"  AND f.valid_to IS NULL AND f.attribute IS NOT NULL AND f.attribute != 'stat_block'"
+            f"  AND f.valid_to IS NULL AND f.attribute IS NOT NULL AND f.attribute NOT IN {tuple(BULKY)}"
             f"  AND f.modality = 'fact'{clause}) AS attrs,"
             f" (SELECT f.statement FROM facts f WHERE f.entity_id = e.id AND f.valid_to IS NULL"
             f"  AND f.attribute IS NULL AND f.modality = 'fact'{clause} ORDER BY f.valid_from DESC, f.id LIMIT 1) AS headline"
@@ -455,18 +486,20 @@ class World:
         When the catalog changes, the old book facts are replaced, but what
         the table did to them carries over: a book fact the table ended, or
         that the party learned, keeps that history if the new catalog still
-        says the same thing. Entities are matched by name and alias, so table
-        facts stay attached too.
+        says the same thing. Entities are matched by name (see _match_book_entry),
+        so table facts stay attached too.
         """
+        key = None if key is None else f"{key}/apply{APPLY_VERSION}"
         old = self.conn.execute(
             "SELECT id, input_key FROM runs WHERE kind = 'book' AND source_id = ?", (source_id,)
         ).fetchall()
         if key is not None and len(old) == 1 and old[0]["input_key"] == key:
             return None
         carried = {
-            (r["entity_id"], r["statement"]): r
+            (r["name"].lower(), r["statement"]): r
             for r in self.conn.execute(
-                "SELECT f.entity_id, f.statement, f.valid_to, f.closed_by_run, f.party_knows_from FROM facts f"
+                "SELECT e.name, f.statement, f.valid_to, f.closed_by_run, f.party_knows_from FROM facts f"
+                " JOIN entities e ON e.id = f.entity_id"
                 " JOIN runs r ON r.id = f.run_id WHERE r.kind = 'book' AND r.source_id = ?"
                 " AND (f.valid_to IS NOT NULL OR f.party_knows_from IS NOT NULL)",
                 (source_id,),
@@ -482,18 +515,16 @@ class World:
             ).lastrowid
         known = not src["dm_only"]
         for item in entities:
-            e = None
-            for name in (item["name"], *item.get("aliases", [])):
-                if e := self.resolve(name, item["kind"], every_alias=True):
-                    break
-            e = e or self.ensure_entity(item["name"], item["kind"])
-            for alias in (item["name"], *item.get("aliases", [])):
+            e = self._match_book_entry(item) or self._new_entity(item["name"], item["kind"])
+            key_alias = [item["area_key"]] if item.get("area_key") else []
+            for alias in (item["name"], *item.get("aliases", []), *key_alias):
                 self.add_alias(e["id"], alias, run)
             pages = item.get("pages", [])
             statements = ([item["summary"]] if item.get("summary") else []) + list(item.get("facts", []))
+            statements += [f"{TREASURE}{t}" for t in item.get("treasure") or []]
             for statement in statements:
                 fact = self.record(e["id"], statement, run, 0, party_knows=known, source_id=source_id, pages=pages)
-                if prev := carried.get((e["id"], statement.strip())):
+                if prev := carried.get((e["name"].lower(), statement.strip())):
                     with self.conn:
                         self.conn.execute(
                             "UPDATE facts SET valid_to = ?, closed_by_run = ?,"
@@ -507,8 +538,45 @@ class World:
                     run, 0, attribute="stat_block", value=json.dumps(sb), party_knows=known,
                     source_id=source_id, pages=pages,
                 )
+            if text := item.get("read_aloud"):
+                self.record(e["id"], f"Read aloud: {text}", run, 0, attribute="read_aloud", value=text,
+                            party_knows=known, source_id=source_id, pages=pages)
         self._remove_orphans()
         return run
+
+    def _match_book_entry(self, item: dict[str, Any]) -> dict[str, Any] | None:
+        """The existing entity a book catalog entry is, if any: one of the same kind of thing
+        whose own name is the entry's name or one of its naming aliases, or else the one
+        entity that has the entry's name as a naming alias.
+
+        Aliases are never matched to aliases. Descriptions like "the Titan" are shared by
+        many things, and matching on them chained the whole book into a few entities.
+        """
+        family = _family(item["kind"])
+        names = [item["name"], *(a for a in item.get("aliases", []) if _naming(a))]
+        for name in names:
+            for r in self.conn.execute(
+                "SELECT id, kind FROM entities WHERE campaign_id = ? AND name = ? COLLATE NOCASE ORDER BY id",
+                (self.campaign.id, name.strip()),
+            ):
+                if _family(r["kind"]) == family:
+                    return self.entity(r["id"])
+        if _naming(item["name"]):
+            rows = [r for r in self.conn.execute(
+                "SELECT DISTINCT e.id, e.kind FROM entities e JOIN aliases a ON a.entity_id = e.id"
+                " WHERE e.campaign_id = ? AND a.alias = ?", (self.campaign.id, item["name"].strip()),
+            ) if _family(r["kind"]) == family]
+            if len(rows) == 1:
+                return self.entity(rows[0]["id"])
+        return None
+
+    def _new_entity(self, name: str, kind: str) -> dict[str, Any]:
+        with self.conn:
+            entity_id = self.conn.execute(
+                "INSERT INTO entities (campaign_id, kind, name, created_at) VALUES (?, ?, ?, ?)",
+                (self.campaign.id, kind, name.strip(), now()),
+            ).lastrowid
+        return self.entity(entity_id)
 
     # -- synthesized summaries --------------------------------------------------
 
