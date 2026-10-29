@@ -107,6 +107,7 @@ class Status(Model):
     active: bool = False
     note: str = ""  # what it's on: the spell being concentrated on
     resource: str = ""  # a resource's name, spent when switched on
+    uses: Literal["", "action", "bonus", "reaction"] = ""  # what starting it takes in a turn (Rage: bonus)
     duration: int = Field(default=0, ge=0)  # rounds it lasts (Rage, Bless: 10), shown in combat; 0 if open-ended
 
 
@@ -187,6 +188,8 @@ class Attack(Model):
     hit_bonus: int = 0
     damage: list[Damage] = []
     range: str = ""  # "5 ft", "20/60 ft"
+    # "action": one of the attacks an Attack action gives; "bonus": a bonus action (an off-hand attack)
+    uses: Literal["action", "bonus"] = "action"
     properties: list[str] = []  # "finesse", "versatile 1d10", "thrown 20/60", "reach"
     notes: str = ""  # what it does beyond its numbers, in a few words
 
@@ -291,6 +294,8 @@ class CharacterSheet(Model):
     bonuses: list[Bonus] = []  # from features and effects; items carry their own
     statuses: list[Status] = []  # switched on and off in play: Rage, Concentration…
     attack_options: list[AttackOption] = []  # chosen per attack: Reckless Attack, Great Weapon Master
+    attacks_per_action: int = Field(default=1, ge=1, le=4)  # Extra Attack: 2 (a fighter: up to 4)
+    grapple_bonus_action: bool = False  # can grapple as a bonus action (Precocious Wrestler, Tavern Brawler)
     resources: list[Resource] = []
     spellcasting_ability: str = ""
     spells: list[Spell] = []
