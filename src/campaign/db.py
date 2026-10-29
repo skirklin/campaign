@@ -256,6 +256,7 @@ CREATE TABLE invites (
 );
 
 -- A sheet belongs to the person who made it and, optionally, a campaign.
+-- (v5 makes the campaign required and links the world entity; see V5_CHARACTERS.)
 CREATE TABLE characters (
     id           INTEGER PRIMARY KEY,
     campaign_id  INTEGER REFERENCES campaigns(id) ON DELETE SET NULL,
@@ -281,10 +282,37 @@ CREATE TABLE character_log (
 BASELINE = 4
 
 
+# v5: a character belongs to exactly one campaign, is the same character as a
+# player-character entity in that campaign's world (entity_id; linked when
+# the sheet is next touched), and remembers the sheet it was copied from.
+# Sheets that weren't in any campaign are dropped.
+V5_CHARACTERS = """
+DELETE FROM characters WHERE campaign_id IS NULL;
+DELETE FROM character_log WHERE character_id NOT IN (SELECT id FROM characters);
+CREATE TABLE characters_v5 (
+    id           INTEGER PRIMARY KEY,
+    campaign_id  INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    owner_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    name         TEXT NOT NULL,
+    sheet        TEXT NOT NULL,
+    entity_id    INTEGER REFERENCES entities(id) ON DELETE SET NULL,
+    copied_from  INTEGER REFERENCES characters(id) ON DELETE SET NULL,
+    updated_at   TEXT NOT NULL,
+    UNIQUE (campaign_id, name)
+);
+INSERT INTO characters_v5 (id, campaign_id, owner_id, name, sheet, updated_at)
+    SELECT id, campaign_id, owner_id, name, sheet, updated_at FROM characters;
+DROP TABLE characters;
+ALTER TABLE characters_v5 RENAME TO characters;
+CREATE INDEX characters_owner ON characters(owner_id);
+CREATE INDEX characters_entity ON characters(entity_id);
+"""
+
 # Append only, for changes small enough to migrate. Each step runs in its
 # own transaction and then sets user_version to its number.
 MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (BASELINE, SCHEMA),
+    (5, V5_CHARACTERS),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 
@@ -423,11 +451,13 @@ class Store:
         with self.conn:
             for r in old.execute("SELECT id, slug, name, role, notes, created_at FROM campaigns"):
                 self.conn.execute("INSERT INTO campaigns VALUES (?, ?, ?, ?, ?, ?)", tuple(r))
-            for r in old.execute("SELECT id, campaign_id, name, sheet, updated_at FROM characters"):
+            for r in old.execute("SELECT id, campaign_id, name, sheet, updated_at FROM characters"
+                                 " WHERE campaign_id IS NOT NULL"):
                 self.conn.execute(
                     "INSERT INTO characters (id, campaign_id, name, sheet, updated_at) VALUES (?, ?, ?, ?, ?)", tuple(r)
                 )
-            for r in old.execute("SELECT id, character_id, change, reason, created_at FROM character_log"):
+            for r in old.execute("SELECT l.id, l.character_id, l.change, l.reason, l.created_at FROM character_log l"
+                                 " JOIN characters c ON c.id = l.character_id WHERE c.campaign_id IS NOT NULL"):
                 self.conn.execute("INSERT INTO character_log VALUES (?, ?, ?, ?, ?)", tuple(r))
             if "digests" in tables:
                 for r in old.execute("SELECT * FROM digests"):
@@ -849,7 +879,7 @@ class Store:
         return d
 
     def character(self, character_id: int) -> dict[str, Any] | None:
-        """{id, campaign_id, owner_id, name, sheet, updated_at}, or None."""
+        """{id, campaign_id, owner_id, name, sheet, entity_id, copied_from, updated_at}, or None."""
         row = self.conn.execute("SELECT * FROM characters WHERE id = ?", (character_id,)).fetchone()
         return None if row is None else self._character(row)
 
@@ -876,25 +906,54 @@ class Store:
         return [self._character(r) for r in self.conn.execute(sql + " ORDER BY name", params)]
 
     def create_character(
-        self, sheet: dict[str, Any], campaign_id: int | None = None, owner_id: int | None = None,
-        reason: str = "created",
+        self, sheet: dict[str, Any], campaign_id: int, owner_id: int | None = None,
+        reason: str = "created", copied_from: int | None = None,
     ) -> int:
-        """Raises sqlite3.IntegrityError if the campaign already has a character by that name."""
+        """Add a character to a campaign and link it to its world entity.
+
+        Raises sqlite3.IntegrityError if the campaign already has a character by that name.
+        """
         with self.conn:
             character_id = self.conn.execute(
-                "INSERT INTO characters (campaign_id, owner_id, name, sheet, updated_at) VALUES (?, ?, ?, ?, ?)",
-                (campaign_id, owner_id, sheet["name"], json.dumps(sheet), now()),
+                "INSERT INTO characters (campaign_id, owner_id, name, sheet, copied_from, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (campaign_id, owner_id, sheet["name"], json.dumps(sheet), copied_from, now()),
             ).lastrowid
             self._log_character(character_id, sheet, reason)
+        self.link_character(character_id)
         return character_id
 
     def update_character(self, character_id: int, sheet: dict[str, Any], reason: str = "") -> None:
+        before = self.character(character_id)
         with self.conn:
             self.conn.execute(
                 "UPDATE characters SET name = ?, sheet = ?, updated_at = ? WHERE id = ?",
                 (sheet["name"], json.dumps(sheet), now(), character_id),
             )
             self._log_character(character_id, sheet, reason)
+        entity_id = self.link_character(character_id)
+        if before and before["name"] != sheet["name"]:
+            self._world(before["campaign_id"]).rename_character(entity_id, sheet["name"])
+
+    def _world(self, campaign_id: int) -> Any:
+        from .world import World  # world -> db
+
+        return World(self, self.campaign_by_id(campaign_id))
+
+    def link_character(self, character_id: int) -> int:
+        """The id of the player-character entity this sheet is, linking one if it has none yet."""
+        ch = self.character(character_id)
+        world = self._world(ch["campaign_id"])
+        if ch["entity_id"] is not None and world.entity(ch["entity_id"]):
+            return ch["entity_id"]
+        entity_id = world.character_entity(ch["name"], character_id)
+        with self.conn:
+            self.conn.execute("UPDATE characters SET entity_id = ? WHERE id = ?", (entity_id, character_id))
+        return entity_id
+
+    def character_for_entity(self, entity_id: int) -> dict[str, Any] | None:
+        row = self.conn.execute("SELECT id, name FROM characters WHERE entity_id = ?", (entity_id,)).fetchone()
+        return None if row is None else dict(row)
 
     def _log_character(self, character_id: int, sheet: dict[str, Any], reason: str) -> None:
         self.conn.execute(

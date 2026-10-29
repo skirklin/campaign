@@ -371,13 +371,13 @@ def char_import(path: Path, campaign: CampaignOpt = None) -> None:
     """Create or replace a character from a JSON sheet (see examples/character.json)."""
     s = store()
     sheet = CharacterSheet.model_validate_json(path.read_text(encoding="utf-8"))
-    c = pick(s, campaign) if (campaign or s.campaigns()) else None
+    c = pick(s, campaign)  # a character belongs to a campaign
     reason = f"imported from {path.name}"
     if existing := s.find_character(sheet.name, c):
         s.update_character(existing["id"], sheet.model_dump(), reason=reason)
     else:
-        s.create_character(sheet.model_dump(), campaign_id=c.id if c else None, reason=reason)
-    typer.echo(f"Saved {sheet.name}.")
+        s.create_character(sheet.model_dump(), campaign_id=c.id, reason=reason)
+    typer.echo(f"Saved {sheet.name} in {c.name}.")
 
 
 @char_app.command("set")

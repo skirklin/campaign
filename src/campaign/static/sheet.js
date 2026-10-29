@@ -23,27 +23,55 @@ const CONDITIONS = [
 const RECHARGE = ["", "short rest", "long rest", "dawn"];
 const COINS = ["cp", "sp", "ep", "gp", "pp"];
 
+// A character lives in exactly one campaign. This page is a view across them:
+// your characters, grouped by campaign, and the rest of each of your parties.
 export async function characterList() {
   const [chars, campaigns] = await Promise.all([api("GET", "/api/characters"), api("GET", "/api/campaigns")]);
-  const nameInput = h("input", { placeholder: "New character name", required: true, "aria-label": "Character name" });
-  const campaign = h("select", { "aria-label": "Campaign" },
-    h("option", { value: "" }, "No campaign (private)"),
-    campaigns.map((c) => h("option", { value: c.slug }, c.name)));
-  const open = (r) => (location.hash = `#/characters/${r.id}`);
-  const create = async (e) => {
-    e.preventDefault();
-    try {
-      open(await api("POST", "/api/characters", { name: nameInput.value.trim(), campaign: campaign.value || null }));
-    } catch (err) {
-      toast(err.message, true);
+  const byCampaign = (list) => {
+    const groups = new Map();
+    for (const c of list) {
+      if (!groups.has(c.campaign.slug)) groups.set(c.campaign.slug, { campaign: c.campaign, chars: [] });
+      groups.get(c.campaign.slug).chars.push(c);
     }
+    return [...groups.values()].map((g) => h("div.char-group",
+      h("h3", h("a", { href: `#/campaigns/${g.campaign.slug}/party` }, g.campaign.name)),
+      h("div.cards", g.chars.map((c) => characterCard(c)))));
   };
+  const mine = chars.filter((c) => c.mine);
+  const others = chars.filter((c) => !c.mine);
+  return h("section.page",
+    h("h1", "Characters"),
+    mine.length === 0 && h("p.empty", campaigns.length
+      ? "No characters yet. Create one in a campaign, or import a JSON sheet."
+      : ["A character belongs to a campaign. ", h("a", { href: "#/campaigns" }, "Create or join one"), " first."]),
+    byCampaign(mine),
+    campaigns.length > 0 && newCharacterForm(campaigns),
+    others.length > 0 && h("h2.section-title", "The rest of your parties"),
+    byCampaign(others),
+  );
+}
+
+export function characterCard(c) {
+  return h("a.card.char-card", { href: `#/characters/${c.id}` },
+    h("strong", c.name),
+    h("span.muted", [c.species, c.summary].filter(Boolean).join(" · ") || "—"),
+    hpBar(c.hp),
+  );
+}
+
+// Create or import a character: into `campaign` if given, else one picked from `campaigns`.
+export function newCharacterForm(campaigns, campaign = null) {
+  const nameInput = h("input", { placeholder: "New character name", required: true, "aria-label": "Character name" });
+  const pick = !campaign && h("select", { "aria-label": "Campaign", required: true },
+    campaigns.map((c) => h("option", { value: c.slug }, c.name)));
+  const slug = () => campaign?.slug || pick.value;
+  const open = (r) => (location.hash = `#/characters/${r.id}`);
   const fileInput = h("input", {
     type: "file", accept: ".json,application/json", hidden: true,
     onchange: async () => {
       const fd = new FormData();
       fd.append("file", fileInput.files[0]);
-      fd.append("campaign", campaign.value);
+      fd.append("campaign", slug());
       try {
         open(await api("POST", "/api/characters/import", fd));
       } catch (err) {
@@ -51,27 +79,17 @@ export async function characterList() {
       }
     },
   });
-  const card = (c) => h("a.card.char-card", { href: `#/characters/${c.id}` },
-    h("strong", c.name),
-    h("span.muted", [c.species, c.summary].filter(Boolean).join(" · ") || "—"),
-    c.campaign && h("span.muted.small", c.campaign.name),
-    hpBar(c.hp),
-  );
-  const mine = chars.filter((c) => c.mine);
-  const party = chars.filter((c) => !c.mine);
-  return h("section.page",
-    h("h1", "Characters"),
-    h("div.cards",
-      mine.length === 0 && h("p.empty", "No characters yet. Create one, or import a JSON sheet."),
-      mine.map(card),
-    ),
-    h("form.inline-form", { onsubmit: create },
-      nameInput, campaign, h("button.primary", { type: "submit" }, "Create"),
-      h("button", { type: "button", onclick: () => fileInput.click() }, "Import JSON…"), fileInput,
-    ),
-    party.length > 0 && h("h2.section-title", "Others in your campaigns"),
-    party.length > 0 && h("div.cards", party.map(card)),
-  );
+  return h("form.inline-form", {
+    onsubmit: async (e) => {
+      e.preventDefault();
+      try {
+        open(await api("POST", "/api/characters", { name: nameInput.value.trim(), campaign: slug() }));
+      } catch (err) {
+        toast(err.message, true);
+      }
+    },
+  }, nameInput, pick || "", h("button.primary", { type: "submit" }, "Create"),
+    h("button", { type: "button", onclick: () => fileInput.click() }, "Import JSON…"), fileInput);
 }
 
 function hpBar(hp) {
@@ -89,9 +107,11 @@ export async function sheetView(id) {
 }
 
 class SheetView {
-  constructor({ id, campaign, can_edit, sheet, derived, log }) {
+  constructor({ id, campaign, can_edit, entity_id, copied_from, sheet, derived, log }) {
     this.id = id;
     this.campaign = campaign;
+    this.entityId = entity_id;
+    this.copiedFrom = copied_from;
     this.canEdit = can_edit;
     this.sheet = sheet;
     this.derived = derived;
@@ -103,6 +123,47 @@ class SheetView {
     this.el = this.render();
     this.updateDerived();
     if (!this.canEdit) this.lock();
+    this.loadWorld();
+  }
+
+  // -- the character in its campaign's world ---------------------------------
+
+  async loadWorld() {
+    try {
+      const e = await api("GET", `/api/campaigns/${this.campaign.slug}/entities/${this.entityId}`);
+      const items = e.timeline;
+      this.worldBox.replaceChildren(items.length
+        ? h("ul.timeline", items.map((i) => h("li",
+            h("span.session-num", i.session === 0 ? "before" : `#${i.session}`), " ",
+            i.change === "ended" ? h("s", i.statement) : i.statement)))
+        : h("p.muted", "Nothing recorded yet. Session ingests and chats add to this."));
+    } catch (err) {
+      this.worldBox.replaceChildren(h("p.muted", err.message));
+    }
+  }
+
+  async copyTo() {
+    const others = (await api("GET", "/api/campaigns")).filter((c) => c.slug !== this.campaign.slug);
+    if (!others.length) return toast("You're not in any other campaign to copy this character to.", true);
+    const pick = h("select", { "aria-label": "Campaign" }, others.map((c) => h("option", { value: c.slug }, c.name)));
+    const dialog = h("dialog.copy-dialog",
+      h("form", { method: "dialog" },
+        h("h3", `Copy ${this.sheet.name} to…`),
+        pick,
+        h("p.muted.small", "The copy is a separate sheet in that campaign: changes to one don't touch the other."),
+        h("div.actions", h("button", { value: "cancel" }, "Cancel"), h("button.primary", { value: "copy" }, "Copy"))));
+    dialog.addEventListener("close", async () => {
+      dialog.remove();
+      if (dialog.returnValue !== "copy") return;
+      try {
+        const r = await api("POST", `/api/characters/${this.id}/copy`, { campaign: pick.value });
+        location.hash = `#/characters/${r.id}`;
+      } catch (err) {
+        toast(err.message, true);
+      }
+    });
+    document.body.append(dialog);
+    dialog.showModal();
   }
 
   // Someone else's sheet: readable, not editable. Export still works.
@@ -272,10 +333,16 @@ class SheetView {
         this.status,
         h("div.head-actions",
           h("button.keep-enabled", { onclick: () => this.exportJson() }, "Export"),
+          this.canEdit && h("button", { onclick: () => this.copyTo() }, "Copy to campaign…"),
           this.canEdit && h("button.danger", { onclick: () => this.remove() }, "Delete"),
         ),
       ),
-      this.campaign && h("p.muted.small", "In ", h("a", { href: `#/campaigns/${this.campaign.slug}` }, this.campaign.name)),
+      h("p.muted.small",
+        "In ", h("a", { href: `#/campaigns/${this.campaign.slug}/party` }, this.campaign.name),
+        " · ", h("a", { href: `#/campaigns/${this.campaign.slug}/entity/${this.entityId}` }, "world entry"),
+        this.copiedFrom && [" · copied from ", this.copiedFrom.id
+          ? h("a", { href: `#/characters/${this.copiedFrom.id}` }, `${this.copiedFrom.name} (${this.copiedFrom.campaign.name})`)
+          : `${this.copiedFrom.name} (${this.copiedFrom.campaign.name})`]),
       h("div.identity",
         this.field("species", { label: "Species" }),
         this.field("background", { label: "Background" }),
@@ -317,6 +384,7 @@ class SheetView {
             this.field("personality", { type: "textarea", label: "Personality", rows: 3 }),
             this.field("notes", { type: "textarea", label: "Notes", rows: 6 }),
           ]),
+          this.section("world", "In the world", () => (this.worldBox = h("div", h("p.muted", "Loading…")))),
           this.section("log", "History", () => h("ul.log", this.log.map((l) => h("li", h("time", l.created_at.replace("T", " ").slice(0, 16)), " ", l.reason)))),
         ),
       ),
@@ -513,7 +581,7 @@ class SheetView {
   async remove() {
     if (!confirm(`Delete ${this.sheet.name}? This can't be undone.`)) return;
     await api("DELETE", `/api/characters/${this.id}`);
-    location.hash = "#/characters";
+    location.hash = `#/campaigns/${this.campaign.slug}/party`;
   }
 }
 

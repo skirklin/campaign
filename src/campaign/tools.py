@@ -279,11 +279,12 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
     # -- characters ----------------------------------------------------------
 
     def _find_character(name: str) -> dict[str, Any] | None:
-        # This campaign's character, or one not assigned to any campaign.
+        # This campaign's character by its sheet's name, or by any name its world entity answers to.
         if found := store.find_character(name, campaign):
             return found
-        loose = store.find_character(name)
-        return loose if loose and loose["campaign_id"] is None else None
+        if (e := world.resolve(name, "pc")) and (linked := store.character_for_entity(e["id"])):
+            return store.character(linked["id"])
+        return None
 
     def get_character(name: str) -> str:
         """Read a player character's sheet, including computed modifiers, saves, skills and spell DC.

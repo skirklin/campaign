@@ -3,6 +3,7 @@
 
 import { api, h, toast, enc, whoami, canEdit } from "./util.js";
 import { membersTab } from "./people.js";
+import { characterCard, newCharacterForm } from "./sheet.js";
 
 export async function campaignList() {
   const [campaigns, info] = await Promise.all([api("GET", "/api/campaigns"), api("GET", "/api/info").catch(() => null)]);
@@ -36,6 +37,7 @@ export async function campaignList() {
 
 const TABS = [
   ["ingest", "Sessions"],
+  ["party", "Party"],
   ["reference", "Reference"],
   ["state", "World state"],
   ["journal", "Journal"],
@@ -48,13 +50,42 @@ export async function campaignView(slug, tab) {
   if (!c) throw new Error(`No campaign "${slug}".`);
   const tabs = TABS.filter(([key]) => key !== "members" || !me.local);
   const body = h("div.tab-body", h("p.muted", "Loading…"));
-  const render = { ingest: sessionsTab, reference: referenceTab, state: stateTab, journal: journalTab, members: membersTab }[tab] || sessionsTab;
+  const render = { ingest: sessionsTab, party: partyTab, reference: referenceTab, state: stateTab, journal: journalTab, members: membersTab }[tab] || sessionsTab;
   render(c, me).then((el) => body.replaceChildren(el), (err) => body.replaceChildren(h("p.empty", err.message)));
   return h("section.page",
     h("div.page-head", h("h1", c.name), h(`span.badge.${c.role}`, c.role === "dm" ? "DM" : "Player"),
       !canEdit(c) && h("span.badge", "view only")),
     h("nav.tabs", tabs.map(([key, label]) => h("a", { href: `#/campaigns/${slug}/${key}`, className: key === tab ? "active" : "" }, label))),
     body,
+  );
+}
+
+// -- party ---------------------------------------------------------------------
+
+async function partyTab(c) {
+  const [party, mine] = await Promise.all([api("GET", `/api/campaigns/${c.slug}/characters`), api("GET", "/api/characters")]);
+  // Your characters elsewhere, which can be copied into this campaign.
+  const elsewhere = mine.filter((x) => x.mine && x.campaign.slug !== c.slug);
+  const pick = h("select", { "aria-label": "Character to copy" },
+    elsewhere.map((x) => h("option", { value: x.id }, `${x.name} (${x.campaign.name})`)));
+  return h("div",
+    h("div.cards",
+      party.length === 0 && h("p.empty", "No characters in this campaign yet."),
+      party.map((x) => characterCard(x))),
+    h("h2.section-title", "Add a character"),
+    newCharacterForm([], c),
+    elsewhere.length > 0 && h("form.inline-form", {
+      onsubmit: async (e) => {
+        e.preventDefault();
+        try {
+          const r = await api("POST", `/api/characters/${pick.value}/copy`, { campaign: c.slug });
+          location.hash = `#/characters/${r.id}`;
+        } catch (err) {
+          toast(err.message, true);
+        }
+      },
+    }, h("span.muted", "Or bring one of yours from another campaign:"), pick, h("button", { type: "submit" }, "Copy here")),
+    elsewhere.length > 0 && h("p.muted.small", "A copy is a separate sheet: changes here don't touch the original."),
   );
 }
 
@@ -590,7 +621,8 @@ export async function entityView(slug, id) {
   renderAt();
   return h("section.page",
     h("div.page-head", h("a", { href: `#/campaigns/${slug}/state` }, `← ${c.name}`)),
-    h("div.page-head", h("h1", e.name), h("span.badge", e.kind)),
+    h("div.page-head", h("h1", e.name), h("span.badge", e.kind),
+      e.character && h("a", { href: `#/characters/${e.character.id}` }, "Character sheet →")),
     e.aliases.length > 0 && h("p.muted", "Also known as ", e.aliases.join(" · ")),
     summary,
     now > 0 && h("div.as-of", sliderLabel, slider),

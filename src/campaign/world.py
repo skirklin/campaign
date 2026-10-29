@@ -29,6 +29,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sqlite3
 from typing import Any
 
 from .db import Campaign, Store, now
@@ -111,6 +112,7 @@ class World:
         with self.conn:
             return self.conn.execute(
                 "DELETE FROM entities WHERE campaign_id = ?"
+                " AND id NOT IN (SELECT entity_id FROM characters WHERE entity_id IS NOT NULL)"
                 " AND id NOT IN (SELECT entity_id FROM facts)"
                 " AND id NOT IN (SELECT entity_id FROM aliases)"
                 " AND id NOT IN (SELECT entity_id FROM event_entities)",
@@ -158,6 +160,38 @@ class World:
             ).lastrowid
         return self.entity(entity_id)
 
+    def character_entity(self, name: str, character_id: int) -> int:
+        """The player-character entity a sheet called `name` is.
+
+        One already in this world by that name or alias (say, from a session
+        ingest before the sheet existed), unless another sheet has it;
+        otherwise a new one.
+        """
+        found = self.resolve(name, "pc", every_alias=True)
+        if found and found["kind"] == "pc" and not self.conn.execute(
+            "SELECT 1 FROM characters WHERE entity_id = ? AND id != ?", (found["id"], character_id)
+        ).fetchone():
+            return found["id"]
+        with self.conn:
+            return self.conn.execute(
+                "INSERT INTO entities (campaign_id, kind, name, created_at) VALUES (?, 'pc', ?, ?)",
+                (self.campaign.id, name.strip(), now()),
+            ).lastrowid
+
+    def rename_character(self, entity_id: int, name: str) -> None:
+        """Follow a sheet's rename: the entity takes the new name and keeps the old one as an alias."""
+        e = self.entity(entity_id)
+        if e is None or e["name"] == name.strip():
+            return
+        run = self.start_run("manual", label=f"renamed {e['name']} to {name.strip()}")
+        try:
+            with self.conn:
+                self.conn.execute("UPDATE entities SET name = ? WHERE id = ?", (name.strip(), entity_id))
+        except sqlite3.IntegrityError:  # another pc already has that name: answer to it as an alias instead
+            self.add_alias(entity_id, name, run)
+            return
+        self.add_alias(entity_id, e["name"], run)
+
     def add_alias(self, entity_id: int, alias: str, run_id: int) -> None:
         alias = alias.strip()
         e = self.entity(entity_id)
@@ -182,6 +216,9 @@ class World:
             self.conn.execute(
                 "UPDATE OR IGNORE event_entities SET entity_id = ? WHERE entity_id = ?", (keep_id, other_id)
             )
+            # A character sheet follows its entity; if both had one, keep's stays linked.
+            if not self.conn.execute("SELECT 1 FROM characters WHERE entity_id = ?", (keep_id,)).fetchone():
+                self.conn.execute("UPDATE characters SET entity_id = ? WHERE entity_id = ?", (keep_id, other_id))
             self.conn.execute("DELETE FROM entities WHERE id = ?", (other_id,))
             # Both may have had a current value for the same attribute: the newer one wins.
             open_facts = self.conn.execute(
@@ -319,7 +356,8 @@ class World:
             return None
         facts = self.facts(entity_id, as_of)
         events = [ev for ev in self.events(entity_id=entity_id) if as_of is None or ev["session"] <= as_of]
-        if self.campaign.spoiler_safe and not facts and not events:
+        # The party's own characters are never a spoiler, even before anything has happened to them.
+        if self.campaign.spoiler_safe and not facts and not events and e["kind"] != "pc":
             return None
         cur = [f for f in facts if f["valid_to"] is None and f["modality"] == "fact"]
         e.update(
@@ -366,7 +404,9 @@ class World:
         out = []
         for r in self.conn.execute(sql, args):
             d = dict(r)
-            if self.campaign.spoiler_safe and not (d["current_facts"] or d["past_facts"] or d["table_activity"]):
+            if self.campaign.spoiler_safe and d["kind"] != "pc" and not (
+                d["current_facts"] or d["past_facts"] or d["table_activity"]
+            ):
                 continue
             if in_play and not d["table_activity"]:
                 continue

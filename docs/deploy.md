@@ -175,9 +175,10 @@ first.
   Add `--email` to tie the link to one Google account, and `--days` or
   `--uses` to change its limits.
 
-**Character sheets** belong to the person who made them. Everyone in the
-sheet's campaign can read it; its owner and the campaign's DMs (with
-editor access) can change it. A sheet with no campaign is private.
+**Character sheets** belong to one campaign and to the person who made
+them. Everyone in the campaign can read a sheet; its owner and the
+campaign's DMs (with editor access) can change it. Copying a sheet to
+another campaign needs edit rights on it and membership of the target.
 
 ## Releasing
 

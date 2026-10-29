@@ -182,3 +182,73 @@ def test_search_doesnt_reveal_hidden_facts():
     assert player.list(q="night hag") == []
     assert [v["name"] for v in player.lookup("pies")] == ["Morgantha"]
     assert [v["name"] for v in w.lookup("night hag")] == ["Morgantha"]  # the DM still finds it
+
+
+# -- player characters ------------------------------------------------------------
+
+
+def test_sheet_links_to_the_pc_the_world_already_knows():
+    store, camp, w, _ = setup()
+    # A session mentioned the character before anyone made a sheet.
+    bram = w.ensure_entity("Bram", "pc")
+    w.add_alias(bram["id"], "the paladin", play(store, w, 1))
+    w.record(bram["id"], "Bram lost his shield", w.start_run("ingest", session=1), 1)
+    cid = store.create_character({"name": "Bram"}, campaign_id=camp.id)
+    assert store.character(cid)["entity_id"] == bram["id"]
+    # An NPC of the same name is a different thing: a sheet never links to it.
+    ireena_npc = w.resolve("Ireena")["id"]
+    other = store.create_character({"name": "Ireena"}, campaign_id=camp.id)
+    assert store.character(other)["entity_id"] != ireena_npc
+    assert w.entity(store.character(other)["entity_id"])["kind"] == "pc"
+
+
+def test_linked_pc_survives_revert_and_follows_merges():
+    store, camp, w, _ = setup()
+    cid = store.create_character({"name": "Bram"}, campaign_id=camp.id)
+    eid = store.character(cid)["entity_id"]
+    w.revert_run(play(store, w, 1))  # cleans up orphaned entities: the sheet's isn't one
+    assert w.entity(eid) is not None
+    # The ingest made a second entity for the same character; merging the sheet's into it moves the link.
+    dup = w.ensure_entity("Bram of Vallaki", "pc")["id"]
+    w.record(dup, "Bram owes the Martikovs", play(store, w, 2), 2)
+    w.merge(dup, eid)
+    assert store.character(cid)["entity_id"] == dup
+
+
+def test_tools_find_a_character_by_any_name_its_entity_has():
+    from campaign.tools import ToolContext, build_tools
+
+    store, camp, w, _ = setup()
+    cid = store.create_character({"name": "Bram"}, campaign_id=camp.id)
+    w.add_alias(store.character(cid)["entity_id"], "the paladin", play(store, w, 1))
+    tools = {t.__name__: t for t in build_tools(ToolContext(store, camp))}
+    assert '"name": "Bram"' in tools["get_character"]("the paladin")
+    tools["update_character"]("the paladin", {"hp": {"current": 3, "max": 10}}, "took a hit")
+    assert store.character(cid)["sheet"]["hp"]["current"] == 3
+    assert [c["id"] for c in store.characters(campaign_ids=[camp.id])] == [cid]  # no duplicate created
+
+
+def test_v4_database_migrates_characters_into_campaigns(tmp_path):
+    import sqlite3
+
+    from campaign.db import BASELINE, SCHEMA
+
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.executescript(SCHEMA + f"PRAGMA user_version = {BASELINE};")
+    old.execute("INSERT INTO campaigns VALUES (1, 'strahd', 'Strahd', 'dm', '', 'now')")
+    old.execute("INSERT INTO users (id, email, created_at) VALUES (1, 'me@example.com', 'now')")
+    old.execute("INSERT INTO characters (id, campaign_id, owner_id, name, sheet, updated_at)"
+                " VALUES (1, 1, 1, 'Bram', '{\"name\": \"Bram\"}', 'now'), (2, NULL, 1, 'Loose', '{\"name\": \"Loose\"}', 'now')")
+    old.execute("INSERT INTO character_log (character_id, change, created_at) VALUES (1, '{}', 'now'), (2, '{}', 'now')")
+    old.commit()
+    old.close()
+
+    store = Store(path)
+    assert store.schema_version == 5
+    assert [c["name"] for c in store.characters()] == ["Bram"]  # the campaign-less sheet is gone
+    assert store.conn.execute("SELECT count(*) FROM character_log").fetchone()[0] == 1
+    assert store.conn.execute("SELECT email FROM users").fetchone()[0] == "me@example.com"  # accounts kept
+    eid = store.link_character(1)  # linked the first time it's touched
+    assert World(store, store.campaign("strahd")).entity(eid)["name"] == "Bram"
+    assert list((tmp_path / "backups").glob("campaign-*-pre-v5.db"))
