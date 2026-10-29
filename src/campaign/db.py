@@ -238,10 +238,66 @@ CREATE TABLE character_log (
 # Databases older than this are retired and replaced, not migrated.
 BASELINE = 3
 
+# v4: people. Users sign in (when sign-in is on), belong to campaigns as a
+# DM or a player with owner, editor or viewer access, and arrive by invite.
+# Character sheets get an owner, and names need only be unique per campaign.
+SCHEMA_V4 = """
+CREATE TABLE users (
+    id            INTEGER PRIMARY KEY,
+    email         TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    is_admin      INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL,
+    last_seen_at  TEXT
+);
+
+-- role decides what you see (players get the spoiler-filtered world);
+-- access decides what you can change (owners also manage members and invites).
+CREATE TABLE memberships (
+    campaign_id  INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role         TEXT NOT NULL CHECK (role IN ('dm', 'player')),
+    access       TEXT NOT NULL CHECK (access IN ('owner', 'editor', 'viewer')),
+    created_at   TEXT NOT NULL,
+    PRIMARY KEY (campaign_id, user_id)
+);
+
+-- Only a hash of each invite's token is stored; the link itself is shown once.
+CREATE TABLE invites (
+    id           INTEGER PRIMARY KEY,
+    token_hash   TEXT NOT NULL UNIQUE,
+    campaign_id  INTEGER REFERENCES campaigns(id) ON DELETE CASCADE,  -- NULL: app access only
+    role         TEXT CHECK (role IN ('dm', 'player')),
+    access       TEXT CHECK (access IN ('editor', 'viewer')),
+    email        TEXT COLLATE NOCASE,                                  -- if set, only this account can use it
+    created_by   INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at   TEXT NOT NULL,
+    expires_at   TEXT NOT NULL,
+    max_uses     INTEGER NOT NULL DEFAULT 1,
+    uses         INTEGER NOT NULL DEFAULT 0,
+    revoked      INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE characters_v4 (
+    id           INTEGER PRIMARY KEY,
+    campaign_id  INTEGER REFERENCES campaigns(id) ON DELETE SET NULL,
+    owner_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    name         TEXT NOT NULL,
+    sheet        TEXT NOT NULL,
+    updated_at   TEXT NOT NULL,
+    UNIQUE (campaign_id, name)
+);
+INSERT INTO characters_v4 (id, campaign_id, name, sheet, updated_at)
+    SELECT id, campaign_id, name, sheet, updated_at FROM characters;
+DROP TABLE characters;
+ALTER TABLE characters_v4 RENAME TO characters;
+CREATE INDEX characters_owner ON characters(owner_id);
+"""
+
 # Append only, for changes small enough to migrate. Each step runs in its
 # own transaction and then sets user_version to its number.
 MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (BASELINE, SCHEMA),
+    (4, SCHEMA_V4),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 
@@ -254,6 +310,12 @@ def slugify(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
 
 
+# Words too common to rank anything by ("the hag" should search for "hag").
+STOPWORDS = frozenset(
+    "the a an and or of to in on at by for from with is are was were be been it its this that as into".split()
+)
+
+
 def fts_query(text: str) -> str:
     """Turn free text into an FTS5 query: every word optional, ranked by BM25.
 
@@ -261,16 +323,24 @@ def fts_query(text: str) -> str:
     "Strahd's") from being parsed as FTS syntax.
     """
     terms = re.findall(r"[\w']+", text.lower())
-    return " OR ".join(f'"{t}"' for t in terms if len(t) > 1)
+    return " OR ".join(f'"{t}"' for t in terms if len(t) > 1 and t not in STOPWORDS)
 
 
 @dataclass
 class Campaign:
+    """A campaign as one person sees it.
+
+    `role` is how they see it: a player sees the spoiler-filtered world.
+    `access` is what they may change. Without sign-in, the person running
+    the app is the owner, seeing it with the campaign's own role.
+    """
+
     id: int
     slug: str
     name: str
     role: str
     notes: str
+    access: str = "owner"
 
     @property
     def spoiler_safe(self) -> bool:
@@ -320,6 +390,9 @@ class Store:
             return
         if current and self.path != ":memory:":
             self.backup(f"pre-v{pending[-1][0]}")
+        # Steps may rebuild tables, which SQLite only allows safely with foreign
+        # keys off (and that can't change inside a transaction); check after.
+        self.conn.execute("PRAGMA foreign_keys = OFF")
         for version, step in pending:
             try:
                 if isinstance(step, str):
@@ -333,7 +406,11 @@ class Store:
                     self.conn.commit()
             except Exception:
                 self.conn.rollback()
+                self.conn.execute("PRAGMA foreign_keys = ON")
                 raise
+        self.conn.execute("PRAGMA foreign_keys = ON")
+        if broken := self.conn.execute("PRAGMA foreign_key_check").fetchall():
+            raise RuntimeError(f"migration left dangling references: {[tuple(r) for r in broken[:5]]}")
         if self._carry_over:
             self._restore_from(self._carry_over)
 
@@ -360,7 +437,9 @@ class Store:
             for r in old.execute("SELECT id, slug, name, role, notes, created_at FROM campaigns"):
                 self.conn.execute("INSERT INTO campaigns VALUES (?, ?, ?, ?, ?, ?)", tuple(r))
             for r in old.execute("SELECT id, campaign_id, name, sheet, updated_at FROM characters"):
-                self.conn.execute("INSERT INTO characters VALUES (?, ?, ?, ?, ?)", tuple(r))
+                self.conn.execute(
+                    "INSERT INTO characters (id, campaign_id, name, sheet, updated_at) VALUES (?, ?, ?, ?, ?)", tuple(r)
+                )
             for r in old.execute("SELECT id, character_id, change, reason, created_at FROM character_log"):
                 self.conn.execute("INSERT INTO character_log VALUES (?, ?, ?, ?, ?)", tuple(r))
             if "digests" in tables:
@@ -402,12 +481,18 @@ class Store:
     # -- campaigns -----------------------------------------------------------
 
     def create_campaign(self, name: str, role: str, notes: str = "") -> Campaign:
+        """Create a campaign. Its slug is unique, so two people can both have a "Curse of Strahd"."""
+        base = slugify(name) or "campaign"
+        slug, n = base, 1
+        while self.conn.execute("SELECT 1 FROM campaigns WHERE slug = ?", (slug,)).fetchone():
+            n += 1
+            slug = f"{base}-{n}"
         with self.conn:
             self.conn.execute(
                 "INSERT INTO campaigns (slug, name, role, notes, created_at) VALUES (?, ?, ?, ?, ?)",
-                (slugify(name), name, role, notes, now()),
+                (slug, name, role, notes, now()),
             )
-        return self.campaign(slugify(name))
+        return self.campaign(slug)
 
     def campaign(self, slug: str) -> Campaign:
         row = self.conn.execute(
@@ -740,64 +825,73 @@ class Store:
 
     # -- characters ----------------------------------------------------------
 
-    def save_character(
-        self, name: str, sheet: dict[str, Any], campaign: Campaign | None = None, reason: str = ""
-    ) -> None:
-        with self.conn:
-            existing = self.conn.execute(
-                "SELECT id FROM characters WHERE name = ?", (name,)
-            ).fetchone()
-            if existing is None:
-                cur = self.conn.execute(
-                    "INSERT INTO characters (campaign_id, name, sheet, updated_at) VALUES (?, ?, ?, ?)",
-                    (campaign.id if campaign else None, name, json.dumps(sheet), now()),
-                )
-                character_id = cur.lastrowid
-            else:
-                character_id = existing["id"]
-                self.conn.execute(
-                    "UPDATE characters SET sheet = ?, updated_at = ?"
-                    + (", campaign_id = ?" if campaign else "")
-                    + " WHERE id = ?",
-                    (json.dumps(sheet), now(), *([campaign.id] if campaign else []), character_id),
-                )
-            self.conn.execute(
-                "INSERT INTO character_log (character_id, change, reason, created_at)"
-                " VALUES (?, ?, ?, ?)",
-                (character_id, json.dumps(sheet), reason, now()),
-            )
+    @staticmethod
+    def _character(row: sqlite3.Row) -> dict[str, Any]:
+        d = dict(row)
+        d["sheet"] = json.loads(d["sheet"])
+        return d
 
-    def character(self, name: str) -> dict[str, Any] | None:
-        row = self.conn.execute(
-            "SELECT sheet FROM characters WHERE name = ? COLLATE NOCASE", (name,)
-        ).fetchone()
-        return None if row is None else json.loads(row["sheet"])
+    def character(self, character_id: int) -> dict[str, Any] | None:
+        """{id, campaign_id, owner_id, name, sheet, updated_at}, or None."""
+        row = self.conn.execute("SELECT * FROM characters WHERE id = ?", (character_id,)).fetchone()
+        return None if row is None else self._character(row)
 
-    def characters(self, campaign: Campaign | None = None) -> list[str]:
-        if campaign is None:
-            rows = self.conn.execute("SELECT name FROM characters ORDER BY name")
+    def find_character(self, name: str, campaign: Campaign | None = None) -> dict[str, Any] | None:
+        """A character by name: in `campaign` if given, else the first anywhere (for the CLI)."""
+        sql, params = "SELECT * FROM characters WHERE name = ? COLLATE NOCASE", [name.strip()]
+        if campaign is not None:
+            sql += " AND campaign_id = ?"
+            params.append(campaign.id)
+        row = self.conn.execute(sql + " ORDER BY id LIMIT 1", params).fetchone()
+        return None if row is None else self._character(row)
+
+    def characters(
+        self, campaign_ids: Iterable[int] | None = None, owner_id: int | None = None
+    ) -> list[dict[str, Any]]:
+        """All characters, or those in `campaign_ids` or owned by `owner_id` (either matches)."""
+        sql = "SELECT * FROM characters"
+        if campaign_ids is not None or owner_id is not None:
+            ids = list(campaign_ids or [])
+            sql += f" WHERE campaign_id IN ({','.join('?' * len(ids)) or 'NULL'}) OR owner_id = ?"
+            params: list[Any] = [*ids, owner_id]
         else:
-            rows = self.conn.execute(
-                "SELECT name FROM characters WHERE campaign_id = ? ORDER BY name", (campaign.id,)
-            )
-        return [r["name"] for r in rows]
+            params = []
+        return [self._character(r) for r in self.conn.execute(sql + " ORDER BY name", params)]
 
-    def rename_character(self, old: str, new: str) -> None:
+    def create_character(
+        self, sheet: dict[str, Any], campaign_id: int | None = None, owner_id: int | None = None,
+        reason: str = "created",
+    ) -> int:
+        """Raises sqlite3.IntegrityError if the campaign already has a character by that name."""
+        with self.conn:
+            character_id = self.conn.execute(
+                "INSERT INTO characters (campaign_id, owner_id, name, sheet, updated_at) VALUES (?, ?, ?, ?, ?)",
+                (campaign_id, owner_id, sheet["name"], json.dumps(sheet), now()),
+            ).lastrowid
+            self._log_character(character_id, sheet, reason)
+        return character_id
+
+    def update_character(self, character_id: int, sheet: dict[str, Any], reason: str = "") -> None:
         with self.conn:
             self.conn.execute(
-                "UPDATE characters SET name = ? WHERE name = ? COLLATE NOCASE", (new, old)
+                "UPDATE characters SET name = ?, sheet = ?, updated_at = ? WHERE id = ?",
+                (sheet["name"], json.dumps(sheet), now(), character_id),
             )
+            self._log_character(character_id, sheet, reason)
 
-    def delete_character(self, name: str) -> bool:
+    def _log_character(self, character_id: int, sheet: dict[str, Any], reason: str) -> None:
+        self.conn.execute(
+            "INSERT INTO character_log (character_id, change, reason, created_at) VALUES (?, ?, ?, ?)",
+            (character_id, json.dumps(sheet), reason, now()),
+        )
+
+    def delete_character(self, character_id: int) -> bool:
         with self.conn:
-            cur = self.conn.execute("DELETE FROM characters WHERE name = ? COLLATE NOCASE", (name,))
-        return cur.rowcount > 0
+            return self.conn.execute("DELETE FROM characters WHERE id = ?", (character_id,)).rowcount > 0
 
-    def character_log(self, name: str, limit: int = 20) -> list[dict[str, Any]]:
+    def character_log(self, character_id: int, limit: int = 20) -> list[dict[str, Any]]:
         rows = self.conn.execute(
-            "SELECT l.created_at, l.reason FROM character_log l"
-            " JOIN characters c ON c.id = l.character_id"
-            " WHERE c.name = ? COLLATE NOCASE ORDER BY l.id DESC LIMIT ?",
-            (name, limit),
+            "SELECT created_at, reason FROM character_log WHERE character_id = ? ORDER BY id DESC LIMIT ?",
+            (character_id, limit),
         )
         return [dict(r) for r in rows]

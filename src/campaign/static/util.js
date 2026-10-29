@@ -81,3 +81,12 @@ export function debounce(fn, ms) {
     t = setTimeout(() => fn(...args), ms);
   };
 }
+
+// Who's signed in: {local: true} without sign-in, else {id, email, is_admin}. Fetched once.
+let mePromise;
+export function whoami() {
+  return (mePromise ||= api("GET", "/api/me"));
+}
+
+// Viewers can look but not change; editors and owners can change content.
+export const canEdit = (campaign) => campaign.access !== "viewer";

@@ -17,6 +17,8 @@ from .db import Campaign, Store
 app = typer.Typer(no_args_is_help=True, help="D&D campaign assistant.")
 char_app = typer.Typer(no_args_is_help=True, help="Character sheets.")
 app.add_typer(char_app, name="char")
+users_app = typer.Typer(no_args_is_help=True, help="People who can sign in (when sign-in is on).")
+app.add_typer(users_app, name="users")
 
 AUDIO = {".mp3", ".m4a", ".wav", ".ogg", ".flac", ".opus", ".webm"}
 
@@ -50,12 +52,21 @@ def new(
     name: str,
     role: Annotated[str, typer.Option(help="Your role in this campaign: dm or player.")] = "dm",
     notes: str = "",
+    owner: Annotated[Optional[str], typer.Option(help="With sign-in on: the user who owns it (else it's unowned until claimed).")] = None,
 ) -> None:
     """Create a campaign."""
+    from .accounts import Accounts
+
     if role not in ("dm", "player"):
         raise typer.BadParameter("role must be dm or player")
-    c = store().create_campaign(name, role, notes)
-    typer.echo(f"Created {c.name!r} ({c.slug}) as {c.role}.")
+    s = store()
+    user = Accounts(s).user_by_email(owner) if owner else None
+    if owner and user is None:
+        raise typer.BadParameter(f"no user {owner}; add them with `campaign users add`")
+    c = s.create_campaign(name, role, notes)
+    if user:
+        Accounts(s).add_member(c.id, user["id"], role, "owner")
+    typer.echo(f"Created {c.name!r} ({c.slug}) as {c.role}" + (f", owned by {user['email']}." if user else "."))
 
 
 @app.command("list")
@@ -329,24 +340,26 @@ def web(
 # -- characters --------------------------------------------------------------
 
 
-def _load(s: Store, name: str) -> CharacterSheet:
-    raw = s.character(name)
-    if raw is None:
+def _load(s: Store, name: str) -> tuple[int, CharacterSheet]:
+    found = s.find_character(name)
+    if found is None:
         raise typer.BadParameter(f"no character {name!r}")
-    return CharacterSheet.model_validate(raw)
+    return found["id"], CharacterSheet.model_validate(found["sheet"])
 
 
 @char_app.command("list")
 def char_list() -> None:
     """List characters."""
-    for n in store().characters():
-        typer.echo(n)
+    s = store()
+    names = {c.id: c.slug for c in s.campaigns()}
+    for c in s.characters():
+        typer.echo(f"{c['name']:24} {names.get(c['campaign_id'], '-')}")
 
 
 @char_app.command("show")
 def char_show(name: str, as_json: Annotated[bool, typer.Option("--json")] = False) -> None:
     """Print a character sheet."""
-    sheet = _load(store(), name)
+    _, sheet = _load(store(), name)
     if as_json:
         show(sheet.model_dump())
     else:
@@ -359,7 +372,11 @@ def char_import(path: Path, campaign: CampaignOpt = None) -> None:
     s = store()
     sheet = CharacterSheet.model_validate_json(path.read_text(encoding="utf-8"))
     c = pick(s, campaign) if (campaign or s.campaigns()) else None
-    s.save_character(sheet.name, sheet.model_dump(), campaign=c, reason=f"imported from {path.name}")
+    reason = f"imported from {path.name}"
+    if existing := s.find_character(sheet.name, c):
+        s.update_character(existing["id"], sheet.model_dump(), reason=reason)
+    else:
+        s.create_character(sheet.model_dump(), campaign_id=c.id if c else None, reason=reason)
     typer.echo(f"Saved {sheet.name}.")
 
 
@@ -371,9 +388,9 @@ def char_set(
 ) -> None:
     """Apply a JSON merge patch to a sheet."""
     s = store()
-    current = _load(s, name)
+    character_id, current = _load(s, name)
     updated = CharacterSheet.model_validate(merge_patch(current.model_dump(), json.loads(patch)))
-    s.save_character(updated.name, updated.model_dump(), reason=reason)
+    s.update_character(character_id, updated.model_dump(), reason=reason)
     typer.echo(render(updated))
 
 
@@ -384,10 +401,10 @@ def char_hp(
 ) -> None:
     """Apply damage or healing. Damage comes off temp HP first."""
     s = store()
-    sheet = _load(s, name)
+    character_id, sheet = _load(s, name)
     apply_hp(sheet, delta)
     hp = sheet.hp
-    s.save_character(sheet.name, sheet.model_dump(), reason=f"hp {delta:+d}")
+    s.update_character(character_id, sheet.model_dump(), reason=f"hp {delta:+d}")
     typer.echo(f"{sheet.name}: {hp.current}/{hp.max}" + (f" (+{hp.temp} temp)" if hp.temp else ""))
 
 
@@ -395,17 +412,85 @@ def char_hp(
 def char_rest(name: str, long: Annotated[bool, typer.Option("--long/--short")] = True) -> None:
     """Reset resources that recharge on a short or long rest (long also restores HP)."""
     s = store()
-    sheet = _load(s, name)
+    character_id, sheet = _load(s, name)
     rest(sheet, long)
-    s.save_character(sheet.name, sheet.model_dump(), reason="long rest" if long else "short rest")
+    s.update_character(character_id, sheet.model_dump(), reason="long rest" if long else "short rest")
     typer.echo(render(sheet))
 
 
 @char_app.command("log")
 def char_log(name: str, limit: int = 20) -> None:
     """Show recent changes to a sheet."""
-    for row in store().character_log(name, limit=limit):
+    s = store()
+    character_id, _ = _load(s, name)
+    for row in s.character_log(character_id, limit=limit):
         typer.echo(f"{row['created_at']}  {row['reason']}")
+
+
+# -- people (only matters with sign-in on) ---------------------------------------
+
+
+@users_app.command("list")
+def users_list() -> None:
+    """List users."""
+    from .accounts import Accounts
+
+    for u in Accounts(store()).users():
+        flags = " admin" if u["is_admin"] else ""
+        typer.echo(f"{u['email']:36} {u['campaigns']} campaign(s){flags}  last seen {u['last_seen_at'] or 'never'}")
+
+
+@users_app.command("add")
+def users_add(
+    email: str,
+    admin: Annotated[bool, typer.Option(help="Can manage users and invite people to the app.")] = False,
+    claim_unowned: Annotated[bool, typer.Option(help="Become owner of every campaign nobody owns yet.")] = False,
+) -> None:
+    """Add a user directly, without an invite. Use this for the first admin."""
+    from .accounts import Accounts
+
+    acc = Accounts(store())
+    user = acc.create_user(email, is_admin=admin)
+    typer.echo(f"{user['email']}{' (admin)' if user['is_admin'] else ''} can sign in.")
+    if claim_unowned:
+        claimed = acc.claim_unowned(user["id"])
+        typer.echo(f"Now owner of: {', '.join(claimed) or 'nothing (every campaign has an owner)'}")
+
+
+@users_app.command("remove")
+def users_remove(email: str) -> None:
+    """Remove a user. They're signed out at once; their character sheets stay, ownerless."""
+    from .accounts import Accounts
+
+    acc = Accounts(store())
+    user = acc.user_by_email(email)
+    if user is None:
+        raise typer.BadParameter(f"no user {email}")
+    acc.delete_user(user["id"])
+    typer.echo(f"Removed {email}.")
+
+
+@app.command()
+def invite(
+    campaign: CampaignOpt = None,
+    role: Annotated[str, typer.Option(help="dm or player")] = "player",
+    access: Annotated[str, typer.Option(help="editor or viewer")] = "viewer",
+    email: Annotated[Optional[str], typer.Option(help="Only this Google account can use the link.")] = None,
+    days: int = 7,
+    uses: int = 1,
+    app_only: Annotated[bool, typer.Option("--app-only", help="Access to the app, not a campaign.")] = False,
+) -> None:
+    """Make an invite link. Prints the link; it isn't stored and can't be shown again."""
+    from .accounts import Accounts
+
+    s = store()
+    c = None if app_only else pick(s, campaign)
+    inv, token = Accounts(s).create_invite(
+        c.id if c else None, role, access, email=email, days=days, max_uses=uses
+    )
+    base = os.environ.get("CAMPAIGN_PUBLIC_URL", "http://127.0.0.1:8765").rstrip("/")
+    what = f"{c.name} as {role} ({access})" if c else "the app"
+    typer.echo(f"Invite to {what}, expires {inv['expires_at']}:\n{base}/invite/{token}")
 
 
 def main() -> None:

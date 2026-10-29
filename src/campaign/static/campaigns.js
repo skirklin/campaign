@@ -1,10 +1,11 @@
 // Campaign list, and per-campaign tabs for ingesting sessions and reference
 // material and browsing what the assistant has recorded.
 
-import { api, h, toast, enc } from "./util.js";
+import { api, h, toast, enc, whoami, canEdit } from "./util.js";
+import { membersTab } from "./people.js";
 
 export async function campaignList() {
-  const [campaigns, info] = await Promise.all([api("GET", "/api/campaigns"), api("GET", "/api/info")]);
+  const [campaigns, info] = await Promise.all([api("GET", "/api/campaigns"), api("GET", "/api/info").catch(() => null)]);
   const name = h("input", { placeholder: "Campaign name", required: true, "aria-label": "Campaign name" });
   const role = h("select", { "aria-label": "Your role" },
     h("option", { value: "dm" }, "I'm the DM"), h("option", { value: "player" }, "I'm a player"));
@@ -22,11 +23,12 @@ export async function campaignList() {
     h("div.cards",
       campaigns.length === 0 && h("p.empty", "No campaigns yet."),
       campaigns.map((c) => h("a.card", { href: `#/campaigns/${c.slug}` },
-        h("strong", c.name), h(`span.badge.${c.role}`, c.role === "dm" ? "DM" : "Player"))),
+        h("strong", c.name),
+        h("span", h(`span.badge.${c.role}`, c.role === "dm" ? "DM" : "Player"), " ", c.access !== "owner" && h("span.badge", c.access)))),
     ),
     h("form.inline-form", { onsubmit: create }, name, role, h("button.primary", { type: "submit" }, "Create")),
     h("p.muted.small", "In a player campaign the assistant never sees DM-only material or anything the party hasn't discovered."),
-    h("p.muted.small.data-location",
+    info && h("p.muted.small.data-location",
       "Data is stored in ", h("code", info.data_dir),
       ` (schema v${info.schema_version}, ${info.originals.files} original files, ${(info.originals.bytes / 1e6).toFixed(1)} MB).`),
   );
@@ -37,18 +39,21 @@ const TABS = [
   ["reference", "Reference"],
   ["state", "World state"],
   ["journal", "Journal"],
+  ["members", "Members"],  // only with sign-in on
 ];
 
 export async function campaignView(slug, tab) {
-  const campaigns = await api("GET", "/api/campaigns");
+  const [campaigns, me] = await Promise.all([api("GET", "/api/campaigns"), whoami()]);
   const c = campaigns.find((x) => x.slug === slug);
   if (!c) throw new Error(`No campaign "${slug}".`);
+  const tabs = TABS.filter(([key]) => key !== "members" || !me.local);
   const body = h("div.tab-body", h("p.muted", "Loading…"));
-  const render = { ingest: sessionsTab, reference: referenceTab, state: stateTab, journal: journalTab }[tab] || sessionsTab;
-  render(c).then((el) => body.replaceChildren(el), (err) => body.replaceChildren(h("p.empty", err.message)));
+  const render = { ingest: sessionsTab, reference: referenceTab, state: stateTab, journal: journalTab, members: membersTab }[tab] || sessionsTab;
+  render(c, me).then((el) => body.replaceChildren(el), (err) => body.replaceChildren(h("p.empty", err.message)));
   return h("section.page",
-    h("div.page-head", h("h1", c.name), h(`span.badge.${c.role}`, c.role === "dm" ? "DM" : "Player")),
-    h("nav.tabs", TABS.map(([key, label]) => h("a", { href: `#/campaigns/${slug}/${key}`, className: key === tab ? "active" : "" }, label))),
+    h("div.page-head", h("h1", c.name), h(`span.badge.${c.role}`, c.role === "dm" ? "DM" : "Player"),
+      !canEdit(c) && h("span.badge", "view only")),
+    h("nav.tabs", tabs.map(([key, label]) => h("a", { href: `#/campaigns/${slug}/${key}`, className: key === tab ? "active" : "" }, label))),
     body,
   );
 }
@@ -71,7 +76,7 @@ async function sessionsTab(c) {
       h("div.prose", s.summary ? s.summary.split(/\n\s*\n/).map((p) => h("p", p)) : h("p.muted", "No summary.")),
       h("div.actions",
         h("a", { href: `#/campaigns/${c.slug}/journal` }, "Journal"),
-        h("button.danger", {
+        canEdit(c) && h("button.danger", {
           onclick: async () => {
             if (!confirm(`Undo everything the ingest of session ${s.number} recorded?`)) return;
             const r = await api("POST", `${base}/sessions/${s.number}/revert`);
@@ -93,7 +98,7 @@ async function sessionsTab(c) {
   const watch = (jobId) => {
     submit.disabled = true;
     logPanel.hidden = false;
-    pollJob(jobId, logPanel, async (job) => {
+    pollJob(c, jobId, logPanel, async (job) => {
       submit.disabled = false;
       if (job.status === "done") {
         toast(`Session ${job.result.session} recorded`);
@@ -130,10 +135,10 @@ async function sessionsTab(c) {
   );
 
   if (data.running.length) watch(data.running[0].id);
-  return h("div", form, logPanel, h("h2.section-title", "Sessions"), list);
+  return h("div", canEdit(c) && form, logPanel, h("h2.section-title", "Sessions"), list);
 }
 
-function pollJob(jobId, panel, onDone) {
+function pollJob(c, jobId, panel, onDone) {
   const lines = [];
   const out = h("div.job-log");
   const statusEl = h("span.job-status.running", "Running");
@@ -142,7 +147,7 @@ function pollJob(jobId, panel, onDone) {
   const tick = async () => {
     let job;
     try {
-      job = await api("GET", `/api/jobs/${jobId}?since=${since}`);
+      job = await api("GET", `/api/campaigns/${c.slug}/jobs/${jobId}?since=${since}`);
     } catch (err) {
       statusEl.textContent = err.message;
       statusEl.className = "job-status failed";
@@ -251,7 +256,7 @@ async function referenceTab(c) {
       );
     }));
   };
-  return h("div", form, h("h2.section-title", "Loaded"), list,
+  return h("div", canEdit(c) && form, h("h2.section-title", "Loaded"), list,
     h("h2.section-title", "Search"), h("form.inline-form", { onsubmit: search }, q, h("button", { type: "submit" }, "Search")), results);
 }
 
@@ -269,7 +274,7 @@ function digestLine(d) {
 function sourceRow(c, s, refresh) {
   const base = `/api/campaigns/${c.slug}`;
   const d = s.digest;
-  const canDigest = s.kind !== "transcript" && !d.running && (d.total === 0 || d.done < d.total);
+  const canDigest = canEdit(c) && s.kind !== "transcript" && !d.running && (d.total === 0 || d.done < d.total);
   return h("div.source",
     h("div",
       h("a", { href: `#/campaigns/${c.slug}/source/${s.id}` }, h("strong", s.title)), " ",
@@ -292,7 +297,7 @@ function sourceRow(c, s, refresh) {
           }
         },
       }, d.done ? "Resume digest" : "Digest"),
-      h("button.icon", {
+      canEdit(c) && h("button.icon", {
         title: "Remove", "aria-label": `Remove ${s.title}`,
         onclick: async () => {
           if (!confirm(`Remove ${s.title}? The digest cache is kept, so re-uploading it later is free.`)) return;
@@ -465,13 +470,13 @@ export async function entityView(slug, id) {
   const renderAt = () => {
     const t = Number(slider.value);
     sliderLabel.textContent = t === now ? `Now (session ${now})` : `As of session ${t}`;
-    body.replaceChildren(...factSections(c, e, t, t === now));
+    body.replaceChildren(...factSections(c, e, t, t === now).filter(Boolean));
   };
   slider.addEventListener("input", renderAt);
 
   const summary = h("div.card.summary",
     e.summary ? h("p", e.summary) : h("p.muted", "No summary for the current facts yet."),
-    h("button", {
+    canEdit(c) && h("button", {
       onclick: async (ev) => {
         ev.target.disabled = true;
         ev.target.textContent = "Writing…";
@@ -487,7 +492,7 @@ export async function entityView(slug, id) {
       },
     }, e.summary ? "" : "Write summary"),
   );
-  if (e.summary) summary.lastChild.remove();
+  if (e.summary && canEdit(c)) summary.lastChild.remove();
 
   const others = list.entities.filter((x) => x.id !== e.id);
   const mergeInput = h("input", { list: "merge-options", placeholder: "Another entity's name", "aria-label": "Entity to merge" });
@@ -511,7 +516,7 @@ export async function entityView(slug, id) {
     summary,
     now > 0 && h("div.as-of", sliderLabel, slider),
     body,
-    h("details.card", h("summary", "Same thing as another entry?"), h("p.muted.small", "Merging keeps both histories; the other name becomes an alias."), merge),
+    canEdit(c) && h("details.card", h("summary", "Same thing as another entry?"), h("p.muted.small", "Merging keeps both histories; the other name becomes an alias."), merge),
   );
 }
 
@@ -527,7 +532,7 @@ function factSections(c, e, t, isNow) {
   const past = facts.filter((f) => !openAt(f));
   const events = e.all_events.filter((ev) => ev.session <= t);
 
-  const endButton = (f) => isNow && openAt(f) && h("button.icon", {
+  const endButton = (f) => isNow && canEdit(c) && openAt(f) && h("button.icon", {
     title: "No longer true", "aria-label": "Mark as no longer true",
     onclick: async () => {
       await api("POST", `${base}/facts/${f.id}/end`);
@@ -539,7 +544,7 @@ function factSections(c, e, t, isNow) {
     h("span.fact-meta", range(f), " · ", sourceLabel(f), f.party_knows_from === null ? " · party doesn't know" : ""),
     endButton(f));
 
-  const add = isNow && (() => {
+  const add = isNow && canEdit(c) && (() => {
     const statement = h("input", { placeholder: "Something that's now true", required: true, "aria-label": "Statement" });
     const attribute = h("input", { list: "attr-options", placeholder: "attribute (optional)", "aria-label": "Attribute" });
     const value = h("input", { placeholder: "value", "aria-label": "Value" });
@@ -571,7 +576,8 @@ function factSections(c, e, t, isNow) {
     h("section.card",
       h("h2", isNow ? "True now" : `True at the end of session ${t}`),
       attrs.length > 0 && h("ul.facts.attrs", attrs.map((f) => factRow(f, h("span", h("strong", f.attribute), ": ", f.value)))),
-      statements.length ? h("ul.facts", statements.map((f) => factRow(f))) : h("p.empty", "Nothing recorded."),
+      statements.length > 0 && h("ul.facts", statements.map((f) => factRow(f))),
+      attrs.length + statements.length === 0 && h("p.empty", "Nothing recorded."),
       statBlocks.map((f) => statBlockEl(JSON.parse(f.value), sourceLabel(f))),
     ),
     maybe.length > 0 && h("section.card", h("h2", "Rumors and possibilities"),

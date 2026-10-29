@@ -86,7 +86,8 @@ def test_character_sheet_derived_and_patch(store):
     assert "Rejected" in t["update_character"](name=sheet.name, patch={"hp": {"current": "lots"}}, reason="bad")
     saved = json.loads(t["get_character"](name=sheet.name))
     assert saved["sheet"]["hp"] == {"max": 27, "current": 10, "temp": 0}
-    assert [r["reason"] for r in store.character_log(sheet.name)][:2] == ["ghoul", "import"]
+    character_id = store.find_character(sheet.name)["id"]
+    assert [r["reason"] for r in store.character_log(character_id)][:2] == ["ghoul", "import"]
 
 
 def test_merge_patch():

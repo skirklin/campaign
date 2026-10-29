@@ -278,18 +278,25 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
 
     # -- characters ----------------------------------------------------------
 
+    def _find_character(name: str) -> dict[str, Any] | None:
+        # This campaign's character, or one not assigned to any campaign.
+        if found := store.find_character(name, campaign):
+            return found
+        loose = store.find_character(name)
+        return loose if loose and loose["campaign_id"] is None else None
+
     def get_character(name: str) -> str:
         """Read a player character's sheet, including computed modifiers, saves, skills and spell DC.
 
         Args:
             name: Character name.
         """
-        raw = store.character(name)
-        if raw is None:
-            known = store.characters()
-            return f"No character {name!r}. Known: {', '.join(known) or 'none'}."
-        sheet = CharacterSheet.model_validate(raw)
-        return _json({"sheet": raw, "derived": sheet.derived()})
+        found = _find_character(name)
+        if found is None:
+            known = [c["name"] for c in store.characters(campaign_ids=[campaign.id])]
+            return f"No character {name!r} in this campaign. Known: {', '.join(known) or 'none'}."
+        sheet = CharacterSheet.model_validate(found["sheet"])
+        return _json({"sheet": found["sheet"], "derived": sheet.derived()})
 
     def update_character(name: str, patch: dict[str, Any], reason: str) -> str:
         """Change a character sheet with a JSON merge patch; creates the character if new.
@@ -305,13 +312,16 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
             patch: Merge patch against the current sheet.
             reason: What happened, e.g. "took 9 damage from the ghoul".
         """
-        current = store.character(name) or {"name": name}
-        updated = merge_patch(current, patch)
+        found = _find_character(name)
+        updated = merge_patch(found["sheet"] if found else {"name": name}, patch)
         try:
             sheet = CharacterSheet.model_validate(updated)
         except ValidationError as err:
             return f"Rejected, sheet would be invalid: {err}"
-        store.save_character(sheet.name, sheet.model_dump(), campaign=campaign, reason=reason)
+        if found:
+            store.update_character(found["id"], sheet.model_dump(), reason=reason)
+        else:
+            store.create_character(sheet.model_dump(), campaign_id=campaign.id, reason=reason)
         return f"Updated {sheet.name}: {reason}"
 
     readers = [

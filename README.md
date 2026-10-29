@@ -77,10 +77,17 @@ uv run campaign web            # http://127.0.0.1:8765
     - forms to add or end facts by hand, and to merge duplicates.
   - **Journal**: events by session, linked to the entities involved.
 
-Locally there's no sign-in, and the server listens only on this machine.
-To put it on the internet, turn on Google sign-in with an email allowlist
+Locally there's no sign-in, the server listens only on this machine, and
+you own everything. To put it on the internet, turn on Google sign-in
 (`CAMPAIGN_AUTH=google`). The server refuses to listen anywhere but
-localhost without it, unless you pass `--no-auth`.
+localhost without it, unless you pass `--no-auth`. With sign-in on:
+
+- **Campaigns are shared by invite link.** Each member is a DM (sees
+  everything) or a player (sees only what the party knows), with owner,
+  editor or viewer access. A campaign's **Members** tab manages this.
+- **Character sheets belong to their players.** Everyone in the campaign
+  can read them; their owner and the campaign's DMs can change them.
+- **An admin page** manages users and app-wide invites.
 [docs/deploy.md](docs/deploy.md) covers running it on the homelab cluster:
 the container image, Kubernetes manifests, the Caddy route, and the
 CI/release workflows.
@@ -111,6 +118,10 @@ uv run campaign char show "Brannoc Ashvale"
 uv run campaign char hp "Brannoc Ashvale" -- -9
 uv run campaign char rest "Brannoc Ashvale" --long
 uv run campaign char set "Brannoc Ashvale" '{"currency": {"gp": 120}}' --reason "loot from the crypt"
+
+# people (only with sign-in on; see docs/deploy.md)
+uv run campaign users add you@example.com --admin --claim-unowned   # the first admin
+uv run campaign invite -c curse-of-strahd --role player             # prints an invite link
 ```
 
 With more than one campaign, pass `-c <slug>` or set `CAMPAIGN=<slug>`.

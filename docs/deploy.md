@@ -7,21 +7,30 @@ This runs the web UI at `https://campaign.kirkl.in` on the homelab cluster.
   proxies a public hostname to it.
 - **Its own namespace:** it gets a `campaign` namespace, the "tenant"
   layout `infra/EXTERNAL.md` describes.
-- **Sign-in** is Google, limited to an allowlist of email addresses.
+- **Sign-in** is Google, and invite-only. People join a campaign through an
+  invite link, as a DM or a player, and the app's users and memberships
+  live in its database, not in config.
 
 ```
 browser ──https──▶ Caddy (homelab ns, Let's Encrypt) ──▶ campaign.campaign.svc:8000 ──▶ /data (PVC)
-                                                          └─ Google sign-in, email allowlist
+                                                          └─ Google sign-in, invite-only
 GitHub Actions: push to main ─▶ test ─▶ ghcr.io/skirklin/campaign:sha-…
                 tag v* / manual ─────────────────────────────▶ deploy (kubectl set image, as `deployer`)
 ```
 
 ## What's protected, and how
 
-- **Everything requires a signed-in, allowed Google account.** That covers
-  every page, `/api/*` and `/static/*`; only `/auth/*` and `/healthz` are
-  open. The allowlist is checked on every request, so removing an address
-  locks it out immediately.
+- **Everything requires a signed-in user.** That covers every page,
+  `/api/*` and `/static/*`; only `/auth/*`, `/invite/*` and `/healthz` are
+  open. A Google account that isn't a user and has no valid invite is
+  turned away. Users are looked up on every request, so removing someone
+  locks them out immediately.
+- **Every campaign checks membership.** A campaign you don't belong to
+  looks like it doesn't exist. Players see only what the party knows,
+  including names and search results, and viewers can't change anything.
+- **Invite links** expire (1-90 days, 7 by default) and have a use limit
+  (1 by default). They can be tied to one Google account and revoked. Only
+  a hash of each link is stored, so a link is shown once, when it's made.
 - **The sign-in flow** is OpenID Connect with PKCE, state and nonce. The
   session is a signed `__Host-` cookie: HttpOnly, Secure, SameSite=Lax,
   lasting 30 days. Requests that change data from another site are refused.
@@ -51,10 +60,9 @@ In [Google Cloud Console](https://console.cloud.google.com/) → APIs & Services
 Settings live in two places:
 
 - **In `deploy/k8s/deployment.yaml`**, committed, like your other apps'
-  plain `env` values: `CAMPAIGN_AUTH`, `CAMPAIGN_PUBLIC_URL`,
-  `GOOGLE_CLIENT_ID` and `CAMPAIGN_ALLOWED_EMAILS`. Replace the two
-  `REPLACE_ME` values before the first apply. To change the allowlist
-  later, commit the edit and deploy.
+  plain `env` values: `CAMPAIGN_AUTH`, `CAMPAIGN_PUBLIC_URL` and
+  `GOOGLE_CLIENT_ID`. Replace the `REPLACE_ME` client ID before the first
+  apply.
 - **In the `campaign-secrets` Secret**, created by hand, for the three
   credentials:
 
@@ -98,14 +106,29 @@ Then restart:
 kubectl -n campaign rollout restart deployment/campaign
 ```
 
-### 3. The image
+### 3. Make yourself the first admin
+
+Once the pod is running, add yourself from inside it:
+
+```bash
+kubectl -n campaign exec deploy/campaign -- campaign users add you@gmail.com --admin --claim-unowned
+```
+
+- **`--admin`** gives you the admin page (users, app invites).
+- **`--claim-unowned`** makes you the owner of any campaign nobody owns
+  yet, such as campaigns carried over from local use.
+
+After that, everyone else arrives by invite (see
+[Inviting people](#inviting-people)).
+
+### 4. The image
 
 The first push to `main` publishes `ghcr.io/skirklin/campaign`. GHCR
 packages start private: either make it public (the package's settings
 page → Change visibility), as werewolf's is, or add an `imagePullSecret`
 to the Deployment.
 
-### 4. Caddy (in the homelab repo)
+### 5. Caddy (in the homelab repo)
 
 Add a site block to the Caddyfile, and a line to `infra/EXTERNAL.md`:
 
@@ -119,7 +142,7 @@ campaign.kirkl.in {
 Then add a DNS record for `campaign.kirkl.in` pointing where the other
 `*.kirkl.in` hosts do. Caddy gets the certificate itself.
 
-### 5. GitHub (this repo → Settings)
+### 6. GitHub (this repo → Settings)
 
 - **Environments → New environment `production`.** Optionally require your
   approval before each deploy.
@@ -134,6 +157,29 @@ Then add a DNS record for `campaign.kirkl.in` pointing where the other
 - **Variables:**
   - `DEPLOY_ENABLED` = `true`
   - `PUBLIC_URL` = `https://campaign.kirkl.in`
+
+## Inviting people
+
+- **To a campaign:** open the campaign's **Members** tab. Choose a role
+  (DM sees everything; player sees what the party knows) and access
+  (editor can change things; viewer can only look), then send the link.
+  It's shown once. Owners can change anyone's role or access later,
+  remove members, and revoke unused links; anyone can leave.
+- **To the app:** the **Admin** page makes invites that grant access
+  without a campaign, so someone can start their own. It also lists users,
+  removes them (signing them out at once) and makes admins.
+- **From the command line**, for when you're at a terminal:
+
+  ```bash
+  kubectl -n campaign exec deploy/campaign -- campaign invite -c curse-of-strahd --role player --access viewer
+  ```
+
+  Add `--email` to tie the link to one Google account, and `--days` or
+  `--uses` to change its limits.
+
+**Character sheets** belong to the person who made them. Everyone in the
+sheet's campaign can read it; its owner and the campaign's DMs (with
+editor access) can change it. A sheet with no campaign is private.
 
 ## Releasing
 

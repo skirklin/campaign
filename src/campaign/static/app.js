@@ -1,8 +1,11 @@
 import { characterList, sheetView } from "./sheet.js";
 import { campaignList, campaignView, entityView, sourceView } from "./campaigns.js";
+import { adminView } from "./admin.js";
+import { whoami } from "./util.js";
 
 const routes = [
-  [/^#\/characters\/(.+)$/, (m) => sheetView(decodeURIComponent(m[1])), "characters"],
+  [/^#\/characters\/(\d+)$/, (m) => sheetView(m[1]), "characters"],
+  [/^#\/admin$/, () => adminView(), "admin"],
   [/^#\/campaigns\/([^/]+)\/source\/(\d+)$/, (m) => sourceView(m[1], m[2]), "campaigns"],
   [/^#\/campaigns\/([^/]+)\/entity\/(\d+)$/, (m) => entityView(m[1], m[2]), "campaigns"],
   [/^#\/campaigns\/([^/]+)(?:\/(\w+))?$/, (m) => campaignView(m[1], m[2] || "ingest"), "campaigns"],
@@ -33,9 +36,10 @@ async function route() {
 window.addEventListener("hashchange", route);
 route();
 
-// Show who's signed in when sign-in is on (/auth/me is a 404 when it's off).
-fetch("/auth/me").then((r) => (r.ok ? r.json() : null)).then((me) => {
-  if (!me?.email) return;
+// With sign-in on, show who's signed in, and the admin page to admins.
+whoami().then((me) => {
+  if (me.local) return;
   document.getElementById("account-email").textContent = me.email;
   document.getElementById("account").hidden = false;
+  document.getElementById("admin-link").hidden = !me.is_admin;
 }).catch(() => {});

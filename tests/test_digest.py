@@ -250,7 +250,7 @@ def test_pre_baseline_database_is_retired_and_restored(env, monkeypatch):
     store, camp, db = env
     r = upload(store, camp)
     digest.run(db, r["id"], client=FakeDigest())
-    store.save_character("Brannoc", {"name": "Brannoc"}, campaign=camp, reason="made")
+    store.create_character({"name": "Brannoc"}, campaign_id=camp.id, reason="made")
     store.upsert_session(camp, 1)
     run = World(store, camp).start_run("ingest", session=1)
     World(store, camp).add_event("Something happened", 1, run)
@@ -260,7 +260,7 @@ def test_pre_baseline_database_is_retired_and_restored(env, monkeypatch):
     fresh = Store(db)
     assert fresh.schema_version == SCHEMA_VERSION
     assert list((db.parent / "backups").glob("campaign-*-retired.db"))
-    assert fresh.character("Brannoc") == {"name": "Brannoc"}
+    assert fresh.find_character("Brannoc")["sheet"] == {"name": "Brannoc"}
     camp2 = fresh.campaign("strahd")
     src = fresh.sources(camp2)[0]
     assert src["title"] == "Book" and src["has_original"]

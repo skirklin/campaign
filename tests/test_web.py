@@ -26,39 +26,47 @@ def test_index_and_static(client):
 def test_character_lifecycle(client):
     r = client.post("/api/characters/import", files={"file": ("c.json", EXAMPLE.read_bytes())})
     assert r.status_code == 201
-    name = r.json()["sheet"]["name"]
+    cid = r.json()["id"]
+    assert r.json()["can_edit"] and r.json()["campaign"] is None
     assert client.get("/api/characters").json()[0]["hp"]["current"] == 27
 
-    r = client.post(f"/api/characters/{name}/hp", json={"delta": -30})
+    r = client.post(f"/api/characters/{cid}/hp", json={"delta": -30})
     assert r.json()["sheet"]["hp"]["current"] == 0
 
     sheet = r.json()["sheet"]
     sheet["resources"][0]["used"] = 3
     sheet["abilities"]["wis"] = 18
-    r = client.put(f"/api/characters/{name}", json={"sheet": sheet, "reason": "level up"})
+    r = client.put(f"/api/characters/{cid}", json={"sheet": sheet, "reason": "level up"})
     assert r.json()["derived"]["spell_save_dc"] == 14
     assert r.json()["log"][0]["reason"] == "level up"
 
-    r = client.post(f"/api/characters/{name}/rest", json={"long": True})
+    r = client.post(f"/api/characters/{cid}/rest", json={"long": True})
     assert r.json()["sheet"]["hp"]["current"] == 27
     assert r.json()["sheet"]["resources"][0]["used"] == 0
 
     sheet = r.json()["sheet"] | {"hp": {"max": 27, "current": "lots", "temp": 0}}
-    assert client.put(f"/api/characters/{name}", json={"sheet": sheet}).status_code == 422
+    assert client.put(f"/api/characters/{cid}", json={"sheet": sheet}).status_code == 422
 
     sheet["hp"]["current"] = 5
-    sheet["name"] = "Brannoc the Bold"
-    assert client.put(f"/api/characters/{name}", json={"sheet": sheet}).status_code == 200
-    assert client.get(f"/api/characters/{name}").status_code == 404
-    assert client.get("/api/characters/Brannoc the Bold").json()["sheet"]["hp"]["current"] == 5
+    sheet["name"] = "Brannoc the Bold"  # renaming keeps the id
+    assert client.put(f"/api/characters/{cid}", json={"sheet": sheet}).status_code == 200
+    assert client.get(f"/api/characters/{cid}").json()["sheet"]["name"] == "Brannoc the Bold"
 
-    assert client.post("/api/characters", json={"name": "Brannoc the Bold"}).status_code == 409
-    assert client.delete("/api/characters/Brannoc the Bold").status_code == 204
+    # Names are unique within a campaign, not across them.
+    client.post("/api/campaigns", json={"name": "Strahd"})
+    client.post("/api/campaigns", json={"name": "Avernus"})
+    assert client.post("/api/characters", json={"name": "Bob", "campaign": "strahd"}).status_code == 201
+    assert client.post("/api/characters", json={"name": "Bob", "campaign": "strahd"}).status_code == 409
+    other = client.post("/api/characters", json={"name": "Bob", "campaign": "avernus"})
+    assert other.status_code == 201 and other.json()["campaign"] == {"slug": "avernus", "name": "Avernus"}
+    assert client.delete(f"/api/characters/{cid}").status_code == 204
+    assert client.get(f"/api/characters/{cid}").status_code == 404
 
 
 def test_reference_upload_and_search(client):
     assert client.post("/api/campaigns", json={"name": "Strahd", "role": "player"}).status_code == 201
-    assert client.post("/api/campaigns", json={"name": "Strahd"}).status_code == 409
+    again = client.post("/api/campaigns", json={"name": "Strahd"})
+    assert again.status_code == 201 and again.json()["slug"] == "strahd-2"  # same name, new slug
     md = b"# Vallaki\n## Blue Water Inn\nUrwin Martikov runs the inn.\n"
     r = client.post(
         "/api/campaigns/strahd/sources",
@@ -94,7 +102,7 @@ def test_ingest_job_runs_in_background(client, monkeypatch):
     )
     job_id = r.json()["job"]
     for _ in range(100):
-        job = client.get(f"/api/jobs/{job_id}").json()
+        job = client.get(f"/api/campaigns/strahd/jobs/{job_id}").json()
         if job["status"] != "running":
             break
         time.sleep(0.05)

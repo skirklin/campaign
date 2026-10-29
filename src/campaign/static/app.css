@@ -383,3 +383,15 @@ ol.events li { padding: .2rem 0; }
 #account { margin-left: auto; display: flex; align-items: center; gap: .5rem; font-size: .85rem; color: var(--muted); }
 #account[hidden] { display: none; }
 @media (max-width: 640px) { #account-email { display: none; } }
+
+/* -- people and access ------------------------------------------------------ */
+
+.read-only button.add, .read-only .chips input, .read-only .hp-controls, .read-only .rest-buttons { display: none; }
+.read-only input:disabled, .read-only select:disabled, .read-only textarea:disabled { opacity: 1; background: transparent; }
+.invite-link { display: flex; gap: .4rem; margin-top: .5rem; }
+.invite-link input { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .8rem; }
+table.people { width: 100%; border-collapse: collapse; font-size: .92rem; }
+table.people th { text-align: left; font-weight: 600; color: var(--muted); font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; }
+table.people th, table.people td { padding: .45rem .4rem; border-bottom: 1px dotted var(--border); vertical-align: middle; }
+table.people select { width: auto; }
+.table-scroll { overflow-x: auto; }

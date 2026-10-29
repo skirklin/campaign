@@ -6,7 +6,7 @@
 // into elements marked `data-d` so typing never loses focus. Only list
 // sections re-render, when rows are added or removed.
 
-import { api, h, toast, sign, enc, getPath, setPath, debounce } from "./util.js";
+import { api, h, toast, sign, getPath, setPath, debounce } from "./util.js";
 
 const ABILITIES = ["str", "dex", "con", "int", "wis", "cha"];
 const ABILITY_NAMES = { str: "Strength", dex: "Dexterity", con: "Constitution", int: "Intelligence", wis: "Wisdom", cha: "Charisma" };
@@ -24,13 +24,16 @@ const RECHARGE = ["", "short rest", "long rest", "dawn"];
 const COINS = ["cp", "sp", "ep", "gp", "pp"];
 
 export async function characterList() {
-  const chars = await api("GET", "/api/characters");
-  const nameInput = h("input", { placeholder: "New character name", required: true });
+  const [chars, campaigns] = await Promise.all([api("GET", "/api/characters"), api("GET", "/api/campaigns")]);
+  const nameInput = h("input", { placeholder: "New character name", required: true, "aria-label": "Character name" });
+  const campaign = h("select", { "aria-label": "Campaign" },
+    h("option", { value: "" }, "No campaign (private)"),
+    campaigns.map((c) => h("option", { value: c.slug }, c.name)));
+  const open = (r) => (location.hash = `#/characters/${r.id}`);
   const create = async (e) => {
     e.preventDefault();
     try {
-      const r = await api("POST", "/api/characters", { name: nameInput.value.trim() });
-      location.hash = `#/characters/${enc(r.sheet.name)}`;
+      open(await api("POST", "/api/characters", { name: nameInput.value.trim(), campaign: campaign.value || null }));
     } catch (err) {
       toast(err.message, true);
     }
@@ -40,28 +43,34 @@ export async function characterList() {
     onchange: async () => {
       const fd = new FormData();
       fd.append("file", fileInput.files[0]);
+      fd.append("campaign", campaign.value);
       try {
-        const r = await api("POST", "/api/characters/import", fd);
-        location.hash = `#/characters/${enc(r.sheet.name)}`;
+        open(await api("POST", "/api/characters/import", fd));
       } catch (err) {
         toast(err.message, true);
       }
     },
   });
+  const card = (c) => h("a.card.char-card", { href: `#/characters/${c.id}` },
+    h("strong", c.name),
+    h("span.muted", [c.species, c.summary].filter(Boolean).join(" · ") || "—"),
+    c.campaign && h("span.muted.small", c.campaign.name),
+    hpBar(c.hp),
+  );
+  const mine = chars.filter((c) => c.mine);
+  const party = chars.filter((c) => !c.mine);
   return h("section.page",
     h("h1", "Characters"),
     h("div.cards",
-      chars.length === 0 && h("p.empty", "No characters yet. Create one, or import a JSON sheet."),
-      chars.map((c) => h("a.card.char-card", { href: `#/characters/${enc(c.name)}` },
-        h("strong", c.name),
-        h("span.muted", [c.species, c.summary].filter(Boolean).join(" · ") || "—"),
-        hpBar(c.hp),
-      )),
+      mine.length === 0 && h("p.empty", "No characters yet. Create one, or import a JSON sheet."),
+      mine.map(card),
     ),
     h("form.inline-form", { onsubmit: create },
-      nameInput, h("button.primary", { type: "submit" }, "Create"),
+      nameInput, campaign, h("button.primary", { type: "submit" }, "Create"),
       h("button", { type: "button", onclick: () => fileInput.click() }, "Import JSON…"), fileInput,
     ),
+    party.length > 0 && h("h2.section-title", "Others in your campaigns"),
+    party.length > 0 && h("div.cards", party.map(card)),
   );
 }
 
@@ -74,23 +83,35 @@ function hpBar(hp) {
   );
 }
 
-export async function sheetView(name) {
-  const data = await api("GET", `/api/characters/${enc(name)}`);
+export async function sheetView(id) {
+  const data = await api("GET", `/api/characters/${id}`);
   return new SheetView(data).el;
 }
 
 class SheetView {
-  constructor({ sheet, derived, log }) {
+  constructor({ id, campaign, can_edit, sheet, derived, log }) {
+    this.id = id;
+    this.campaign = campaign;
+    this.canEdit = can_edit;
     this.sheet = sheet;
     this.derived = derived;
     this.log = log;
-    this.name = sheet.name;
     this.reasons = new Set();
     this.queue = Promise.resolve();
     this.sections = {};
     this.scheduleSave = debounce(() => this.flush(), 600);
     this.el = this.render();
     this.updateDerived();
+    if (!this.canEdit) this.lock();
+  }
+
+  // Someone else's sheet: readable, not editable. Export still works.
+  lock() {
+    this.el.classList.add("read-only");
+    this.status.textContent = "Read only";
+    for (const el of this.el.querySelectorAll("input, select, textarea, button")) {
+      if (!el.classList.contains("keep-enabled")) el.disabled = true;
+    }
   }
 
   // -- saving ----------------------------------------------------------------
@@ -110,13 +131,9 @@ class SheetView {
     this.queue = this.queue.then(async () => {
       this.status.textContent = "Saving…";
       try {
-        const r = await api("PUT", `/api/characters/${enc(this.name)}`, body);
+        const r = await api("PUT", `/api/characters/${this.id}`, body);
         this.derived = r.derived;
         this.log = r.log;
-        if (r.sheet.name !== this.name) {
-          this.name = r.sheet.name;
-          history.replaceState(null, "", `#/characters/${enc(this.name)}`);
-        }
         this.updateDerived();
         this.refresh("log");
         this.status.textContent = "Saved";
@@ -138,7 +155,7 @@ class SheetView {
   }
 
   async reload() {
-    this.replaceWith(await api("GET", `/api/characters/${enc(this.name)}`));
+    this.replaceWith(await api("GET", `/api/characters/${this.id}`));
   }
 
   replaceWith(data) {
@@ -254,10 +271,11 @@ class SheetView {
         this.field("name", { cls: "name-input", reason: "renamed", placeholder: "Name" }),
         this.status,
         h("div.head-actions",
-          h("button", { onclick: () => this.exportJson() }, "Export"),
-          h("button.danger", { onclick: () => this.remove() }, "Delete"),
+          h("button.keep-enabled", { onclick: () => this.exportJson() }, "Export"),
+          this.canEdit && h("button.danger", { onclick: () => this.remove() }, "Delete"),
         ),
       ),
+      this.campaign && h("p.muted.small", "In ", h("a", { href: `#/campaigns/${this.campaign.slug}` }, this.campaign.name)),
       h("div.identity",
         this.field("species", { label: "Species" }),
         this.field("background", { label: "Background" }),
@@ -310,7 +328,7 @@ class SheetView {
     const apply = (dir) => {
       const n = Math.trunc(Number(amount.value));
       if (!n) return amount.focus();
-      this.action("POST", `/api/characters/${enc(this.name)}/hp`, { delta: dir * n });
+      this.action("POST", `/api/characters/${this.id}/hp`, { delta: dir * n });
     };
     amount.addEventListener("keydown", (e) => { if (e.key === "Enter") apply(-1); });
     const hp = this.sheet.hp;
@@ -340,8 +358,8 @@ class SheetView {
       h("div.vitals-row",
         this.section("death", null, () => this.deathSaves(), "bare"),
         h("div.rest-buttons",
-          h("button", { onclick: () => this.action("POST", `/api/characters/${enc(this.name)}/rest`, { long: false }) }, "Short rest"),
-          h("button", { onclick: () => this.action("POST", `/api/characters/${enc(this.name)}/rest`, { long: true }) }, "Long rest"),
+          h("button", { onclick: () => this.action("POST", `/api/characters/${this.id}/rest`, { long: false }) }, "Short rest"),
+          h("button", { onclick: () => this.action("POST", `/api/characters/${this.id}/rest`, { long: true }) }, "Long rest"),
         ),
       ),
       h("div.conditions", h("span.label", "Conditions"),
@@ -487,14 +505,14 @@ class SheetView {
 
   exportJson() {
     const blob = new Blob([JSON.stringify(this.sheet, null, 2)], { type: "application/json" });
-    const a = h("a", { href: URL.createObjectURL(blob), download: `${this.name}.json` });
+    const a = h("a", { href: URL.createObjectURL(blob), download: `${this.sheet.name}.json` });
     a.click();
     URL.revokeObjectURL(a.href);
   }
 
   async remove() {
-    if (!confirm(`Delete ${this.name}? This can't be undone.`)) return;
-    await api("DELETE", `/api/characters/${enc(this.name)}`);
+    if (!confirm(`Delete ${this.sheet.name}? This can't be undone.`)) return;
+    await api("DELETE", `/api/characters/${this.id}`);
     location.hash = "#/characters";
   }
 }

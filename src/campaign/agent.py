@@ -11,7 +11,7 @@ from typing import Any, Callable
 import anthropic
 from anthropic import beta_tool
 
-from .db import Store
+from .db import Campaign, Store
 from .tools import ToolContext, build_tools
 from .world import World
 
@@ -243,17 +243,21 @@ def chat_agent(store: Store, campaign_slug: str, **kw: Any) -> Agent:
 
 def ingest_session(
     store: Store,
-    campaign_slug: str,
+    campaign_slug: str | Campaign,
     transcript: str,
     number: int | None = None,
     played_on: str | None = None,
     source_title: str | None = None,
     **kw: Any,
 ) -> dict[str, Any]:
-    """Store a transcript as a source, then have Claude fold it into the campaign state."""
+    """Store a transcript as a source, then have Claude fold it into the campaign state.
+
+    Pass a Campaign rather than a slug to ingest as a particular viewer: a
+    player's ingest only sees what players may see.
+    """
     from .ingest import parse_markdown
 
-    campaign = store.campaign(campaign_slug)
+    campaign = store.campaign(campaign_slug) if isinstance(campaign_slug, str) else campaign_slug
     number = number or store.next_session_number(campaign)
     title = source_title or f"Session {number} transcript"
     blob = store.blobs.put(transcript.encode("utf-8"))

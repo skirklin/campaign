@@ -51,6 +51,18 @@ class World:
         self.conn = store.conn
 
     @property
+    def _alias_filter(self) -> str:
+        """SQL condition on an aliases row: in a player's view, hide names that came from DM-only material.
+
+        "The windmill hag" from the module would give away who the kindly
+        baker is, as surely as a fact would.
+        """
+        if not self.campaign.spoiler_safe:
+            return ""
+        return (" AND run_id NOT IN (SELECT r.id FROM runs r JOIN sources s ON s.id = r.source_id"
+                " WHERE r.kind = 'book' AND s.dm_only = 1)")
+
+    @property
     def now(self) -> int:
         return self.store.current_session(self.campaign)
 
@@ -115,14 +127,19 @@ class World:
             return None
         e = dict(row)
         e["aliases"] = [r["alias"] for r in self.conn.execute(
-            "SELECT alias FROM aliases WHERE entity_id = ? ORDER BY id", (entity_id,))]
+            f"SELECT alias FROM aliases WHERE entity_id = ?{self._alias_filter} ORDER BY id", (entity_id,))]
         return e
 
-    def resolve(self, name: str, kind: str | None = None) -> dict[str, Any] | None:
-        """The entity called `name`, by canonical name or alias; same kind preferred."""
+    def resolve(self, name: str, kind: str | None = None, every_alias: bool = False) -> dict[str, Any] | None:
+        """The entity called `name`, by canonical name or alias; same kind preferred.
+
+        In a player's view, aliases from DM-only material don't count, unless
+        `every_alias` (for matching the book's own entries when applying it).
+        """
+        alias_filter = "" if every_alias else self._alias_filter
         rows = self.conn.execute(
             "SELECT e.id, e.kind FROM entities e WHERE e.campaign_id = ? AND (e.name = ? COLLATE NOCASE"
-            " OR e.id IN (SELECT entity_id FROM aliases WHERE alias = ?)) ORDER BY e.id",
+            f" OR e.id IN (SELECT entity_id FROM aliases WHERE alias = ?{alias_filter})) ORDER BY e.id",
             (self.campaign.id, name.strip(), name.strip()),
         ).fetchall()
         if not rows:
@@ -325,7 +342,7 @@ class World:
         clause, params = self._visible(None)
         sql = (
             "SELECT e.id, e.kind, e.name,"
-            " (SELECT group_concat(alias, '; ') FROM aliases WHERE entity_id = e.id) AS aliases,"
+            f" (SELECT group_concat(alias, '; ') FROM aliases WHERE entity_id = e.id{self._alias_filter}) AS aliases,"
             f" (SELECT count(*) FROM facts f WHERE f.entity_id = e.id AND f.valid_to IS NULL{clause}) AS current_facts,"
             f" (SELECT count(*) FROM facts f WHERE f.entity_id = e.id AND f.valid_to IS NOT NULL{clause}) AS past_facts,"
             " (SELECT count(*) FROM facts f JOIN runs r ON r.id = f.run_id WHERE f.entity_id = e.id AND r.kind != 'book')"
@@ -342,9 +359,9 @@ class World:
             sql += " AND e.kind = ?"
             args.append(kind)
         if q:
-            sql += (" AND (e.name LIKE ? OR e.id IN (SELECT entity_id FROM aliases WHERE alias LIKE ?)"
-                    " OR e.id IN (SELECT entity_id FROM facts WHERE statement LIKE ?))")
-            args += [f"%{q}%"] * 3
+            sql += (f" AND (e.name LIKE ? OR e.id IN (SELECT entity_id FROM aliases WHERE alias LIKE ?{self._alias_filter})"
+                    f" OR e.id IN (SELECT f.entity_id FROM facts f WHERE f.statement LIKE ?{clause}))")
+            args += [f"%{q}%"] * 3 + params
         sql += " ORDER BY e.kind, e.name"
         out = []
         for r in self.conn.execute(sql, args):
@@ -368,10 +385,12 @@ class World:
             from .db import fts_query
 
             if q := fts_query(name):
+                # Only facts this viewer may see, or the search itself would give secrets away.
+                clause, params = self._visible(as_of)
                 ids = list(dict.fromkeys(r["entity_id"] for r in self.conn.execute(
                     "SELECT f.entity_id FROM facts_fts JOIN facts f ON f.id = facts_fts.rowid"
-                    " WHERE facts_fts MATCH ? AND f.campaign_id = ? ORDER BY bm25(facts_fts) LIMIT 30",
-                    (q, self.campaign.id),
+                    f" WHERE facts_fts MATCH ? AND f.campaign_id = ?{clause} ORDER BY bm25(facts_fts) LIMIT 30",
+                    (q, self.campaign.id, *params),
                 )))[:limit]
         return [v for v in (self.view(i, as_of) for i in ids) if v]
 
@@ -425,7 +444,7 @@ class World:
         for item in entities:
             e = None
             for name in (item["name"], *item.get("aliases", [])):
-                if e := self.resolve(name, item["kind"]):
+                if e := self.resolve(name, item["kind"], every_alias=True):
                     break
             e = e or self.ensure_entity(item["name"], item["kind"])
             for alias in (item["name"], *item.get("aliases", [])):

@@ -154,3 +154,31 @@ def test_web_world_endpoints(tmp_path):
     ireena = next(e for e in listing["entities"] if e["name"] == "Ireena Kolyana")
     merged = client.post(f"/api/campaigns/strahd/entities/{hag['id']}/merge", json={"other_id": ireena["id"]}).json()
     assert "Ireena Kolyana" in merged["aliases"]
+
+
+def test_aliases_from_dm_only_material_are_spoilers_too():
+    store, camp, w, src = setup(role="dm", dm_only=True)
+    hag = w.resolve("the windmill hag")["id"]
+    w.record(hag, "Morgantha sells pies to the party", play(store, w, 1), 1)
+    from dataclasses import replace
+
+    player = World(store, replace(camp, role="player"))
+    view = player.view(hag)
+    assert view["aliases"] == [] and view["name"] == "Morgantha"  # the party knows her name, not what she is
+    assert player.resolve("the windmill hag") is None
+    assert player.lookup("the windmill hag") == []
+    assert [e["aliases"] for e in player.list()] == [[]]
+    # Applying the book still matches its own aliases, so identities stay stable.
+    assert w.apply_book(src, BOOK, key="v2") and w.resolve("the windmill hag")["id"] == hag
+
+
+def test_search_doesnt_reveal_hidden_facts():
+    store, camp, w, _ = setup(role="dm", dm_only=True)
+    w.record(w.resolve("Morgantha")["id"], "Morgantha sells pies to the party", play(store, w, 1), 1)
+    from dataclasses import replace
+
+    player = World(store, replace(camp, role="player"))
+    assert player.lookup("night hag") == []          # only the hidden book fact says "night hag"
+    assert player.list(q="night hag") == []
+    assert [v["name"] for v in player.lookup("pies")] == ["Morgantha"]
+    assert [v["name"] for v in w.lookup("night hag")] == ["Morgantha"]  # the DM still finds it
