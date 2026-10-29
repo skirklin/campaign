@@ -860,4 +860,5 @@ def serve(db: Path | str, host: str = "127.0.0.1", port: int = 8765, allow_no_au
         print("Sign-in: off")
     s.close()
     # Behind a reverse proxy (Caddy) only the proxy's X-Forwarded-* headers are trusted.
-    uvicorn.run(create_app(db, auth), host=host, port=port, proxy_headers=True)
+    # On SIGTERM (a deploy), finish requests in flight for up to 20 s, then stop the background loops.
+    uvicorn.run(create_app(db, auth), host=host, port=port, proxy_headers=True, timeout_graceful_shutdown=20)

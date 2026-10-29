@@ -402,9 +402,13 @@ def test_reconciler_converges_and_a_new_one_picks_up_where_the_old_one_died(env)
     done_before = {t for _, t in first.calls}
     assert 0 < len(done_before) < 8 and store.digest_status(r["id"])["done"] < 8
 
-    # A fresh loop, knowing nothing, finishes the job without redoing anything.
+    # It died holding the lease, so a fresh loop waits until that runs out rather than doubling up...
     second = FakeDigest()
     fresh = digest.Reconciler(db, client_factory=lambda: second)
+    assert fresh.reconcile_once() is False and second.calls == []
+    store.conn.execute("UPDATE leases SET expires_at = 0")
+    store.conn.commit()
+    # ...then, knowing nothing, finishes the job without redoing anything.
     while fresh.reconcile_once():
         pass
     assert store.digest_status(r["id"])["done"] == 8
@@ -431,3 +435,23 @@ def test_clearing_the_target_stops_the_loop(env):
     assert len(fake.calls) == 1  # the call in flight finished and was kept; nothing more started
     assert store.digest_status(r["id"])["done"] == 1
     assert loop.reconcile_once() is False
+
+
+def test_two_servers_overlapping_take_turns(env):
+    """A rolling deploy runs two servers for a few seconds: only the lease holder digests."""
+    store, camp, db = env
+    r = upload(store, camp)
+    store.set_digest_target(r["id"], digest.MODEL, "medium")
+    old_calls, new_calls = FakeDigest(), FakeDigest()
+    old = digest.Reconciler(db, client_factory=lambda: old_calls, workers=1)
+    new = digest.Reconciler(db, client_factory=lambda: new_calls, workers=1)
+    now = int(time.time())
+    assert store.take_lease(old.LEASE, old.holder, 300, now)
+    assert not store.take_lease(new.LEASE, new.holder, 300, now)
+    new.reconcile_once()
+    assert new_calls.calls == []  # it never got to start a call
+    old.stop()  # the old server shuts down and hands the lease over
+    assert store.take_lease(new.LEASE, new.holder, 300, now)
+    while new.reconcile_once():
+        pass
+    assert store.digest_status(r["id"])["done"] == 8 and len(new_calls.calls) == 8
