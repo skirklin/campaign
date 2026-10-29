@@ -66,9 +66,14 @@ uv run campaign web            # http://127.0.0.1:8765
   attacks, resources, saves, rests), Skills, Spells (slots shown with their
   level), Gear and Notes. Damage, healing and coin go in on a keypad, so the
   phone's keyboard doesn't cover the sheet; resources, death saves and
-  conditions are taps. Tapping a modifier or an attack rolls it, with a
-  second d20 shown for advantage or disadvantage and dice doubled on a
-  crit. The 🎲 button opens a dice tray: tap dice to build an expression or
+  conditions are taps. Rolls take over the screen. Tapping a check or
+  save rolls it, showing the advantage and disadvantage results too.
+  Tapping an attack first asks what's chosen: advantage, the attack
+  options that apply to it (Reckless Attack, Great Weapon Master) and
+  statuses that change it (Rage). Then it rolls to hit, showing both dice
+  with advantage and any reminder an option carries. On a hit it rolls
+  damage, doubling dice on a crit, with situational damage to add if it
+  applies. "Attack again" keeps the choices for a second swing. The 🎲 button opens a dice tray: tap dice to build an expression or
   type one (`8d6 fire`, `2d20kh1+5` for advantage, `4d6kh3` for a stat),
   with Adv/Dis toggles. Every roll is remembered on that device, per
   character (the latest 100): the tray shows the recent ones, the Notes
@@ -132,7 +137,13 @@ localhost without it, unless you pass `--no-auth`. With sign-in on:
   a resource (a use of Rage), and a rest ends them. Damage that only
   applies sometimes (Sneak Attack, "vs giants", a centaur's Charge) is
   **situational**: it's left out of the attack's damage and offered as a
-  button on the roll, to add when it applies. Dice can grow with a class
+  button on the roll, to add when it applies; adding one can spend a
+  resource (a smite's slot). **Attack options** are choices made before
+  an attack roll: advantage or disadvantage, a change to hit and damage,
+  and a reminder (Reckless Attack: "attacks against you have advantage").
+  Each applies to the attacks it names, by ability, melee or ranged,
+  weapon or spell, and weapon property (Great Weapon Master: heavy,
+  melee). The editor has presets for the common ones. Dice can grow with a class
   (`(half_level:rogue)d6`), and items can raise an ability score or set
   it (Gauntlets of Ogre Power). Nicknames become the world entry's
   aliases. Sheets saved before this

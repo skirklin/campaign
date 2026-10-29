@@ -39,6 +39,14 @@ const BONUS_TARGETS = [
     ...ABILITIES.map((a) => [`score_set:${a}`, `${ABILITY_NAMES[a]} score at least`])]],
 ];
 export const COINS = ["cp", "sp", "ep", "gp", "pp"];
+// Common choices made when attacking, ready to add (amounts can be edited after).
+const ATTACK_OPTION_PRESETS = {
+  "Reckless Attack": { name: "Reckless Attack", applies_to: ["str", "melee"], advantage: "advantage",
+    note: "Attacks against you have advantage until your next turn." },
+  "Great Weapon Master": { name: "Great Weapon Master", applies_to: ["heavy", "melee"], to_hit: -5, damage: 10 },
+  "Sharpshooter": { name: "Sharpshooter", applies_to: ["ranged", "weapon"], to_hit: -5, damage: 10 },
+  "Blank": {},
+};
 
 // A character lives in exactly one campaign. This page is a view across them:
 // your characters, grouped by campaign, and the rest of each of your parties.
@@ -448,6 +456,7 @@ export class SheetView {
         h("div.col",
           this.section("resources", "Resources", () => this.resources()),
           this.section("attacks", "Attacks", () => this.attacks()),
+          this.section("attack_options", "Attack options", () => this.attackOptions()),
           this.section("statuses", "Statuses", () => this.statuses()),
           this.section("bonuses", "Bonuses & effects", () => [
             h("p.muted.small", "Features and effects that add to a number. One that only counts during a status "
@@ -575,6 +584,11 @@ export class SheetView {
           h("label.mini", "+", this.field(`attacks.${i}.damage.${j}.bonus`, { type: "number", reason: "damage" })),
           this.field(`attacks.${i}.damage.${j}.type`, { placeholder: "type", reason: "damage" }),
           this.field(`attacks.${i}.damage.${j}.situational`, { placeholder: "only when… (situational)", reason: "damage", cls: "situational" }),
+          d.situational && h("select", { "aria-label": "Spends", title: "Resource used up when this damage is added", value: d.spends || "",
+            onchange: (e) => { d.spends = e.target.value; this.changed("damage"); } },
+            h("option", { value: "" }, "spends nothing"),
+            [...new Set([...this.sheet.resources.map((r) => r.name), d.spends].filter(Boolean))]
+              .map((name) => h("option", { value: name }, `spends ${name}`))),
           remove(a.damage, j, "damage", "attacks"),
         )),
         this.chips("attacks", `attacks.${i}.properties`, { placeholder: "Add property (finesse, reach…)" }),
@@ -698,6 +712,48 @@ export class SheetView {
         this.sections.statuses.body.querySelector(".status-row:last-of-type input:not([type=checkbox])")?.focus();
         this.changed("added status");
       } }, "+ Add status"),
+    );
+  }
+
+  // Choices made before an attack roll. The Play view offers each on the attacks it applies to.
+  attackOptions() {
+    const list = this.sheet.attack_options;
+    const add = (preset) => {
+      list.push({ name: "", applies_to: [], advantage: "", to_hit: 0, damage: 0, note: "", ...preset });
+      this.refresh("attack_options");
+      if (!preset.name) this.sections.attack_options.body.querySelector(".option:last-of-type input")?.focus();
+      this.changed(`added ${preset.name || "attack option"}`);
+    };
+    const presets = h("select", { "aria-label": "Add an attack option", onchange: (e) => {
+      const p = ATTACK_OPTION_PRESETS[e.target.value];
+      e.target.value = "";
+      if (p) add(p);
+    } }, h("option", { value: "" }, "+ Add an attack option…"),
+      Object.keys(ATTACK_OPTION_PRESETS).map((k) => h("option", { value: k }, k)));
+    return h("div.rows",
+      list.length === 0 && h("p.empty", "Reckless Attack, Great Weapon Master… chosen when attacking."),
+      list.map((o, i) => h("div.option",
+        h("div.option-top",
+          this.field(`attack_options.${i}.name`, { placeholder: "Option", reason: "attack option" }),
+          h("select", { "aria-label": "Advantage", value: o.advantage,
+            onchange: (e) => { o.advantage = e.target.value; this.changed("attack option"); } },
+            h("option", { value: "" }, "no advantage"), h("option", { value: "advantage" }, "advantage"),
+            h("option", { value: "disadvantage" }, "disadvantage")),
+          h("button.icon", { title: "Remove", "aria-label": "Remove attack option",
+            onclick: () => { list.splice(i, 1); this.changed("removed attack option"); this.refresh("attack_options"); } }, "×"),
+        ),
+        h("div.attack-parts",
+          h("label.mini", "Hit", this.field(`attack_options.${i}.to_hit`, { reason: "attack option", cls: "amount" })),
+          h("label.mini", "Damage", this.field(`attack_options.${i}.damage`, { reason: "attack option", cls: "amount" })),
+        ),
+        this.field(`attack_options.${i}.note`, { placeholder: "Reminder when chosen (what it costs)", reason: "attack option" }),
+        h("div.option-applies", h("span.muted.small", "Applies to"),
+          this.chips("attack_options", `attack_options.${i}.applies_to`, {
+            suggestions: ["melee", "ranged", "weapon", "spell", ...ABILITIES, "heavy", "finesse", "light", "thrown"],
+            placeholder: "every attack; or str, melee, heavy…",
+          })),
+      )),
+      presets,
     );
   }
 

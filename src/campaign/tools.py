@@ -328,7 +328,13 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         "Rage" counts only while Rage is on. Extra damage that only
         applies sometimes (Sneak Attack, "vs undead", Charge) is a damage
         part with situational set to when it applies; it's added when
-        rolling, not in the attack's damage. Dice can scale:
+        rolling, not in the attack's damage (spends names a resource it
+        uses up, like a smite's slot). Choices made before an attack roll
+        are attack_options {name, applies_to, advantage, to_hit, damage,
+        note}: Reckless Attack applies_to ["str", "melee"] with advantage
+        "advantage" and the note that attacks against you have advantage;
+        Great Weapon Master ["heavy", "melee"], to_hit -5, damage 10.
+        Dice can scale:
         "(half_level:rogue)d6". The name is the name only; other names
         go in nicknames.
 
@@ -378,7 +384,13 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         "Rage" counts only while Rage is on. Extra damage that only
         applies sometimes (Sneak Attack, "vs undead", Charge) is a damage
         part with situational set to when it applies; it's added when
-        rolling, not in the attack's damage. Dice can scale:
+        rolling, not in the attack's damage (spends names a resource it
+        uses up, like a smite's slot). Choices made before an attack roll
+        are attack_options {name, applies_to, advantage, to_hit, damage,
+        note}: Reckless Attack applies_to ["str", "melee"] with advantage
+        "advantage" and the note that attacks against you have advantage;
+        Great Weapon Master ["heavy", "melee"], to_hit -5, damage 10.
+        Dice can scale:
         "(half_level:rogue)d6". The name is the name only; other names
         go in nicknames.
 

@@ -164,6 +164,7 @@ class Damage(Model):
     # Extra damage that only applies sometimes ("Sneak Attack", "vs giants & titans", "Charge"):
     # left out of the attack's damage, and added when rolling if it applies.
     situational: str = ""
+    spends: str = ""  # a resource's name: adding this situational damage spends a use (Divine Smite, a slot)
 
 
 ATTACK_ABILITIES = (*ABILITIES, "finesse", "spell", "none")
@@ -187,6 +188,23 @@ class Attack(Model):
     range: str = ""  # "5 ft", "20/60 ft"
     properties: list[str] = []  # "finesse", "versatile 1d10", "thrown 20/60", "reach"
     notes: str = ""  # what it does beyond its numbers, in a few words
+
+
+class AttackOption(Model):
+    """A choice made when attacking, before the roll: Reckless Attack, Great Weapon Master's -5/+10.
+
+    `applies_to` narrows it to some attacks, every entry matching: the ability
+    the attack uses ("str"), "melee" or "ranged", "weapon" or "spell", or a
+    weapon property ("heavy"). Empty means every attack. `note` is shown when it's chosen, for
+    what it costs: "attacks against you have advantage until your next turn".
+    """
+
+    name: str
+    applies_to: list[str] = []
+    advantage: Literal["", "advantage", "disadvantage"] = ""
+    to_hit: Amount = 0
+    damage: Amount = 0  # added to the attack's main damage
+    note: str = ""
 
 
 class Resource(Model):
@@ -271,6 +289,7 @@ class CharacterSheet(Model):
     attacks: list[Attack] = []
     bonuses: list[Bonus] = []  # from features and effects; items carry their own
     statuses: list[Status] = []  # switched on and off in play: Rage, Concentration…
+    attack_options: list[AttackOption] = []  # chosen per attack: Reckless Attack, Great Weapon Master
     resources: list[Resource] = []
     spellcasting_ability: str = ""
     spells: list[Spell] = []
@@ -401,6 +420,34 @@ class CharacterSheet(Model):
     def hp_max(self) -> int:
         return max(0, sum(v for _, v in self.hp_max_parts()))
 
+    @staticmethod
+    def reach(attack: Attack) -> set[str]:
+        """Melee, ranged or both: ammunition is ranged, thrown is both, else by range (over 10 ft is ranged)."""
+        props = {p.split()[0].lower() for p in attack.properties if p.strip()}
+        feet = re.match(r"\s*(\d+)", attack.range)
+        far = "/" in attack.range or (feet is not None and int(feet.group(1)) > 10)
+        if "ammunition" in props:
+            return {"ranged"}
+        if "thrown" in props:
+            return {"melee", "ranged"}
+        return {"ranged"} if far else {"melee"}
+
+    def option_applies(self, option: AttackOption, attack: Attack) -> bool:
+        props = {p.split()[0].lower() for p in attack.properties if p.strip()}
+        for want in (w.strip().lower() for w in option.applies_to if w.strip()):
+            if want in ABILITIES:
+                if self.attack_ability(attack) != want:
+                    return False
+            elif want in ("melee", "ranged"):
+                if want not in self.reach(attack):
+                    return False
+            elif want in ("weapon", "spell"):
+                if (attack.ability == "spell") != (want == "spell"):
+                    return False
+            elif want not in props:
+                return False
+        return True
+
     def attack_ability(self, attack: Attack) -> str | None:
         """The ability an attack uses, resolving finesse and spell; None for "none"."""
         if attack.ability == "finesse":
@@ -433,8 +480,9 @@ class CharacterSheet(Model):
                     parts.append(("Magic", attack.bonus))
                 parts += self._bonuses("damage", *([f"damage:{ability}"] if ability else []))
             damage.append({"dice": self.dice(d.dice), "type": d.type, "bonus": _total(parts),
-                           "situational": d.situational})
-        return {"to_hit": _total(hit), "damage": damage, "text": _damage_text(damage)}
+                           "situational": d.situational, "spends": d.spends})
+        options = [i for i, o in enumerate(self.attack_options) if self.option_applies(o, attack)]
+        return {"to_hit": _total(hit), "damage": damage, "text": _damage_text(damage), "options": options}
 
     def derived(self) -> dict[str, Any]:
         """Every computed number, as {"total", "parts": [{"label", "value"}]} so it can be explained."""
@@ -453,6 +501,9 @@ class CharacterSheet(Model):
             "speed": _total([("Base", self.speed), *self._bonuses("speed")]),
             "hp_max": _total(self.hp_max_parts()),
             "attacks": [self.attack_parts(a) for a in self.attacks],
+            # What each option comes to now; derived.attacks[i].options says which apply to that attack.
+            "attack_options": [{"to_hit": self.amount(o.to_hit), "damage": self.amount(o.damage)}
+                               for o in self.attack_options],
         }
         if self.spellcasting_ability:
             a = self.spellcasting_ability
