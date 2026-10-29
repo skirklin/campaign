@@ -1,7 +1,7 @@
 // Campaign list, and per-campaign tabs for ingesting sessions and reference
 // material and browsing what the assistant has recorded.
 
-import { api, h, toast, enc, whoami, canEdit } from "./util.js";
+import { api, h, toast, enc, whoami, canEdit, live, streamPost } from "./util.js";
 import { membersTab } from "./people.js";
 import { characterCard, newCharacterForm } from "./sheet.js";
 
@@ -36,6 +36,7 @@ export async function campaignList() {
 }
 
 const TABS = [
+  ["ask", "Ask"],
   ["ingest", "Sessions"],
   ["party", "Party"],
   ["reference", "Reference"],
@@ -50,7 +51,7 @@ export async function campaignView(slug, tab) {
   if (!c) throw new Error(`No campaign "${slug}".`);
   const tabs = TABS.filter(([key]) => key !== "members" || !me.local);
   const body = h("div.tab-body", h("p.muted", "Loading…"));
-  const render = { ingest: sessionsTab, party: partyTab, reference: referenceTab, state: stateTab, journal: journalTab, members: membersTab }[tab] || sessionsTab;
+  const render = { ask: askTab, ingest: sessionsTab, party: partyTab, reference: referenceTab, state: stateTab, journal: journalTab, members: membersTab }[tab] || sessionsTab;
   render(c, me).then((el) => body.replaceChildren(el), (err) => body.replaceChildren(h("p.empty", err.message)));
   return h("section.page",
     h("div.page-head", h("h1", c.name), h(`span.badge.${c.role}`, c.role === "dm" ? "DM" : "Player"),
@@ -58,6 +59,102 @@ export async function campaignView(slug, tab) {
     h("nav.tabs", tabs.map(([key, label]) => h("a", { href: `#/campaigns/${slug}/${key}`, className: key === tab ? "active" : "" }, label))),
     body,
   );
+}
+
+// -- ask: chat with the campaign assistant ----------------------------------------
+
+async function askTab(c) {
+  const base = `/api/campaigns/${c.slug}`;
+  let chats = await api("GET", `${base}/chats`);
+  let current = null;
+  const thread = h("div.chat-thread");
+  const pick = h("select", { "aria-label": "Conversation" });
+  const input = h("textarea", { rows: 3, placeholder: c.role === "player"
+    ? "Ask about the campaign: what the party knows, rules, your character…"
+    : "Ask about the module, the world, or tell it what happened…", "aria-label": "Message" });
+  const send = h("button.primary", { type: "submit" }, "Send");
+
+  const bubble = (role, kind, text) => h(`div.chat-${kind === "tool" ? "tool" : role}`, text);
+  const fillPick = () => pick.replaceChildren(
+    h("option", { value: "" }, chats.length ? "New conversation" : "No conversations yet"),
+    ...chats.map((x) => h("option", { value: x.id }, x.title || "(untitled)")),
+  );
+  const open = async (id) => {
+    current = id ? Number(id) : null;
+    pick.value = id || "";
+    if (!current) {
+      thread.replaceChildren(h("p.empty", "Ask anything about this campaign. "
+        + (c.role === "player" ? "It only knows what the party knows." : "It can look things up in the module and the world, and record what happened.")));
+      return;
+    }
+    const conv = await api("GET", `${base}/chats/${current}`);
+    thread.replaceChildren(...conv.turns.map((t) => bubble(t.role, t.kind, t.text)));
+    thread.scrollTop = thread.scrollHeight;
+  };
+  pick.addEventListener("change", () => open(pick.value));
+
+  const form = h("form.chat-form", {
+    onsubmit: async (e) => {
+      e.preventDefault();
+      const text = input.value.trim();
+      if (!text) return;
+      send.disabled = true;
+      try {
+        if (!current) {
+          const conv = await api("POST", `${base}/chats`);
+          current = conv.id;
+          chats = [conv, ...chats];
+          if (thread.querySelector(".empty")) thread.replaceChildren();
+        }
+        input.value = "";
+        thread.append(bubble("user", "text", text));
+        let answer = null;
+        await streamPost(`${base}/chats/${current}/messages`, { text }, (type, data) => {
+          if (type === "text") {
+            if (!data.trim() && !answer) return;  // the line break after a round of tool calls
+            answer ||= thread.appendChild(bubble("assistant", "text", ""));
+            answer.textContent += data;
+          } else if (type === "tool") {
+            thread.append(bubble("assistant", "tool", data));
+            answer = null;  // text after a tool call starts a new paragraph
+          } else if (type === "error") {
+            thread.append(h("div.chat-error", data));
+          }
+          thread.scrollTop = thread.scrollHeight;
+        });
+        chats = await api("GET", `${base}/chats`);
+        fillPick();
+        pick.value = current;
+      } catch (err) {
+        toast(err.message, true);
+      } finally {
+        send.disabled = false;
+        input.focus();
+      }
+    },
+  }, input, h("div.actions", send, h("span.muted.small", "Enter to send, Shift+Enter for a new line")));
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      form.requestSubmit();
+    }
+  });
+
+  fillPick();
+  await open(chats[0]?.id || "");
+  return h("div.chat",
+    h("div.chat-head", pick,
+      h("button", { onclick: () => open("") }, "New"),
+      h("button.danger", {
+        onclick: async () => {
+          if (!current || !confirm("Delete this conversation?")) return;
+          await api("DELETE", `${base}/chats/${current}`);
+          chats = chats.filter((x) => x.id !== current);
+          fillPick();
+          open(chats[0]?.id || "");
+        },
+      }, "Delete")),
+    thread, form);
 }
 
 // -- party ---------------------------------------------------------------------
@@ -152,15 +249,13 @@ async function sessionsTab(c) {
   const submit = h("button.primary", { type: "submit" }, "Ingest session");
 
   // Ingests are targets the server works through in the background: they carry on
-  // whether or not this page is open, and survive restarts. Each shows its live log here.
+  // whether or not this page is open, and survive restarts. Each shows its log here,
+  // kept current by the live event stream.
   const ingestsEl = h("div.ingests");
-  const watched = new Set();
+  const panels = new Map();
   const watch = (ing) => {
-    if (watched.has(ing.id)) return;
-    watched.add(ing.id);
-    const panel = h("div.job");
-    ingestsEl.append(panel);
-    pollIngest(c, ing.id, panel, async (done) => {
+    if (panels.has(ing.id)) return;
+    const panel = ingestPanel(c, ing.id, async (done) => {
       if (done.state === "done") {
         toast(`Session ${done.result.session} recorded`);
         const fresh = await api("GET", `${base}/sessions`);
@@ -168,6 +263,8 @@ async function sessionsTab(c) {
         renderSessions(fresh.sessions);
       }
     });
+    panels.set(ing.id, panel);
+    ingestsEl.append(panel.el);
   };
 
   const form = h("form.card.ingest-form", {
@@ -199,46 +296,44 @@ async function sessionsTab(c) {
   );
 
   data.ingests.forEach(watch);
+  live(c.slug, list, {
+    ingest: (ing) => {
+      if (!panels.has(ing.id) && (ing.state === "wanted" || ing.state === "running")) watch(ing);  // started elsewhere
+      panels.get(ing.id)?.update(ing);
+    },
+  });
   return h("div", canEdit(c) && form, ingestsEl, h("h2.section-title", "Sessions"), list);
 }
 
 const INGEST_STATES = { wanted: "Queued", running: "Running", done: "Done", failed: "Failed", cancelled: "Cancelled" };
 
-function pollIngest(c, id, panel, onDone) {
+// One ingest's card: its state, Retry/Cancel, and its log. It loads the whole
+// log once; after that, update() applies what the live stream sends (new
+// lines, and the last line again while it's still growing).
+function ingestPanel(c, id, onFinish) {
   const base = `/api/campaigns/${c.slug}`;
-  const lines = [];
+  const lines = new Map();
   const out = h("div.job-log");
   const statusEl = h("span.job-status.running", "Queued");
   const actions = h("span.job-actions");
   const title = h("strong", "Ingest");
-  panel.replaceChildren(h("div.job-head", title, statusEl, actions), out);
-  let since = 0;
-  let timer;
+  const result = h("div");
+  const el = h("div.job", h("div.job-head", title, statusEl, actions), out, result);
+  let finished = false;
   const act = (label, method, path, cls = "") => canEdit(c) && h(`button${cls}`, {
-    onclick: async () => {
-      await api(method, `${base}/ingests/${id}${path}`);
-      clearTimeout(timer);
-      tick();
-    },
+    onclick: async () => update(await api(method, `${base}/ingests/${id}${path}`) || { id, state: "cancelled", log: [] }),
   }, label);
-  const tick = async () => {
-    if (since > 0 && !panel.isConnected) return;  // the page was left
-    let ing;
-    try {
-      ing = await api("GET", `${base}/ingests/${id}?since=${since}`);
-    } catch (err) {
-      statusEl.textContent = err.message;
-      statusEl.className = "job-status failed";
-      return;
+  const update = (ing) => {
+    if (ing.session) title.textContent = `Session ${ing.session}: ${ing.input_name}`;
+    if (ing.log?.length && ing.log[0].seq === 0 && lines.size) {  // a retry starts the log over
+      lines.clear();
+      out.replaceChildren();
     }
-    title.textContent = `Session ${ing.session}: ${ing.input_name}`;
-    // A retry starts the log over; the server resends from `from`, since the last text entry may have grown.
-    if (ing.from === 0 && lines.length) { lines.length = 0; out.replaceChildren(); }
-    ing.log.forEach((entry) => {
-      const el = lines[entry.seq] || (lines[entry.seq] = out.appendChild(h(`div.log-${entry.kind}`)));
-      el.textContent = entry.text;
-    });
-    since = ing.log.length ? ing.log[ing.log.length - 1].seq + 1 : since;
+    for (const entry of ing.log || []) {
+      const line = lines.get(entry.seq) || out.appendChild(h(`div.log-${entry.kind}`));
+      lines.set(entry.seq, line);
+      line.textContent = entry.text;
+    }
     out.scrollTop = out.scrollHeight;
     const waiting = ing.state === "wanted" && ing.retry_at;
     statusEl.textContent = waiting ? `Retrying at ${new Date(ing.retry_at * 1000).toLocaleTimeString()} (${ing.error})`
@@ -248,19 +343,17 @@ function pollIngest(c, id, panel, onDone) {
       ing.state === "failed" || ing.state === "cancelled" ? act("Retry", "POST", "/retry") : "",
       ing.state === "wanted" || ing.state === "running" ? act("Cancel", "DELETE", "", ".danger") : "",
     );
-    if (ing.state === "wanted" || ing.state === "running") {
-      timer = setTimeout(tick, 1500);
-      return;
-    }
-    if (ing.state === "done" && ing.result) {
-      panel.append(h("div.job-result",
+    if (ing.state === "done" && ing.result && !finished) {
+      finished = true;
+      result.replaceChildren(h("div.job-result",
         h("h3", `Session ${ing.result.session}: ${ing.result.title || "(untitled)"}`),
         h("p.muted", `${ing.result.facts} facts and ${ing.result.journal_entries} journal ${ing.result.journal_entries === 1 ? "entry" : "entries"} recorded.`),
       ));
+      onFinish(ing);
     }
-    onDone(ing);
   };
-  tick();
+  api("GET", `${base}/ingests/${id}`).then(update, (err) => (statusEl.textContent = err.message));
+  return { el, update };
 }
 
 // -- reference material ----------------------------------------------------------
@@ -268,19 +361,13 @@ function pollIngest(c, id, panel, onDone) {
 async function referenceTab(c) {
   const base = `/api/campaigns/${c.slug}`;
   const list = h("div.rows");
-  let timer;
-  const refresh = async () => {
-    clearTimeout(timer);
-    if (!list.isConnected && timer !== undefined) return;  // tab was left
-    const sources = await api("GET", `${base}/sources`);
-    list.replaceChildren(
-      sources.length === 0 ? h("p.empty", "Nothing loaded yet. Upload the module PDF and any notes.") : "",
-      ...sources.map((s) => sourceRow(c, s, refresh)),
-    );
-    // Poll while anything is digesting.
-    timer = sources.some((s) => s.digest.running) ? setTimeout(refresh, 2000) : null;
-  };
+  const render = (sources) => list.replaceChildren(
+    sources.length === 0 ? h("p.empty", "Nothing loaded yet. Upload the module PDF and any notes.") : "",
+    ...sources.map((s) => sourceRow(c, s, refresh)),
+  );
+  const refresh = async () => render(await api("GET", `${base}/sources`));
   await refresh();
+  live(c.slug, list, { sources: render });  // digest progress as it happens
 
   const file = h("input", { type: "file", accept: ".pdf,.md,.markdown,.txt", required: true, "aria-label": "Reference file" });
   const title = h("input", { placeholder: "Title (defaults to file name)", "aria-label": "Title" });
@@ -434,8 +521,6 @@ export async function sourceView(slug, sourceId) {
   const sectionEntities = new Map();
   let entities = [];
   let wasRunning = null;
-  let timer;
-
   const status = h("span");
   const outlineEl = h("div.outline");
   const catalogTitle = h("h2.section-title");
@@ -497,7 +582,7 @@ export async function sourceView(slug, sourceId) {
     catalogTitle.textContent = `Catalog (${entities.length})`;
     const keep = kind.value;
     const kinds = [...new Set(entities.map((e) => e.kind))].sort();
-    kind.replaceChildren(h("option", { value: "" }, "All kinds"), kinds.map((k) => h("option", { value: k }, kindLabel(k))));
+    kind.replaceChildren(h("option", { value: "" }, "All kinds"), ...kinds.map((k) => h("option", { value: k }, kindLabel(k))));
     kind.value = kinds.includes(keep) ? keep : "";
     const needle = q.value.toLowerCase();
     const shown = entities.filter((e) => (!kind.value || e.kind === kind.value) &&
@@ -510,8 +595,6 @@ export async function sourceView(slug, sourceId) {
 
   const head = h("h1");
   const refresh = async () => {
-    clearTimeout(timer);
-    if (wasRunning !== null && !outlineEl.isConnected) return;  // navigated away
     const [sources, outline] = await Promise.all([
       api("GET", `${base}/sources`), api("GET", `${base}/sources/${sourceId}/outline`),
     ]);
@@ -527,9 +610,18 @@ export async function sourceView(slug, sourceId) {
       renderCatalog();
     }
     wasRunning = running;
-    if (running) timer = setTimeout(refresh, 3000);
   };
   await refresh();
+  // Re-read the outline when this source's digest moves on.
+  let progress = null;
+  live(slug, outlineEl, {
+    sources: (all) => {
+      const d = all.find((x) => x.id === Number(sourceId))?.digest;
+      const now = d && `${d.done}/${d.failed}/${d.running}`;
+      if (progress !== null && now !== progress) refresh();
+      progress = now;
+    },
+  });
 
   return h("section.page",
     h("div.page-head", h("a", { href: `#/campaigns/${slug}/reference` }, `← ${c.name}`)),
@@ -589,7 +681,7 @@ async function stateTab(c) {
     all = (await api("GET", `${base}/entities${inPlay.checked ? "?in_play=true" : ""}`)).entities;
     const fill = (sel, values, label) => {
       const keep = sel.value;
-      sel.replaceChildren(h("option", { value: "" }, label), values.map((v) => h("option", { value: v }, v)));
+      sel.replaceChildren(h("option", { value: "" }, label), ...values.map((v) => h("option", { value: v }, v)));
       sel.value = values.includes(keep) ? keep : "";
     };
     fill(kind, [...new Set(all.map((e) => e.kind))].sort(), "All kinds");

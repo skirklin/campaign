@@ -409,3 +409,16 @@ table.people select { width: auto; }
 
 ol.steps { padding-left: 1.3rem; display: grid; gap: .4rem; max-width: 62ch; }
 #account-email { color: inherit; }
+
+/* -- ask -- */
+.chat { display: flex; flex-direction: column; gap: .6rem; }
+.chat-head { display: flex; gap: .5rem; }
+.chat-head select { flex: 1; min-width: 0; }
+.chat-thread { display: flex; flex-direction: column; gap: .5rem; min-height: 12rem; max-height: 62vh; overflow-y: auto;
+  padding: .8rem; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+.chat-user, .chat-assistant { white-space: pre-wrap; line-height: 1.5; padding: .5rem .7rem; border-radius: var(--radius); max-width: 85%; }
+.chat-user { align-self: flex-end; background: var(--surface-2); }
+.chat-assistant { align-self: flex-start; }
+.chat-tool { align-self: flex-start; font-size: .8rem; color: var(--muted); padding: 0 .7rem; }
+.chat-error { color: var(--danger); font-size: .9rem; }
+.chat-form textarea { width: 100%; }
