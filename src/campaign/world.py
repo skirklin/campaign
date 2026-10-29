@@ -40,13 +40,17 @@ ATTRIBUTES = ("status", "location", "holder", "disposition", "leader", "allegian
 SUMMARY_VERSION = 1
 # How a book's catalog is matched onto the world. Bump it when that changes,
 # and every digested book is applied again (from the cache: no API calls).
-APPLY_VERSION = 2
+APPLY_VERSION = 3
 
 # Aliases that describe rather than name ("the Titan", "her father") or are a
 # map's keys ("M1"): kept for finding things, never used to decide that two
 # entries are one thing, since many different things answer to them.
 _DESCRIPTIVE = re.compile(r"^(the|a|an|his|her|their|its|our|my|this|that|these|those)\s", re.IGNORECASE)
 _MAP_KEY = re.compile(r"^[a-z]{0,3}\d+[a-z]?$", re.IGNORECASE)
+
+
+TREASURE = "Treasure: "  # starts the statement of each thing of value the book puts somewhere
+BULKY = ("stat_block", "read_aloud")  # attributes too long to list among an entity's current values
 
 
 def _naming(alias: str) -> bool:
@@ -384,7 +388,7 @@ class World:
         cur = [f for f in facts if f["valid_to"] is None and f["modality"] == "fact"]
         e.update(
             as_of=self.now if as_of is None else as_of,
-            current={f["attribute"]: f["value"] for f in cur if f["attribute"] and f["attribute"] != "stat_block"},
+            current={f["attribute"]: f["value"] for f in cur if f["attribute"] and f["attribute"] not in BULKY},
             facts=[_brief(f) for f in cur],
             past=[_brief(f) for f in facts if f["valid_to"] is not None],
             possible=[_brief(f) for f in facts if f["modality"] != "fact" and f["valid_to"] is None],
@@ -392,6 +396,11 @@ class World:
             summary=self.cached_summary(entity_id) if as_of is None else None,
         )
         return e
+
+    def attribute_values(self, entity_id: int, attribute: str) -> list[str]:
+        """The current values of one attribute, as this viewer may see them (a stat block, read-aloud text)."""
+        return [f["value"] for f in self.facts(entity_id) if f["attribute"] == attribute
+                and f["valid_to"] is None and f["modality"] == "fact" and f["value"]]
 
     def list(self, kind: str | None = None, q: str | None = None, in_play: bool = False) -> list[dict[str, Any]]:
         """Entities with their current attributes and fact counts.
@@ -408,7 +417,7 @@ class World:
             " (SELECT count(*) FROM facts f JOIN runs r ON r.id = f.run_id WHERE f.entity_id = e.id AND r.kind != 'book')"
             " + (SELECT count(*) FROM event_entities WHERE entity_id = e.id) AS table_activity,"
             f" (SELECT json_group_object(f.attribute, f.value) FROM facts f WHERE f.entity_id = e.id"
-            f"  AND f.valid_to IS NULL AND f.attribute IS NOT NULL AND f.attribute != 'stat_block'"
+            f"  AND f.valid_to IS NULL AND f.attribute IS NOT NULL AND f.attribute NOT IN {tuple(BULKY)}"
             f"  AND f.modality = 'fact'{clause}) AS attrs,"
             f" (SELECT f.statement FROM facts f WHERE f.entity_id = e.id AND f.valid_to IS NULL"
             f"  AND f.attribute IS NULL AND f.modality = 'fact'{clause} ORDER BY f.valid_from DESC, f.id LIMIT 1) AS headline"
@@ -507,10 +516,12 @@ class World:
         known = not src["dm_only"]
         for item in entities:
             e = self._match_book_entry(item) or self._new_entity(item["name"], item["kind"])
-            for alias in (item["name"], *item.get("aliases", [])):
+            key_alias = [item["area_key"]] if item.get("area_key") else []
+            for alias in (item["name"], *item.get("aliases", []), *key_alias):
                 self.add_alias(e["id"], alias, run)
             pages = item.get("pages", [])
             statements = ([item["summary"]] if item.get("summary") else []) + list(item.get("facts", []))
+            statements += [f"{TREASURE}{t}" for t in item.get("treasure") or []]
             for statement in statements:
                 fact = self.record(e["id"], statement, run, 0, party_knows=known, source_id=source_id, pages=pages)
                 if prev := carried.get((e["name"].lower(), statement.strip())):
@@ -527,6 +538,9 @@ class World:
                     run, 0, attribute="stat_block", value=json.dumps(sb), party_knows=known,
                     source_id=source_id, pages=pages,
                 )
+            if text := item.get("read_aloud"):
+                self.record(e["id"], f"Read aloud: {text}", run, 0, attribute="read_aloud", value=text,
+                            party_knows=known, source_id=source_id, pages=pages)
         self._remove_orphans()
         return run
 

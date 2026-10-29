@@ -10,7 +10,7 @@ import pytest
 
 from campaign import digest, library
 from campaign.db import BASELINE, SCHEMA_VERSION, Store
-from campaign.digest import BranchOutput, Entity, LeafOutput, Merge
+from campaign.digest import BranchOutput, Entity, LeafOutput, Merge, RollTable, TableRow
 from campaign.ingest import parse_pdf
 from campaign.tools import ToolContext, build_tools
 from campaign.world import World
@@ -56,12 +56,22 @@ class FakeDigest:
         if kind == "leaf":
             ents = []
             for m in re.finditer(r"^ENTITY (\w+) ([^|\n]+?)(?: \| (.+))?$", user, re.M):
-                ents.append(Entity(name=m[2], kind=m[1], aliases=[m[3]] if m[3] else [], summary=f"{m[2]} in {title}",
-                                   pages=[], facts=[f"seen in {title}"], stat_block=None))
+                key = re.search(rf"^KEY {re.escape(m[2])} (\S+)$", user, re.M)
+                ents.append(Entity(
+                    name=m[2], kind=m[1], aliases=[m[3]] if m[3] else [], summary=f"{m[2]} in {title}",
+                    pages=[], facts=[f"seen in {title}"], stat_block=None, area_key=key[1] if key else None,
+                    read_aloud=None, treasure=re.findall(rf"^TREASURE {re.escape(m[2])}: (.+)$", user, re.M),
+                ))
+            tables = [
+                RollTable(name=t[1], dice=t[2], pages=[], rows=[
+                    TableRow(roll=r.split("=")[0], result=r.split("=")[1]) for r in t[3].split(";")
+                ])
+                for t in re.finditer(r"^TABLE (.+?) \((\w+)\): (.+)$", user, re.M)
+            ]
             summary = f"Leaf summary of {title}"
             if self.text_sensitive:
                 summary += f" ({len(user)} chars)"
-            parsed = LeafOutput(summary=summary, entities=ents)
+            parsed = LeafOutput(summary=summary, entities=ents, tables=tables)
         else:
             rows = re.findall(r"^(e\d+) \| \w+ \| ([^|]+?) \| ([^|]*?) \|", user, re.M)
             merges = []
@@ -342,7 +352,7 @@ def test_fallback_only_for_models_that_support_it():
 
     def stream(**kw):
         seen.append(kw)
-        return FakeStream(NS(stop_reason="end_turn", parsed_output=LeafOutput(summary="s", entities=[]),
+        return FakeStream(NS(stop_reason="end_turn", parsed_output=LeafOutput(summary="s", entities=[], tables=[]),
                              usage=NS(input_tokens=1, output_tokens=1)))
 
     client = NS(beta=NS(messages=NS(stream=stream)))
@@ -490,3 +500,26 @@ def test_a_new_reconciler_reapplies_catalogs_under_new_rules(env, monkeypatch):
     again.pass_once()
     assert fake.calls == []  # all from the cache
     assert store.conn.execute("SELECT input_key FROM runs WHERE kind = 'book'").fetchone()[0] != applied
+
+
+def test_keyed_areas_treasure_and_tables_reach_the_tools(env):
+    store, camp, db = env
+    church = ("ENTITY location Crypt\nKEY Crypt E4\nTREASURE Crypt: 3 potions of healing\n"
+              "TABLE Night Encounters (d6): 1-2=2d4 wolves;3-5=nothing;6=Strahd himself")
+    r = upload(store, camp, church=church)
+    digest.run(db, r["id"], client=FakeDigest())
+    tools = {f.__name__: f for f in build_tools(ToolContext(store, camp))}
+    assert json.loads(tools["lookup"](name="E4"))[0]["name"] == "Crypt"
+    loot = json.loads(tools["treasure"](place="E4"))
+    assert [f["statement"] for f in loot["treasure"]] == ["Treasure: 3 potions of healing"]
+    # Taken: it moves to already_taken, and the book's apply doesn't bring it back.
+    store.upsert_session(camp, 1)
+    tools["end_fact"](fact_id=loot["treasure"][0]["fact_id"])
+    loot = json.loads(tools["treasure"](place="Crypt"))
+    assert loot["treasure"] == [] and len(loot["already_taken"]) == 1
+
+    assert json.loads(tools["roll_table"](name=""))["tables"][0]["name"] == "Night Encounters"
+    rolled = json.loads(tools["roll_table"](name="night", roll=6))
+    assert rolled["result"] == "Strahd himself" and rolled["source"] == "Book"
+    assert json.loads(tools["roll_table"](name="night", roll=2))["result"] == "2d4 wolves"
+    assert 1 <= json.loads(tools["roll_table"](name="night encounters"))["roll"] <= 6

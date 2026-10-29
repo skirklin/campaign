@@ -13,9 +13,10 @@ from typing import Any, Callable
 
 from pydantic import ValidationError
 
+from . import tables
 from .charsheet import CharacterSheet, PartyStash, merge_patch
 from .db import Campaign, Store
-from .world import World
+from .world import TREASURE, World
 
 
 def _section(n: dict[str, Any]) -> dict[str, Any]:
@@ -23,6 +24,23 @@ def _section(n: dict[str, Any]) -> dict[str, Any]:
         "id": n["id"], "title": n["title"], "pages": [n["page_start"], n["page_end"]],
         "summary": n["summary"] or "(not digested yet)",
     }
+
+
+def format_stat_block(name: str, sb: dict[str, Any]) -> str:
+    def mod(score: int) -> str:
+        return f"{score} ({(score - 10) // 2:+d})"
+
+    abilities = [(a[:3].upper(), sb.get(a)) for a in
+                 ("strength", "dexterity", "constitution", "intelligence", "wisdom", "charisma")]
+    lines = [name, f"AC {sb['armor_class']} · HP {sb['hit_points']} · Speed {sb['speed']}"
+             + (f" · CR {sb['challenge']}" if sb.get("challenge") else "")]
+    if any(v is not None for _, v in abilities):
+        lines.append("  ".join(f"{a} {mod(v) if v is not None else '—'}" for a, v in abilities))
+    lines += sb.get("other") or []
+    for title, items in (("Traits", sb.get("traits")), ("Actions", sb.get("actions"))):
+        if items:
+            lines += ["", f"{title}:", *(f"- {i}" for i in items)]
+    return "\n".join(lines)
 
 
 def _json(obj: Any) -> str:
@@ -217,6 +235,70 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         """
         hits = world.lookup(name, as_of=as_of_session)
         return _json([_capped(h) for h in hits]) if hits else "No match. Try find_entities or search_reference."
+
+    def stat_block(name: str) -> str:
+        """The full stat block of a creature or NPC, as the book prints it, ready to run in combat.
+
+        Args:
+            name: Name or alias, e.g. "Morgantha" or "dread boar".
+        """
+        e = world.resolve(name)
+        view = world.view(e["id"]) if e else None
+        if view is None:
+            hits = world.lookup(name, limit=1)
+            view = hits[0] if hits else None
+        if view is None:
+            return f"No creature called {name!r}. Try find_entities(kind='monster')."
+        blocks = world.attribute_values(view["id"], "stat_block")
+        if not blocks:
+            return f"{view['name']} has no stat block in the digested material. Try search_reference."
+        return "\n\n".join(format_stat_block(view["name"], json.loads(b)) for b in blocks)
+
+    def treasure(place: str) -> str:
+        """What the book puts at a place or on a creature (coins, items, magic), still there unless taken.
+
+        When the party takes some, end that fact (end_fact) and add it to the
+        party stash (update_party_stash) or to whoever took it.
+
+        Args:
+            place: A location, keyed area ("C3"), creature or NPC, by name or alias.
+        """
+        e = world.resolve(place)
+        view = world.view(e["id"]) if e else None
+        if view is None:
+            return f"Nothing called {place!r}. Try find_entities(kind='location')."
+        found = [f for f in view["facts"] if f["statement"].startswith(TREASURE)]
+        taken = [f for f in view["past"] if f["statement"].startswith(TREASURE)]
+        if not found and not taken:
+            return f"The book lists no treasure at {view['name']}."
+        return _json({"name": view["name"], "treasure": found, "already_taken": taken})
+
+    def roll_table(name: str, roll: int | None = None) -> str:
+        """Roll on one of the book's tables (random encounters, treasure, rumors), or list them.
+
+        Args:
+            name: Part of the table's name, e.g. "random encounters" or "trinkets". Empty to list every table.
+            roll: Use this roll instead of rolling, e.g. one the player made at the table.
+        """
+        every = store.roll_tables(campaign)
+        q = name.strip().lower()
+        hits = [t for t in every if q in t["name"].lower()] if q else every
+        if not q or len(hits) != 1:
+            exact = [t for t in hits if t["name"].lower() == q]
+            if len(exact) == 1:
+                hits = exact
+            else:
+                listed = [{"name": t["name"], "dice": t["dice"], "source": t["source"], "pages": t["pages"]} for t in hits]
+                return _json({"tables": listed[:PAGE]}) if hits else "No such table. Call with an empty name to list them."
+        t = hits[0]
+        try:
+            n = roll if roll is not None else tables.roll(t["dice"])
+        except ValueError:
+            return _json({"table": t, "note": f"Can't roll {t['dice']!r} automatically; pick a row."})
+        row = tables.row_for(t, n)
+        return _json({"table": t["name"], "source": t["source"], "pages": t["pages"], "dice": t["dice"], "roll": n,
+                      "result": row["result"] if row else None,
+                      **({} if row else {"note": "No row matches that roll.", "rows": t["rows"]})})
 
     def timeline(name: str) -> str:
         """How one entity changed session by session: facts beginning and ending, and the events it was in.
@@ -481,6 +563,9 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         lookup,
         find_entities,
         timeline,
+        stat_block,
+        treasure,
+        roll_table,
         search_reference,
         read_reference,
         read_pages,
