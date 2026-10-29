@@ -19,7 +19,7 @@ This runs the web UI at `https://campaign.kirkl.in` on the homelab cluster.
 browser ──https──▶ Caddy (homelab ns, Let's Encrypt) ──▶ campaign.campaign.svc:8000 ──▶ /data (PVC)
                                                           └─ Google sign-in, invite-only
 GitHub Actions: push to main ─▶ test ─▶ ghcr.io/skirklin/campaign:sha-…
-                tag v* / manual ─────────────────────────────▶ deploy (kubectl apply -k, as `deployer`)
+                                         └──────────▶ deploy (kubectl apply -k, as `deployer`)
 ```
 
 ## What's protected, and how
@@ -181,23 +181,16 @@ editor access) can change it. A sheet with no campaign is private.
 
 ## Releasing
 
-```bash
-git tag v0.1.0
-```
+**Merging to `main` deploys.** The Release workflow tests, builds and
+pushes the image, applies `deploy/k8s` with the image pinned to that
+digest, waits for the rollout, and checks `/healthz` through the public
+URL. Manifest changes ship the same way. Running the workflow by hand from
+the Actions tab redeploys; a `v*` tag also deploys, if you want to mark a
+version.
 
-```bash
-git push origin v0.1.0
-```
-
-The Release workflow tests, builds and pushes the image, applies
-`deploy/k8s` with the image pinned to that digest, waits for the rollout,
-and checks `/healthz` through the public URL. Manifest changes ship the
-same way.
-Running the workflow by hand from the Actions tab deploys the current
-`main`. Pushes to `main` only publish an image.
-
-**Rollback:** run the workflow by hand on an older tag. Or point the
-Deployment at an earlier image:
+**Rollback:** revert the commit on `main`, or run the workflow by hand on
+an older tag. For something immediate, point the Deployment at an earlier
+image:
 
 ```bash
 kubectl -n campaign set image deployment/campaign campaign=ghcr.io/skirklin/campaign:sha-<commit>
