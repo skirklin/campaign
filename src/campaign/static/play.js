@@ -46,6 +46,9 @@ export class PlayView extends SheetView {
     this.shadow = structuredClone(this.sheet);  // the sheet as it was before the latest change
     this.undoStack = [];
     this.combat = loadCombat(this.id);
+    // Leaving full screen with back changes the button.
+    const onFullscreen = () => (el.isConnected ? this.renderHead() : document.removeEventListener("fullscreenchange", onFullscreen));
+    document.addEventListener("fullscreenchange", onFullscreen);
     this.rerender();
     keepAwake();
     return el;
@@ -129,10 +132,16 @@ export class PlayView extends SheetView {
     const level = hp.current === 0 ? "down" : pct <= 25 ? "low" : pct <= 50 ? "mid" : "ok";
     this.head.replaceChildren(...[
       h("div.play-title",
+        h("a.play-back", { href: "#/characters", title: "Characters", "aria-label": "Back to characters" }, "‹"),
         h("div.play-name",
           h("strong", s.name),
           h("span.muted", [s.species, classes].filter(Boolean).join(" · ") || `Level ${d.level}`)),
         this.status,
+        document.fullscreenEnabled && h("button.icon.keep-enabled.fullscreen", {
+          title: document.fullscreenElement ? "Leave full screen" : "Full screen",
+          "aria-label": document.fullscreenElement ? "Leave full screen" : "Full screen",
+          onclick: () => this.toggleFullscreen(),
+        }, fullscreenIcon(!!document.fullscreenElement)),
         h("button.icon.keep-enabled", { title: "Dice", "aria-label": "Dice tray", onclick: () => this.tray() }, "🎲"),
         h("button.icon.keep-enabled", { title: "Edit the full sheet", "aria-label": "Edit the full sheet", onclick: () => this.edit() }, "✎"),
       ),
@@ -156,6 +165,17 @@ export class PlayView extends SheetView {
       s.conditions.length > 0 && h("div.play-conditions",
         s.conditions.map((c) => h("button.chip.condition", { onclick: () => this.conditionSheet(), disabled: !this.canEdit }, c))),
     ].filter(Boolean));
+  }
+
+  // Hide the browser's bars (and the phone's) while the sheet is in use; back or the button leaves.
+  async toggleFullscreen() {
+    try {
+      if (document.fullscreenElement) await document.exitFullscreen();
+      else await document.documentElement.requestFullscreen({ navigationUI: "hide" });
+    } catch {
+      toast("This browser won't go full screen here.", true);
+    }
+    this.renderHead();
   }
 
   showTab(key) {
@@ -945,6 +965,26 @@ export class PlayView extends SheetView {
 // A computed number: {total, parts} from the server, or a plain number.
 const n = (v) => (v && typeof v === "object" ? v.total : v ?? 0);
 const partsText = (v) => v.parts.map((p) => `${p.label} ${sign(p.value)}`).join(" · ");
+// Four corners pointing out (go full screen) or in (leave it).
+function fullscreenIcon(on) {
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("width", "20");
+  svg.setAttribute("height", "20");
+  svg.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS(ns, "path");
+  path.setAttribute("d", on
+    ? "M9 3v6H3M15 3v6h6M9 21v-6H3M15 21v-6h6"
+    : "M3 9V3h6M21 9V3h-6M3 15v6h6M21 15v6h-6");
+  path.setAttribute("fill", "none");
+  path.setAttribute("stroke", "currentColor");
+  path.setAttribute("stroke-width", "2.2");
+  path.setAttribute("stroke-linecap", "round");
+  svg.append(path);
+  return svg;
+}
+
 const capFirst = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 
 // "damage:str" -> "STR damage", "save" -> "saves", "ac" -> "AC".

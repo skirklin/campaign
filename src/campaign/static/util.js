@@ -223,3 +223,41 @@ export function askQty(title, max, verb) {
     dialog.addEventListener("close", () => resolve(done));
   });
 }
+
+// -- installing the app ------------------------------------------------------------
+// When the browser says the app can be installed (Chrome on Android), offer it in the
+// page instead of Chrome's own bar. Installed, it opens in its own window, without the
+// browser's address and tab bars.
+let installEvent = null;
+window.addEventListener("beforeinstallprompt", (e) => {
+  e.preventDefault();
+  installEvent = e;
+  document.dispatchEvent(new Event("installable"));
+});
+window.addEventListener("appinstalled", () => {
+  installEvent = null;
+  document.dispatchEvent(new Event("installable"));
+});
+
+export function installBanner() {
+  const dismissed = () => { try { return localStorage.getItem("install-dismissed") === "1"; } catch { return false; } };
+  const el = h("div.install-banner", { hidden: true },
+    h("span", h("strong", "Install Campaign as an app"), h("span.muted.small", " It opens full screen, without the browser's bars.")),
+    h("button.primary", {
+      onclick: async () => {
+        if (!installEvent) return;
+        installEvent.prompt();
+        await installEvent.userChoice;
+        installEvent = null;
+        el.hidden = true;
+      },
+    }, "Install"),
+    h("button.icon", {
+      "aria-label": "Not now", title: "Not now",
+      onclick: () => { try { localStorage.setItem("install-dismissed", "1"); } catch { /* not remembered */ } el.hidden = true; },
+    }, "×"));
+  const update = () => { el.hidden = !installEvent || dismissed(); };
+  document.addEventListener("installable", update);
+  update();
+  return el;
+}

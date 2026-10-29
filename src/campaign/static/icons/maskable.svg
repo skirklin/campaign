@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" fill="#8b2e1f"/>
+  <g transform="translate(51.2 51.2) scale(0.8)"><g fill="none" stroke="#f6f1e7" stroke-linecap="round" stroke-linejoin="round">
+    <!-- two blades crossing -->
+    <path d="M148 148 L332 332" stroke-width="30"/>
+    <path d="M364 148 L180 332" stroke-width="30"/>
+    <!-- blade tips -->
+    <path d="M120 120 L148 148" stroke-width="18"/>
+    <path d="M392 120 L364 148" stroke-width="18"/>
+    <!-- crossguards -->
+    <path d="M300 364 L364 300" stroke-width="26"/>
+    <path d="M148 300 L212 364" stroke-width="26"/>
+    <!-- grips and pommels -->
+    <path d="M340 340 L380 380" stroke-width="24"/>
+    <path d="M172 340 L132 380" stroke-width="24"/>
+  </g>
+  <circle cx="392" cy="392" r="20" fill="#f6f1e7"/>
+  <circle cx="120" cy="392" r="20" fill="#f6f1e7"/>
+  </g>
+</svg>

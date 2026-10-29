@@ -27,6 +27,7 @@ import hashlib
 import hmac
 import json
 import os
+import posixpath
 import secrets
 import time
 import urllib.parse
@@ -47,7 +48,9 @@ GOOGLE_TOKEN = "https://oauth2.googleapis.com/token"
 GOOGLE_ISSUERS = {"accounts.google.com", "https://accounts.google.com"}
 SESSION_DAYS = 30
 FLOW_MINUTES = 10
-OPEN_PATHS = ("/auth/", "/invite/", "/healthz")
+# The app's manifest and icons are open too: browsers fetch the manifest without the
+# session cookie, and can only offer to install the app if they can read it.
+OPEN_PATHS = ("/auth/", "/invite/", "/healthz", "/static/manifest.webmanifest", "/static/icons/")
 # The remote MCP endpoint and its OAuth endpoints check bearer tokens (or a
 # client's own credentials) themselves, and are called by apps from other
 # origins, so they skip both the session check and the same-origin check.
@@ -300,7 +303,8 @@ def install(
             origin = request.headers.get("origin")
             if origin and origin != cfg.origin:
                 return JSONResponse({"detail": "cross-origin request refused"}, status_code=403)
-        if path.startswith(OPEN_PATHS):
+        # Normalised, so ".." can't climb out of an open folder into a closed one.
+        if posixpath.normpath(path).startswith(OPEN_PATHS):
             return await call_next(request)
         store = Store(db)
         try:

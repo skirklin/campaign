@@ -10,7 +10,7 @@
 // That's Edit mode. Play mode (play.js) is the same sheet laid out for the
 // table; the sheet opens in whichever this device used last.
 
-import { api, h, toast, sign, getPath, setPath, debounce } from "./util.js";
+import { api, h, toast, sign, getPath, setPath, debounce, installBanner } from "./util.js";
 
 export const ABILITIES = ["str", "dex", "con", "int", "wis", "cha"];
 export const ABILITY_NAMES = { str: "Strength", dex: "Dexterity", con: "Constitution", int: "Intelligence", wis: "Wisdom", cha: "Charisma" };
@@ -65,6 +65,7 @@ export async function characterList() {
   const mine = chars.filter((c) => c.mine);
   const others = chars.filter((c) => !c.mine);
   return h("section.page",
+    installBanner(),
     h("h1", "Characters"),
     mine.length === 0 && h("p.empty", campaigns.length
       ? "No characters yet. Create one in a campaign, or import a JSON sheet."
