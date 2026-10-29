@@ -39,17 +39,17 @@ def test_events_stream_sources_and_ingest_progress(app):
                 data={"kind": "notes"})
     s = Store(db)
     camp = s.campaign("strahd")
-    ingest_id = s.add_ingest(camp, 1, s.blobs.put(b"x"), "s1.txt", None, None)
-    s.update_ingest(ingest_id, state="failed", error="boom")  # so the loop leaves it alone
-    s.add_ingest_log(ingest_id, [("status", "Reading…"), ("text", "The party")])
+    ingest_id = s.add_job(camp, "ingest", {"session": 1, "blob": s.blobs.put(b"x"), "name": "s1.txt"}, None)
+    s.update_job(ingest_id, state="failed", error="boom")  # so the loop leaves it alone
+    s.add_job_log(ingest_id, [("status", "Reading…"), ("text", "The party")])
     s.close()
     with client.stream("GET", "/api/campaigns/strahd/events?seconds=0") as r:
         assert r.headers["content-type"].startswith("text/event-stream")
         got = events(r)
     kinds = [e for e, _ in got]
     assert kinds[0] == "sources" and got[0][1][0]["title"] == "notes"
-    ingest = next(d for e, d in got if e == "ingest")
-    assert ingest["state"] == "failed" and [x["text"] for x in ingest["log"]] == ["Reading…", "The party"]
+    ingest = next(d for e, d in got if e == "job")
+    assert ingest["kind"] == "ingest" and ingest["state"] == "failed" and [x["text"] for x in ingest["log"]] == ["Reading…", "The party"]
 
 
 def test_events_send_only_what_changed(tmp_path, monkeypatch):
@@ -60,9 +60,9 @@ def test_events_send_only_what_changed(tmp_path, monkeypatch):
     client.post("/api/campaigns", json={"name": "Strahd", "role": "dm"})
     s = Store(db)
     camp = s.campaign("strahd")
-    ingest_id = s.add_ingest(camp, 1, s.blobs.put(b"x"), "s1.txt", None, None)
-    s.update_ingest(ingest_id, state="failed")
-    s.add_ingest_log(ingest_id, [("text", "The party")])
+    ingest_id = s.add_job(camp, "ingest", {"session": 1, "blob": s.blobs.put(b"x"), "name": "s1.txt"}, None)
+    s.update_job(ingest_id, state="failed")
+    s.add_job_log(ingest_id, [("text", "The party")])
     s.close()
     # Grow the line between the stream's first and second snapshot.
     import campaign.web as web
@@ -74,11 +74,11 @@ def test_events_send_only_what_changed(tmp_path, monkeypatch):
         ticks.append(seconds)
         if len(ticks) == 1:
             st = Store(db)
-            st.add_ingest_log(ingest_id, [("text", "The party met Ismark.")], replace_last=True)
+            st.add_job_log(ingest_id, [("text", "The party met Ismark.")], replace_last=True)
             st.close()
         if len(ticks) == 2:
             st = Store(db)
-            st.add_ingest_log(ingest_id, [("tool", "lookup Ismark")])
+            st.add_job_log(ingest_id, [("tool", "lookup Ismark")])
             st.close()
             stop.set()
         await real_sleep(0)
@@ -86,7 +86,7 @@ def test_events_send_only_what_changed(tmp_path, monkeypatch):
     monkeypatch.setattr(web.asyncio, "sleep", sleep)
     try:
         with client.stream("GET", "/api/campaigns/strahd/events?seconds=60") as r:
-            got = [d for e, d in events(r) if e == "ingest"]
+            got = [d for e, d in events(r) if e == "job"]
     finally:
         client.__exit__(None, None, None)
     # First the line, then the same line grown, then only the new tool line.

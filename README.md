@@ -69,12 +69,8 @@ uv run campaign web            # http://127.0.0.1:8765
   - **Sessions**: paste a transcript, or upload a text file or a recording,
     to run an ingest. A live log shows what Claude is reading and
     recording. Each past session has its recap and a **Revert** button.
-    An ingest is queued in the database and carried out by a background
-    loop, so it continues with the page closed and is redone from the
-    start if a restart or deploy interrupts it (an ingest replaces the
-    session's earlier recording, so redoing it is safe). Failures retry
-    after 1 and 4 minutes, then show **Retry**; **Cancel** stops one and
-    undoes what it wrote.
+    An ingest is a [job](#background-jobs): it continues with the page
+    closed and survives restarts and deploys.
   - **Reference**: upload module PDFs and notes, mark them DM-only, and
     search the text directly.
   - **World state**: every person, place, item and quest, from the book and
@@ -110,7 +106,9 @@ localhost without it, unless you pass `--no-auth`. With sign-in on:
 - **Paper sheets can be scanned in.** On the Party tab, **From a scan or
   PDF…** takes a photo or PDF of a filled-in sheet; Claude reads it into a
   new character (`CAMPAIGN_SHEET_MODEL`, default `CAMPAIGN_MODEL`) and lists
-  anything it couldn't make out, so you can correct those by hand.
+  anything it couldn't make out in the sheet's notes, so you can correct
+  those by hand. Reading takes a minute or two and is a
+  [job](#background-jobs), with its progress shown on the Party tab.
 - **An admin page** manages users and app-wide invites.
 [docs/deploy.md](docs/deploy.md) covers running it on the homelab cluster:
 the container image, Kubernetes manifests, the Caddy route, and the
@@ -169,6 +167,24 @@ The digest turns a module into two things the assistant can use:
   [The world model](#the-world-model)).
 
 See [How the digest works](#how-the-digest-works) for the caching rules.
+
+### Background jobs
+
+Anything slow that turns an upload into campaign data is a **job**: a
+session ingest, or reading a character sheet from a scan. Asking for one
+stores the upload and adds a row to `jobs` saying what's wanted; a loop in
+the server (`jobs.JobLoop`) works through them oldest first. The row is
+the whole truth, so it doesn't matter whether the page stays open, and a
+job interrupted by a restart or a deploy is simply run again from its
+input: each kind is safe to redo (an ingest replaces the session's earlier
+recording; a scan recognises the character its own earlier try made), and
+keeps what it has already paid for (a transcription, the read sheet) in
+its input so a redo doesn't buy it twice. Progress is written to
+`job_log`, which the page shows live. Failures retry after 1 and 4
+minutes, then show **Retry**; a failure that retrying can't fix (a file
+that isn't a sheet, a character name already taken) fails at once.
+**Cancel** stops a job at its next step and undoes what it wrote. A new
+kind is a function in `jobs.KINDS` plus an endpoint that adds the row.
 
 **Digesting is a target, not a job.** Clicking **Digest** records on the
 source which model it should be digested with; a loop in the server

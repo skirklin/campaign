@@ -2,9 +2,9 @@
 
     campaign web            # http://127.0.0.1:8765
 
-Session ingests and digests take minutes. Asking for one records a target
-in the database, and a background loop (digest.Reconciler, ingests.IngestLoop)
-carries it out, wherever and whenever a server is running; the page reads
+Digests, session ingests and reading sheets from scans take minutes. Asking
+for one records a target in the database, and a background loop
+(digest.Reconciler for digests, jobs.JobLoop for the rest) carries it out, wherever and whenever a server is running; the page reads
 progress back from the database.
 
 Without sign-in (local use), whoever runs the server owns everything. With
@@ -41,7 +41,7 @@ from .oauth import Provider
 from .oauth import install as install_oauth
 from .charsheet import CharacterSheet, apply_hp, rest
 from .db import Campaign, Store
-from .ingests import IngestLoop
+from .jobs import JobLoop
 from .library import add_reference, reindex
 from .world import World
 
@@ -128,12 +128,12 @@ def create_app(
     # Digests run in the background for as long as the server does, toward
     # whatever the sources' targets say (see digest.Reconciler).
     reconciler = digest.Reconciler(db, **({"client_factory": digest_client} if digest_client else {}))
-    ingest_loop = IngestLoop(db)  # likewise session ingests (ingests.py)
+    job_loop = JobLoop(db)  # likewise session ingests and sheet scans (jobs.py)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         reconciler.start()
-        ingest_loop.start()
+        job_loop.start()
         try:
             if mcp is None:
                 yield
@@ -143,7 +143,7 @@ def create_app(
         finally:
             shutting_down.set()
             reconciler.stop()
-            ingest_loop.stop()
+            job_loop.stop()
 
     # No interactive API docs: they'd be one more surface to protect.
     app = FastAPI(title="campaign", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
@@ -503,7 +503,7 @@ def create_app(
     @app.get("/api/campaigns/{slug}/sessions")
     def sessions(c: Campaign = Depends(reader), s: Store = Depends(store)) -> dict[str, Any]:
         # Recent ingests that are waiting, running or need attention (finished ones show as sessions).
-        active = [ingest_view(i) for i in s.ingests(c) if i["state"] in ("wanted", "running", "failed")]
+        active = [job_view(j) for j in s.jobs(c, "ingest") if j["state"] in ("wanted", "running", "failed")]
         return {"sessions": s.sessions(c), "next": s.next_ingest_session(c), "ingests": active}
 
     @app.post("/api/campaigns/{slug}/sessions/{number}/revert")
@@ -579,19 +579,31 @@ def create_app(
     def journal(session: int | None = None, c: Campaign = Depends(reader), s: Store = Depends(store)) -> list[dict]:
         return World(s, c).events(session=session)
 
-    # -- session ingest ------------------------------------------------------------
-    # An ingest is a target ("session N should be what this transcript says"),
-    # worked through by the ingest loop in the background (ingests.py).
+    # -- jobs ----------------------------------------------------------------------
+    # Session ingests and sheet scans are jobs: a request recorded in the
+    # database, worked through by the job loop in the background (jobs.py).
 
-    def ingest_view(ing: dict[str, Any]) -> dict[str, Any]:
-        keep = ("id", "session", "input_name", "state", "attempts", "retry_at", "error", "result", "created_at")
-        return {k: ing[k] for k in keep}
+    def job_view(job: dict[str, Any]) -> dict[str, Any]:
+        keep = ("id", "kind", "state", "attempts", "retry_at", "error", "result", "created_at")
+        return {k: job[k] for k in keep} | {"name": job["input"].get("name"), "session": job["input"].get("session")}
 
-    def campaign_ingest(s: Store, c: Campaign, ingest_id: int) -> dict[str, Any]:
-        ing = s.ingest(ingest_id)
-        if ing is None or ing["campaign_id"] != c.id:
-            raise HTTPException(404, "no such ingest")
-        return ing
+    def campaign_job(s: Store, c: Campaign, job_id: int) -> dict[str, Any]:
+        job = s.job(job_id)
+        if job is None or job["campaign_id"] != c.id:
+            raise HTTPException(404, "no such job")
+        return job
+
+    def job_to_change(request: Request, s: Store, c: Campaign, job_id: int) -> dict[str, Any]:
+        """A job you may retry or cancel: any, as an editor; else only the ones you asked for."""
+        job = campaign_job(s, c, job_id)
+        if not at_least(c.access, "editor") and not (local or job["requested_by"] == user_of(request)["id"]):
+            raise HTTPException(403, "only editors can change other people's jobs")
+        return job
+
+    def add_job(request: Request, s: Store, c: Campaign, kind: str, input: dict[str, Any]) -> int:
+        job_id = s.add_job(c, kind, input, None if local else user_of(request)["id"])
+        job_loop.wake()
+        return job_id
 
     @app.post("/api/campaigns/{slug}/ingest", status_code=202)
     def ingest(
@@ -603,6 +615,7 @@ def create_app(
         c: Campaign = Depends(editor),
         s: Store = Depends(store),
     ) -> dict[str, Any]:
+        """Session N should be what this transcript (or recording) says."""
         if file is not None and file.filename:
             name, data = file.filename, file.file.read()
         elif text.strip():
@@ -610,38 +623,54 @@ def create_app(
         else:
             raise HTTPException(422, "paste a transcript or upload a file")
         session = number or s.next_ingest_session(c)
-        user = None if local else user_of(request)["id"]
-        ingest_id = s.add_ingest(c, session, s.blobs.put(data), name, played_on or None, user)
-        ingest_loop.wake()
-        return {"ingest": ingest_id, "session": session}
+        job_id = add_job(request, s, c, "ingest", {
+            "session": session, "blob": s.blobs.put(data), "name": name, "played_on": played_on or None,
+        })
+        return {"job": job_id, "session": session}
 
-    @app.get("/api/campaigns/{slug}/ingests/{ingest_id}")
-    def ingest_status(ingest_id: int, since: int = 0, c: Campaign = Depends(reader), s: Store = Depends(store)) -> dict:
-        """An ingest's state and its progress log from entry `since` (the last entry is resent: text lines grow)."""
-        ing = campaign_ingest(s, c, ingest_id)
+    @app.post("/api/campaigns/{slug}/characters/from-scan", status_code=202)
+    def character_from_scan(
+        request: Request, file: UploadFile = File(...), c: Campaign = Depends(reader), s: Store = Depends(store),
+    ) -> dict[str, Any]:
+        """Make a character from a scan or PDF of a paper sheet. Claude reads it in the background."""
+        data, name = file.file.read(sheetscan.MAX_BYTES + 1), file.filename or ""
+        try:
+            sheetscan.check_upload(data, name)
+        except sheetscan.ScanError as err:
+            raise HTTPException(422, str(err))
+        return {"job": add_job(request, s, c, "scan", {"blob": s.blobs.put(data), "name": name})}
+
+    @app.get("/api/campaigns/{slug}/jobs")
+    def list_jobs(kind: str | None = None, c: Campaign = Depends(reader), s: Store = Depends(store)) -> list[dict]:
+        return [job_view(j) for j in s.jobs(c, kind)]
+
+    @app.get("/api/campaigns/{slug}/jobs/{job_id}")
+    def job_status(job_id: int, since: int = 0, c: Campaign = Depends(reader), s: Store = Depends(store)) -> dict:
+        """A job's state and its progress log from entry `since` (the last entry is resent: text lines grow)."""
+        job = campaign_job(s, c, job_id)
         start = max(0, since - 1)
-        return ingest_view(ing) | {"log": s.ingest_log(ingest_id, since=start), "from": start}
+        return job_view(job) | {"log": s.job_log(job_id, since=start), "from": start}
 
-    @app.post("/api/campaigns/{slug}/ingests/{ingest_id}/retry", status_code=202)
-    def retry_ingest(ingest_id: int, c: Campaign = Depends(editor), s: Store = Depends(store)) -> dict:
-        ing = campaign_ingest(s, c, ingest_id)
-        if ing["state"] not in ("failed", "cancelled", "wanted"):
-            raise HTTPException(409, f"this ingest is {ing['state']}")
-        s.update_ingest(ingest_id, state="wanted", attempts=0, retry_at=None, error=None)
-        ingest_loop.wake()
-        return ingest_view(s.ingest(ingest_id))
+    @app.post("/api/campaigns/{slug}/jobs/{job_id}/retry", status_code=202)
+    def retry_job(job_id: int, request: Request, c: Campaign = Depends(reader), s: Store = Depends(store)) -> dict:
+        job = job_to_change(request, s, c, job_id)
+        if job["state"] not in ("failed", "cancelled", "wanted"):
+            raise HTTPException(409, f"this job is {job['state']}")
+        s.update_job(job_id, state="wanted", attempts=0, retry_at=None, error=None)
+        job_loop.wake()
+        return job_view(s.job(job_id))
 
-    @app.delete("/api/campaigns/{slug}/ingests/{ingest_id}", status_code=204)
-    def cancel_ingest(ingest_id: int, c: Campaign = Depends(editor), s: Store = Depends(store)) -> None:
+    @app.delete("/api/campaigns/{slug}/jobs/{job_id}", status_code=204)
+    def cancel_job(job_id: int, request: Request, c: Campaign = Depends(reader), s: Store = Depends(store)) -> None:
         """Stop wanting it. A running one stops at its next step and undoes what it wrote."""
-        ing = campaign_ingest(s, c, ingest_id)
-        if ing["state"] in ("wanted", "running"):
-            s.update_ingest(ingest_id, state="cancelled")
+        job = job_to_change(request, s, c, job_id)
+        if job["state"] in ("wanted", "running"):
+            s.update_job(job_id, state="cancelled")
 
     # -- live updates ----------------------------------------------------------------
     # One Server-Sent Events stream per open campaign page. It reads the
     # database (the only state there is) every second and sends what changed:
-    # the sources' digest status, and each recent ingest's state and new log
+    # the sources' digest status, and each recent job's state and new log
     # lines. A browser's EventSource reconnects by itself, so when a deploy
     # ends a stream the page carries on against the next server.
 
@@ -652,23 +681,23 @@ def create_app(
     async def events(request: Request, c: Campaign = Depends(reader), seconds: float = 300) -> StreamingResponse:
         """Live campaign updates. Each stream ends after `seconds` (the browser then reconnects)."""
         def snapshot(sent: dict[int, tuple[str, int, int, str]]) -> list[str]:
-            """Messages for what changed since the last snapshot. `sent` remembers, per ingest,
+            """Messages for what changed since the last snapshot. `sent` remembers, per job,
             the state, the attempt, and the last log line (seq and text) this stream has sent."""
             s = Store(db)
             try:
                 out = [sse("sources", list_sources(s, c))]
-                for ing in s.ingests(c, limit=10):
-                    state, attempt, seq, text = sent.get(ing["id"], (None, -1, -1, ""))
-                    if ing["attempts"] != attempt:  # a new attempt starts its log over
+                for job in s.jobs(c, limit=10):
+                    state, attempt, seq, text = sent.get(job["id"], (None, -1, -1, ""))
+                    if job["attempts"] != attempt:  # a new attempt starts its log over
                         seq, text = -1, ""
                     # From the last line sent: streamed text grows in place.
-                    fresh = [e for e in s.ingest_log(ing["id"], since=max(seq, 0))
+                    fresh = [e for e in s.job_log(job["id"], since=max(seq, 0))
                              if e["seq"] > seq or e["text"] != text]
-                    if ing["state"] == state and ing["attempts"] == attempt and not fresh:
+                    if job["state"] == state and job["attempts"] == attempt and not fresh:
                         continue
-                    out.append(sse("ingest", ingest_view(ing) | {"log": fresh}))
+                    out.append(sse("job", job_view(job) | {"log": fresh}))
                     last = fresh[-1] if fresh else {"seq": seq, "text": text}
-                    sent[ing["id"]] = (ing["state"], ing["attempts"], last["seq"], last["text"])
+                    sent[job["id"]] = (job["state"], job["attempts"], last["seq"], last["text"])
                 return out
             finally:
                 s.close()
@@ -896,17 +925,6 @@ def create_app(
             raise HTTPException(422, str(err))
         campaign_id = campaign_for_new_character(s, request, campaign or None)
         return create(s, request, sheet, campaign_id, f"imported {file.filename}")
-
-    @app.post("/api/campaigns/{slug}/characters/from-scan", status_code=201)
-    def character_from_scan(
-        request: Request, file: UploadFile = File(...), c: Campaign = Depends(reader), s: Store = Depends(store),
-    ) -> dict[str, Any]:
-        """Make a character from a scan or PDF of a paper sheet. Claude reads it; takes a few seconds."""
-        try:
-            sheet, unreadable = sheetscan.read_sheet(file.file.read(sheetscan.MAX_BYTES + 1), file.filename or "")
-        except sheetscan.ScanError as err:
-            raise HTTPException(422, str(err))
-        return create(s, request, sheet, c.id, f"read from {file.filename}") | {"unreadable": unreadable}
 
     @app.post("/api/characters/{character_id}/copy", status_code=201)
     def copy_character(character_id: int, body: CopyCharacter, request: Request, s: Store = Depends(store)) -> dict:

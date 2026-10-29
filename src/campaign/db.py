@@ -413,6 +413,48 @@ CREATE TABLE conversation_messages (
 );
 """
 
+# v11: one table of jobs, so every background transformation (a session
+# ingest, reading a character sheet from a scan, whatever comes next) is
+# the same durable thing: a row saying what's wanted, with its input, its
+# state, retries and result, worked through by jobs.JobLoop. Ingests move
+# over keeping their ids. The v9 tables stay for the old server during the
+# rollout; a later release drops them.
+V11_JOBS = """
+CREATE TABLE jobs (
+    id            INTEGER PRIMARY KEY,
+    campaign_id   INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    kind          TEXT NOT NULL,             -- what to do: a key of jobs.KINDS
+    input         TEXT NOT NULL,             -- JSON, as that kind wants it (uploads are blob keys)
+    role          TEXT NOT NULL CHECK (role IN ('dm', 'player')),  -- whose view it runs as
+    requested_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    state         TEXT NOT NULL DEFAULT 'wanted'
+                  CHECK (state IN ('wanted', 'running', 'done', 'failed', 'cancelled')),
+    attempts      INTEGER NOT NULL DEFAULT 0,
+    retry_at      INTEGER,
+    error         TEXT,
+    result        TEXT,                      -- JSON
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
+);
+CREATE INDEX jobs_campaign ON jobs(campaign_id, kind, id);
+CREATE INDEX jobs_due ON jobs(state, retry_at);
+CREATE TABLE job_log (
+    job_id  INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    seq     INTEGER NOT NULL,
+    kind    TEXT NOT NULL,
+    text    TEXT NOT NULL,
+    PRIMARY KEY (job_id, seq)
+);
+INSERT INTO jobs (id, campaign_id, kind, input, role, requested_by, state, attempts, retry_at, error, result,
+                  created_at, updated_at)
+SELECT id, campaign_id, 'ingest',
+       json_object('session', session, 'blob', input_blob, 'name', input_name,
+                   'transcript_blob', transcript_blob, 'played_on', played_on),
+       role, requested_by, state, attempts, retry_at, error, result, created_at, updated_at
+FROM ingests;
+INSERT INTO job_log (job_id, seq, kind, text) SELECT ingest_id, seq, kind, text FROM ingest_log;
+"""
+
 # Append only, for changes small enough to migrate.
 #
 # Deploys are rolling: the new server starts, and runs these, while the old
@@ -430,6 +472,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (8, V8_LEASES),
     (9, V9_INGESTS),
     (10, V10_CONVERSATIONS),
+    (11, V11_JOBS),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 
@@ -845,84 +888,82 @@ class Store:
                 (key, error, node_id),
             )
 
-    # -- session ingests (targets) ---------------------------------------------------
+    # -- jobs: background transformations (jobs.py) -----------------------------------
 
-    def add_ingest(
-        self, campaign: Campaign, session: int, input_blob: str, input_name: str, played_on: str | None,
-        requested_by: int | None,
-    ) -> int:
+    def add_job(self, campaign: Campaign, kind: str, input: dict[str, Any], requested_by: int | None) -> int:
         with self.conn:
             return self.conn.execute(
-                "INSERT INTO ingests (campaign_id, session, input_blob, input_name, played_on, role, requested_by,"
-                " created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (campaign.id, session, input_blob, input_name, played_on, campaign.role, requested_by, now(), now()),
+                "INSERT INTO jobs (campaign_id, kind, input, role, requested_by, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (campaign.id, kind, json.dumps(input), campaign.role, requested_by, now(), now()),
             ).lastrowid
 
-    def ingest(self, ingest_id: int) -> dict[str, Any] | None:
-        row = self.conn.execute("SELECT * FROM ingests WHERE id = ?", (ingest_id,)).fetchone()
+    def job(self, job_id: int) -> dict[str, Any] | None:
+        row = self.conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
         if row is None:
             return None
         d = dict(row)
+        d["input"] = json.loads(d["input"])
         d["result"] = json.loads(d["result"]) if d["result"] else None
         return d
 
-    def ingests(self, campaign: Campaign, limit: int = 20) -> list[dict[str, Any]]:
+    def jobs(self, campaign: Campaign, kind: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
         rows = self.conn.execute(
-            "SELECT id FROM ingests WHERE campaign_id = ? ORDER BY id DESC LIMIT ?", (campaign.id, limit)
+            "SELECT id FROM jobs WHERE campaign_id = ? AND (? IS NULL OR kind = ?) ORDER BY id DESC LIMIT ?",
+            (campaign.id, kind, kind, limit),
         )
-        return [self.ingest(r["id"]) for r in rows]
+        return [self.job(r["id"]) for r in rows]
 
-    def ingests_due(self, at: int) -> list[dict[str, Any]]:
-        """Ingests to work on now, oldest first: wanted (and not backing off), or running when a server stopped."""
+    def jobs_due(self, at: int) -> list[dict[str, Any]]:
+        """Jobs to work on now, oldest first: wanted (and not backing off), or running when a server stopped."""
         rows = self.conn.execute(
-            "SELECT id FROM ingests WHERE state IN ('wanted', 'running') AND (retry_at IS NULL OR retry_at <= ?)"
+            "SELECT id FROM jobs WHERE state IN ('wanted', 'running') AND (retry_at IS NULL OR retry_at <= ?)"
             " ORDER BY id", (at,),
         )
-        return [self.ingest(r["id"]) for r in rows]
+        return [self.job(r["id"]) for r in rows]
 
-    def update_ingest(self, ingest_id: int, **fields: Any) -> None:
-        if "result" in fields and fields["result"] is not None:
-            fields["result"] = json.dumps(fields["result"])
+    def update_job(self, job_id: int, **fields: Any) -> None:
+        for key in ("input", "result"):
+            if fields.get(key) is not None:
+                fields[key] = json.dumps(fields[key])
         cols = ", ".join(f"{k} = ?" for k in fields)
         with self.conn:
-            self.conn.execute(f"UPDATE ingests SET {cols}, updated_at = ? WHERE id = ?", (*fields.values(), now(), ingest_id))
+            self.conn.execute(f"UPDATE jobs SET {cols}, updated_at = ? WHERE id = ?", (*fields.values(), now(), job_id))
 
     def next_ingest_session(self, campaign: Campaign) -> int:
         """The next session number, counting ingests still waiting to happen."""
         row = self.conn.execute(
-            "SELECT max(session) AS n FROM ingests WHERE campaign_id = ? AND state IN ('wanted', 'running')",
+            "SELECT max(json_extract(input, '$.session')) AS n FROM jobs"
+            " WHERE campaign_id = ? AND kind = 'ingest' AND state IN ('wanted', 'running')",
             (campaign.id,),
         ).fetchone()
         return max(self.next_session_number(campaign), (row["n"] or 0) + 1)
 
-    def add_ingest_log(self, ingest_id: int, entries: list[tuple[str, str]], replace_last: bool = False) -> None:
+    def add_job_log(self, job_id: int, entries: list[tuple[str, str]], replace_last: bool = False) -> None:
         """Append log entries; with replace_last, the first one rewrites the last row (a text line still growing)."""
         with self.conn:
             last = self.conn.execute(
-                "SELECT coalesce(max(seq), -1) AS seq FROM ingest_log WHERE ingest_id = ?", (ingest_id,)
+                "SELECT coalesce(max(seq), -1) AS seq FROM job_log WHERE job_id = ?", (job_id,)
             ).fetchone()["seq"]
             for kind, text in entries:
                 if replace_last and last >= 0:
-                    self.conn.execute(
-                        "UPDATE ingest_log SET text = ? WHERE ingest_id = ? AND seq = ?", (text, ingest_id, last)
-                    )
+                    self.conn.execute("UPDATE job_log SET text = ? WHERE job_id = ? AND seq = ?", (text, job_id, last))
                     replace_last = False
                     continue
                 last += 1
                 self.conn.execute(
-                    "INSERT INTO ingest_log (ingest_id, seq, kind, text) VALUES (?, ?, ?, ?)",
-                    (ingest_id, last, kind, text),
+                    "INSERT INTO job_log (job_id, seq, kind, text) VALUES (?, ?, ?, ?)", (job_id, last, kind, text),
                 )
 
-    def ingest_log(self, ingest_id: int, since: int = 0) -> list[dict[str, Any]]:
+    def job_log(self, job_id: int, since: int = 0) -> list[dict[str, Any]]:
         rows = self.conn.execute(
-            "SELECT seq, kind, text FROM ingest_log WHERE ingest_id = ? AND seq >= ? ORDER BY seq", (ingest_id, since)
+            "SELECT seq, kind, text FROM job_log WHERE job_id = ? AND seq >= ? ORDER BY seq", (job_id, since)
         )
         return [dict(r) for r in rows]
 
-    def clear_ingest_log(self, ingest_id: int) -> None:
+    def clear_job_log(self, job_id: int) -> None:
         with self.conn:
-            self.conn.execute("DELETE FROM ingest_log WHERE ingest_id = ?", (ingest_id,))
+            self.conn.execute("DELETE FROM job_log WHERE job_id = ?", (job_id,))
 
     # -- chat conversations ----------------------------------------------------------
 

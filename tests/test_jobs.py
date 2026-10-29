@@ -1,0 +1,288 @@
+"""Jobs (session ingests, sheet scans): worked through by a loop that can be interrupted, retried and cancelled."""
+
+import time
+
+import pytest
+
+from campaign import agent as agent_mod
+from campaign import jobs, sheetscan
+from campaign.accounts import Accounts
+from campaign.charsheet import ClassLevel, HitPoints
+from campaign.db import Store
+from campaign.jobs import JobLoop, Log
+from campaign.world import World
+from test_agent import FakeClient, text, tool_use
+
+SCRIPT = [
+    ([tool_use("t1", "record_fact", entity="Ismark", kind="npc", statement="Ismark is alive",
+               attribute="status", value="alive")], "tool_use"),
+    ([tool_use("t2", "add_journal_entry", text="Met Ismark.", entities=["Ismark"])], "tool_use"),
+    ([tool_use("t3", "finish_session", title="Blood on the Vine", summary="They met Ismark.")], "tool_use"),
+    ([text("All recorded.")], "end_turn"),
+]
+
+
+@pytest.fixture
+def env(tmp_path, monkeypatch):
+    monkeypatch.setattr(jobs, "CHECK_SECONDS", 0)  # check at every step, so tests can stop one exactly
+    db = tmp_path / "c.db"
+    s = Store(db)
+    camp = s.create_campaign("Strahd", "dm")
+    ingest_id = s.add_job(camp, "ingest", {
+        "session": 1, "blob": s.blobs.put(b"DM: A man in a cloak..."), "name": "s1.txt", "played_on": None,
+    }, None)
+    yield s, camp, db, ingest_id
+    s.close()
+
+
+def interrupt(loop, at, action):
+    """Make the job's `at`-th check do `action(job_id)` first (stop it, cancel it)."""
+    real = loop._checker
+    calls = []
+
+    def checker(job_id):
+        check = real(job_id)
+
+        def wrapped():
+            calls.append(job_id)
+            if len(calls) == at:
+                action(job_id)
+            check()
+
+        return wrapped
+
+    loop._checker = checker
+    return lambda: setattr(loop, "_checker", real)
+
+
+def scripted(monkeypatch, *scripts):
+    """Each new Agent gets the next script."""
+    clients = [FakeClient(sc) for sc in scripts]
+    monkeypatch.setattr(agent_mod.anthropic, "Anthropic", lambda: clients.pop(0))
+
+
+def facts(s, camp):
+    return s.conn.execute("SELECT count(*) FROM facts WHERE campaign_id = ?", (camp.id,)).fetchone()[0]
+
+
+def test_an_interrupted_ingest_is_picked_up_and_redone_cleanly(env, monkeypatch):
+    s, camp, db, ingest_id = env
+    loop = JobLoop(db)
+    # The first attempt is cut off after its first write (say, the server is being replaced).
+
+    def handed_over(_):
+        raise jobs.JobStopped("handed over")
+
+    restore = interrupt(loop, 2, handed_over)
+    scripted(monkeypatch, SCRIPT, SCRIPT)
+    assert loop.pass_once()
+    ing = s.job(ingest_id)
+    assert ing["state"] == "wanted" and ing["attempts"] == 0  # not its fault: it'll be redone
+    assert facts(s, camp) == 1  # the first attempt got one fact in
+
+    # The next server (or the next pass) starts over from the transcript.
+    restore()
+    assert loop.pass_once()
+    ing = s.job(ingest_id)
+    assert ing["state"] == "done" and ing["result"]["title"] == "Blood on the Vine"
+    assert facts(s, camp) == 1 and len(World(s, camp).events()) == 1  # redone, not doubled
+    assert loop.pass_once() is False  # nothing left
+
+
+def test_failures_back_off_then_wait_for_a_retry(env, monkeypatch):
+    s, camp, db, ingest_id = env
+    loop = JobLoop(db)
+    clock = [time.time()]
+    monkeypatch.setattr(jobs.time, "time", lambda: clock[0])
+    monkeypatch.setattr(agent_mod.anthropic, "Anthropic", lambda: (_ for _ in ()).throw(RuntimeError("API down")))
+    for attempt in range(1, jobs.MAX_ATTEMPTS + 1):
+        assert loop.pass_once()
+        assert loop.pass_once() is False  # backing off: nothing due yet
+        clock[0] += 3600
+    ing = s.job(ingest_id)
+    assert ing["state"] == "failed" and ing["error"].startswith("API down (gave up after 3 tries)")
+    assert loop.pass_once() is False  # given up: it waits to be asked again
+    s.update_job(ingest_id, state="wanted", attempts=0, retry_at=None)  # what Retry does
+    scripted(monkeypatch, SCRIPT)
+    assert loop.pass_once() and s.job(ingest_id)["state"] == "done"
+
+
+def test_cancelling_midway_undoes_what_it_wrote(env, monkeypatch):
+    s, camp, db, ingest_id = env
+    loop = JobLoop(db)
+    interrupt(loop, 2, lambda i: s.update_job(i, state="cancelled"))  # someone clicked Cancel
+    scripted(monkeypatch, SCRIPT)
+    loop.pass_once()
+    assert s.job(ingest_id)["state"] == "cancelled"
+    assert facts(s, camp) == 0  # the fact the first step wrote is gone
+    assert any(e["text"] == "Cancelled." for e in s.job_log(ingest_id))
+    assert loop.pass_once() is False
+
+
+def test_log_merges_streamed_text_into_lines(env):
+    s, _, db, ingest_id = env
+    log = Log(db, ingest_id)
+    log.emit("status", "Reading…")
+    for word in ["The ", "party ", "met "]:
+        log.emit("text", word)
+    log.flush()
+    log.emit("text", "Ismark.")  # continues the same line after a flush
+    log.emit("tool", "record_fact Ismark")
+    log.emit("text", "Next.")
+    log.flush()
+    assert [(e["kind"], e["text"]) for e in s.job_log(ingest_id)] == [
+        ("status", "Reading…"), ("text", "The party met Ismark."), ("tool", "record_fact Ismark"), ("text", "Next."),
+    ]
+
+
+# -- sheet scans -----------------------------------------------------------------------
+
+SCAN = sheetscan.ScannedSheet(
+    name="Ireth", player="Sam", species="Elf", background="Sage", alignment="NG",
+    classes=[ClassLevel(name="Wizard", level=3)], xp=900,
+    abilities=sheetscan.Abilities(strength=8, dexterity=14, constitution=12, intelligence=17, wisdom=12, charisma=10),
+    save_proficiencies=["Intelligence", "wis"], skill_proficiencies=["Arcana", "History", "Basket weaving"],
+    skill_expertise=[], ac=12, speed=30, hp=HitPoints(max=17, current=17), attacks=[], resources=[],
+    spellcasting_ability="Intelligence", spells=[], inventory=[], currency=sheetscan.Coins(gp=12),
+    features=["Arcane Recovery"], proficiencies=["Daggers"], personality="", notes="Has a cat.",
+    unreadable=["Wisdom score"],
+)
+
+
+class Delta:
+    def __init__(self, thinking):
+        self.delta = type("D", (), {"type": "thinking_delta", "thinking": thinking})()
+
+
+def scan_client(monkeypatch, scan=SCAN, events=("Looking at the sheet. ", "Wizard 3.")):
+    """A fake Claude that streams some thinking, then returns `scan`. Returns the list of calls made."""
+    calls = []
+
+    class Stream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def __iter__(self):
+            return iter([Delta(t) for t in events])
+
+        def get_final_message(self):
+            return type("M", (), {"stop_reason": "end_turn", "parsed_output": scan})()
+
+    class Client:
+        class beta:
+            class messages:
+                @staticmethod
+                def stream(**kw):
+                    calls.append(kw)
+                    return Stream()
+
+    monkeypatch.setattr(sheetscan.anthropic, "Anthropic", lambda: Client())
+    return calls
+
+
+@pytest.fixture
+def scan_job(env):
+    s, camp, db, ingest_id = env
+    s.update_job(ingest_id, state="done")  # out of the way
+    owner = Accounts(s).create_user("sam@example.com")["id"]
+    job_id = s.add_job(camp, "scan", {"blob": s.blobs.put(b"%PDF-1.7 fake"), "name": "ireth.pdf"}, owner)
+    return s, camp, db, job_id, owner
+
+
+def test_a_scan_becomes_a_character(scan_job, monkeypatch):
+    s, camp, db, job_id, owner = scan_job
+    calls = scan_client(monkeypatch)
+    assert JobLoop(db).pass_once()
+    job = s.job(job_id)
+    assert job["state"] == "done" and job["result"]["name"] == "Ireth"
+    assert job["result"]["unreadable"] == ["Wisdom score", "skill: Basket weaving"]
+    ch = s.character(job["result"]["character"])
+    sheet = ch["sheet"]
+    assert ch["owner_id"] == owner and ch["campaign_id"] == camp.id
+    assert sheet["abilities"]["int"] == 17 and sheet["save_proficiencies"] == ["int", "wis"]
+    assert sheet["skill_proficiencies"] == ["arcana", "history"] and sheet["currency"]["gp"] == 12
+    assert sheet["notes"].startswith("Has a cat.") and "Wisdom score; skill: Basket weaving" in sheet["notes"]
+    assert calls[0]["messages"][0]["content"][0]["type"] == "document"
+    assert [(e["kind"], e["text"]) for e in s.job_log(job_id)] == [
+        ("status", "Claude is reading ireth.pdf…"), ("text", "Looking at the sheet. Wizard 3."), ("status", "Made Ireth."),
+    ]
+
+
+def test_an_interrupted_scan_is_redone_without_doubling_anything(scan_job, monkeypatch):
+    s, camp, db, job_id, _ = scan_job
+    calls = scan_client(monkeypatch)
+    loop = JobLoop(db)
+
+    # Cut off while Claude is still reading: nothing is made, and it'll be read again.
+    def handed_over(_):
+        raise jobs.JobStopped("handed over")
+
+    restore = interrupt(loop, 1, handed_over)
+    assert loop.pass_once()
+    assert s.job(job_id)["state"] == "wanted" and s.characters([camp.id]) == []
+    restore()
+
+    # This time the read finishes, but the server dies before recording that the job is done.
+    real = Store.update_job
+
+    def die_when_done(self, job_id, **fields):
+        if fields.get("state") == "done":
+            raise KeyboardInterrupt("killed")
+        real(self, job_id, **fields)
+
+    monkeypatch.setattr(Store, "update_job", die_when_done)
+    with pytest.raises(KeyboardInterrupt):
+        loop.pass_once()
+    monkeypatch.setattr(Store, "update_job", real)
+    assert s.job(job_id)["state"] == "running" and [c["name"] for c in s.characters([camp.id])] == ["Ireth"]
+    assert len(calls) == 2 and s.job(job_id)["input"]["sheet"]["name"] == "Ireth"  # the read is kept
+
+    # The next server finds it running, so redoes it: without reading the sheet again or making a second Ireth.
+    assert loop.pass_once()
+    job = s.job(job_id)
+    assert job["state"] == "done" and len(calls) == 2
+    assert [c["name"] for c in s.characters([camp.id])] == ["Ireth"] == [job["result"]["name"]]
+
+
+def test_scan_failures_that_retrying_cannot_fix_fail_at_once(scan_job, monkeypatch):
+    s, camp, db, job_id, _ = scan_job
+    s.create_character({"name": "Ireth"}, camp.id)  # someone already made one by hand
+    scan_client(monkeypatch)
+    assert JobLoop(db).pass_once()
+    job = s.job(job_id)
+    assert job["state"] == "failed" and "already has a character called Ireth" in job["error"]
+    assert job["attempts"] == 1 and job["retry_at"] is None
+
+
+def test_cancelling_a_scan_makes_nothing(scan_job, monkeypatch):
+    s, camp, db, job_id, _ = scan_job
+    scan_client(monkeypatch)
+    loop = JobLoop(db)
+    interrupt(loop, 2, lambda i: s.update_job(i, state="cancelled"))
+    loop.pass_once()
+    assert s.job(job_id)["state"] == "cancelled" and s.characters([camp.id]) == []
+
+
+def test_ingests_move_over_to_jobs_keeping_their_ids(tmp_path):
+    db = tmp_path / "old.db"
+    s = Store(db)
+    camp = s.create_campaign("Strahd", "dm")
+    # The database as the v10 server left it: an ingest in the ingests table, no jobs.
+    s.conn.executescript("DROP TABLE job_log; DROP TABLE jobs; PRAGMA user_version = 10;")
+    s.conn.execute(
+        "INSERT INTO ingests (id, campaign_id, session, input_blob, input_name, transcript_blob, played_on, role,"
+        " state, attempts, error, created_at, updated_at)"
+        " VALUES (7, ?, 3, 'b1', 's3.m4a', 'b2', '2026-10-25', 'dm', 'failed', 3, 'boom', 'then', 'then')", (camp.id,))
+    s.conn.execute("INSERT INTO ingest_log (ingest_id, seq, kind, text) VALUES (7, 0, 'status', 'Transcribing…')")
+    s.conn.commit()
+    s.close()
+    s = Store(db)  # migrates
+    job = s.job(7)
+    assert job["kind"] == "ingest" and job["state"] == "failed" and job["error"] == "boom" and job["attempts"] == 3
+    assert job["input"] == {"session": 3, "blob": "b1", "name": "s3.m4a", "transcript_blob": "b2",
+                            "played_on": "2026-10-25"}
+    assert s.job_log(7) == [{"seq": 0, "kind": "status", "text": "Transcribing…"}]
+    s.close()
