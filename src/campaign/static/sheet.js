@@ -35,6 +35,8 @@ const BONUS_TARGETS = [
   ["Checks", [["skill", "All skills"], ...ABILITIES.map((a) => [`check:${a}`, `${ABILITY_NAMES[a]} checks`]),
     ...Object.keys(SKILLS).map((k) => [`skill:${k}`, k[0].toUpperCase() + k.slice(1)]), ["passive_perception", "Passive Perception"]]],
   ["Spells", [["spell_dc", "Spell save DC"], ["spell_attack", "Spell attack"]]],
+  ["Ability scores", [...ABILITIES.map((a) => [`score:${a}`, `${ABILITY_NAMES[a]} score +`]),
+    ...ABILITIES.map((a) => [`score_set:${a}`, `${ABILITY_NAMES[a]} score at least`])]],
 ];
 export const COINS = ["cp", "sp", "ep", "gp", "pp"];
 
@@ -264,6 +266,8 @@ export class SheetView {
       el.textContent = n === undefined ? "—" : el.dataset.fmt === "sign" ? sign(n) : n;
       el.title = v?.parts ? explain(v) : "";
       el.classList.toggle("explained", !!v?.parts);
+      // Shown only when something changes it (an item raising or setting the score).
+      if (el.dataset.unlessBase) el.hidden = !v?.parts || (v.parts.length === 1 && v.parts[0].label === "Base");
     }
     this.el.classList.toggle("no-spellcasting", this.derived.spell_save_dc === undefined);
     const bar = this.sections.hpbar;  // max HP is derived (CON, level), so the bar follows it
@@ -390,6 +394,12 @@ export class SheetView {
         this.field("background", { label: "Background" }),
         this.field("alignment", { label: "Alignment" }),
         this.field("player", { label: "Player" }),
+        h("label.field", h("span", "Nicknames"), h("input", {
+          value: (this.sheet.nicknames || []).join(", "), placeholder: "Other names, comma-separated", "aria-label": "Nicknames",
+          onchange: (e) => {
+            this.sheet.nicknames = e.target.value.split(",").map((x) => x.trim()).filter(Boolean);
+            this.changed("nicknames");
+          } })),
         this.field("xp", { label: "XP", type: "number", min: 0 }),
       ),
       this.section("classes", "Classes", () => [
@@ -409,9 +419,10 @@ export class SheetView {
         h("div.col",
           this.section("resources", "Resources", () => this.resources()),
           this.section("attacks", "Attacks", () => this.attacks()),
+          this.section("statuses", "Statuses", () => this.statuses()),
           this.section("bonuses", "Bonuses & effects", () => [
-            h("p.muted.small", "Features and effects that add to a number. Switch off what only applies sometimes, like Rage. "
-              + "Items' bonuses are on the items."),
+            h("p.muted.small", "Features and effects that add to a number. One that only counts during a status "
+              + "(Rage's damage) names it. Items' bonuses are on the items."),
             this.bonuses("bonuses", "bonuses"),
           ]),
           this.section("spells", "Spells", () => this.spells(), "spells-card"),
@@ -534,6 +545,7 @@ export class SheetView {
             onchange: (e) => { d.add_ability = e.target.checked; this.changed("damage"); } }), "+mod"),
           h("label.mini", "+", this.field(`attacks.${i}.damage.${j}.bonus`, { type: "number", reason: "damage" })),
           this.field(`attacks.${i}.damage.${j}.type`, { placeholder: "type", reason: "damage" }),
+          this.field(`attacks.${i}.damage.${j}.situational`, { placeholder: "only when… (situational)", reason: "damage", cls: "situational" }),
           remove(a.damage, j, "damage", "attacks"),
         )),
         this.chips("attacks", `attacks.${i}.properties`, { placeholder: "Add property (finesse, reach…)" }),
@@ -603,7 +615,7 @@ export class SheetView {
   bonuses(key, path) {
     const list = getPath(this.sheet, path);
     return h("div.rows.bonuses",
-      list.map((b, i) => h("div.row.bonus", { style: "grid-template-columns:auto 1fr 1fr 5rem auto" },
+      list.map((b, i) => h("div.row.bonus", { style: "grid-template-columns:auto 1fr 1fr 5rem 7rem auto" },
         h("input", { type: "checkbox", checked: b.active, title: "On", "aria-label": `${b.source || "bonus"} on`,
           onchange: (e) => { b.active = e.target.checked; this.changed(`${b.source || "bonus"} ${b.active ? "on" : "off"}`); } }),
         this.field(`${path}.${i}.source`, { placeholder: "Source", reason: "bonus" }),
@@ -618,13 +630,45 @@ export class SheetView {
             b.amount = /^[+-]?\d+$/.test(v) ? Number(v) : v;
             this.changed("bonus");
           } }),
+        h("select", { "aria-label": "During", title: "Counts only while this status is on", value: b.during || "",
+          onchange: (e) => { b.during = e.target.value; this.changed("bonus"); } },
+          h("option", { value: "" }, "always"),
+          [...new Set([...this.sheet.statuses.map((st) => st.name), b.during].filter(Boolean))]
+            .map((name) => h("option", { value: name }, `during ${name}`))),
         h("button.icon", { title: "Remove bonus", "aria-label": "Remove bonus",
           onclick: () => { list.splice(i, 1); this.changed("removed bonus"); this.refresh(key); } }, "×"),
       )),
       h("button.add", { onclick: () => {
-        list.push({ target: "ac", amount: 1, source: "", active: true });
+        list.push({ target: "ac", amount: 1, source: "", active: true, during: "" });
         this.changed("added bonus"); this.refresh(key);
       } }, "+ Add bonus"),
+    );
+  }
+
+  // Things switched on and off in play. A bonus can count only during one; switching one on can spend a resource.
+  statuses() {
+    const list = this.sheet.statuses;
+    return h("div.rows",
+      list.length === 0 && h("p.empty", "Rage, Concentration, Bless… switched on in play."),
+      list.map((st, i) => h("div.row.status-row", { style: "grid-template-columns:auto 1fr 1fr 8rem auto" },
+        h("input", { type: "checkbox", checked: st.active, title: "On now", "aria-label": `${st.name || "status"} on`,
+          onchange: (e) => { st.active = e.target.checked; this.changed(`${st.name || "status"} ${st.active ? "on" : "off"}`); } }),
+        this.field(`statuses.${i}.name`, { placeholder: "Status", reason: "status", after: () => this.refresh("bonuses") }),
+        this.field(`statuses.${i}.note`, { placeholder: "On what (the spell…)", reason: "status" }),
+        h("select", { "aria-label": "Spends", title: "Resource spent when it's switched on", value: st.resource || "",
+          onchange: (e) => { st.resource = e.target.value; this.changed("status"); } },
+          h("option", { value: "" }, "spends nothing"),
+          [...new Set([...this.sheet.resources.map((r) => r.name), st.resource].filter(Boolean))]
+            .map((name) => h("option", { value: name }, `spends ${name}`))),
+        h("button.icon", { title: "Remove status", "aria-label": "Remove status",
+          onclick: () => { list.splice(i, 1); this.changed("removed status"); this.refresh("statuses"); this.refresh("bonuses"); } }, "×"),
+      )),
+      h("button.add", { onclick: () => {
+        list.push({ name: "", active: false, note: "", resource: "" });
+        this.refresh("statuses");
+        this.sections.statuses.body.querySelector(".status-row:last-of-type input:not([type=checkbox])")?.focus();
+        this.changed("added status");
+      } }, "+ Add status"),
     );
   }
 
@@ -647,6 +691,7 @@ export class SheetView {
       h("span.ability-name", { title: ABILITY_NAMES[a] }, a.toUpperCase()),
       this.derivedSpan(`modifiers.${a}`, "sign", "ability-mod"),
       this.field(`abilities.${a}`, { type: "number", min: 1, max: 30, cls: "ability-score", label: undefined, reason: `${a.toUpperCase()} score` }),
+      unlessBase(this.derivedSpan(`scores.${a}`, "plain", "ability-effective")),
     )));
   }
 
@@ -776,6 +821,12 @@ export class SheetView {
     await api("DELETE", `/api/characters/${this.id}`);
     location.hash = `#/campaigns/${this.campaign.slug}/party`;
   }
+}
+
+// A derived number shown only when something changes it from the sheet's own value.
+function unlessBase(el) {
+  el.dataset.unlessBase = "1";
+  return el;
 }
 
 // "STR +4 · Proficiency +3" for a {total, parts} number.

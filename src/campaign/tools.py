@@ -319,8 +319,18 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         source}: on the sheet for features and effects (switch one off with
         active: false, e.g. Rage between fights), or on the item that grants
         it (it counts while equipped, and attuned if requires_attunement).
-        An amount can be a number or "prof", "level", an ability ("cha"),
-        or a multiple like "2*level".
+        An amount can be a number or "prof", "level", "level:rogue",
+        "half_level:rogue", an ability ("cha"), or a multiple like
+        "2*level". Bonuses to "score:cha" raise the score itself;
+        "score_set:str" sets it to at least the amount (Gauntlets of Ogre
+        Power). Statuses are what's switched on in play (Rage,
+        Concentration with the spell as note): a bonus with during:
+        "Rage" counts only while Rage is on. Extra damage that only
+        applies sometimes (Sneak Attack, "vs undead", Charge) is a damage
+        part with situational set to when it applies; it's added when
+        rolling, not in the attack's damage. Dice can scale:
+        "(half_level:rogue)d6". The name is the name only; other names
+        go in nicknames.
 
         Args:
             name: Character name.
@@ -359,8 +369,18 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         source}: on the sheet for features and effects (switch one off with
         active: false, e.g. Rage between fights), or on the item that grants
         it (it counts while equipped, and attuned if requires_attunement).
-        An amount can be a number or "prof", "level", an ability ("cha"),
-        or a multiple like "2*level".
+        An amount can be a number or "prof", "level", "level:rogue",
+        "half_level:rogue", an ability ("cha"), or a multiple like
+        "2*level". Bonuses to "score:cha" raise the score itself;
+        "score_set:str" sets it to at least the amount (Gauntlets of Ogre
+        Power). Statuses are what's switched on in play (Rage,
+        Concentration with the spell as note): a bonus with during:
+        "Rage" counts only while Rage is on. Extra damage that only
+        applies sometimes (Sneak Attack, "vs undead", Charge) is a damage
+        part with situational set to when it applies; it's added when
+        rolling, not in the attack's damage. Dice can scale:
+        "(half_level:rogue)d6". The name is the name only; other names
+        go in nicknames.
 
         Args:
             sheet: The whole character sheet.

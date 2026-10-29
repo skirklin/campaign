@@ -696,3 +696,17 @@ li.roll-crit .roll-line strong { color: var(--ok); }
 li.roll-fumble .roll-line strong { color: var(--danger); }
 .item-toggles { display: flex; gap: 1.2rem; margin: .3rem 0 .5rem; }
 .item-toggles .play-toggle { padding: .4rem 0; font-size: 1rem; }
+.ability-effective { font-size: .75rem; color: var(--accent); }
+.ability-effective::before { content: "→ "; color: var(--muted); }
+.damage-part .situational { flex: 2 1 9rem; font-style: italic; }
+/* Statuses in the Play header: tap to start or end. */
+.play-statuses { display: flex; gap: .3rem; flex-wrap: wrap; margin-bottom: .3rem; }
+.chip.status { padding: .2rem .7rem; color: var(--muted); border-style: dashed; }
+.chip.status.on { background: var(--accent); border: 1px solid var(--accent); color: var(--accent-text); }
+.chip.status small { opacity: .85; }
+/* Situational damage offered on an attack roll. */
+.roll-extras { display: flex; flex-wrap: wrap; gap: .4rem; justify-content: center; margin-top: .5rem; }
+.roll-extra { font-size: .85rem; padding: .3rem .7rem; border-radius: 999px; }
+.roll-extra { background: transparent; color: inherit; border: 1px solid currentColor; }
+.attack-top { grid-template-columns: minmax(8rem, 1fr) minmax(0, 1.3fr) auto; }
+.attack-total { white-space: normal; font-size: .9rem; }

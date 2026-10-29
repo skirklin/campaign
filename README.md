@@ -126,7 +126,16 @@ localhost without it, unless you pass `--no-auth`. With sign-in on:
   else is a bonus with a source: on the item that grants it (it counts
   while equipped, and attuned if it needs to be), or on the sheet for
   features and effects, which can be switched off (Rage, between fights).
-  Click any number to see what it adds up from. Sheets saved before this
+  Click any number to see what it adds up from. **Statuses** are what's
+  switched on in play: Rage, Concentration (on a named spell), Bless. A
+  bonus can count only during one (Rage's damage), starting one can spend
+  a resource (a use of Rage), and a rest ends them. Damage that only
+  applies sometimes (Sneak Attack, "vs giants", a centaur's Charge) is
+  **situational**: it's left out of the attack's damage and offered as a
+  button on the roll, to add when it applies. Dice can grow with a class
+  (`(half_level:rogue)d6`), and items can raise an ability score or set
+  it (Gauntlets of Ogre Power). Nicknames become the world entry's
+  aliases. Sheets saved before this
   keep their numbers as flat amounts until edited.
 - **The party stash** is on the Party tab and on the Play view's Gear tab:
   the shared purse, plus loot nobody has claimed yet. It's the party's

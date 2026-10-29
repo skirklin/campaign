@@ -144,7 +144,7 @@ def test_log_merges_streamed_text_into_lines(env):
 # -- sheet scans -----------------------------------------------------------------------
 
 SCAN = sheetscan.ScannedSheet(
-    name="Ireth", player="Sam", species="Elf", background="Sage", alignment="NG",
+    name="Ireth", nicknames=[], statuses=[], player="Sam", species="Elf", background="Sage", alignment="NG",
     classes=[ClassLevel(name="Wizard", level=3)], xp=900,
     abilities=sheetscan.Abilities(strength=8, dexterity=14, constitution=12, intelligence=17, wisdom=12, charisma=10),
     save_proficiencies=["Intelligence", "wis"], skill_proficiencies=["Arcana", "History", "Basket weaving"],
