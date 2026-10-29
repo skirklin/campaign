@@ -213,6 +213,11 @@ kubectl -n campaign set image deployment/campaign campaign=ghcr.io/skirklin/camp
 - **What redeploys keep:** schema changes migrate in place, or start clean
   while keeping campaigns, character sheets, uploads and the digest cache.
   See the README.
-- **One instance only:** the Deployment uses `Recreate` with one replica,
-  because SQLite expects a single writer. Expect a few seconds of downtime
-  per deploy.
+- **Deploys don't take the site down.** One replica normally; during a
+  deploy the new pod starts beside the old one, takes traffic once it's
+  ready, and then the old one finishes its requests and stops. For those
+  seconds both use the SQLite database on the volume, which SQLite's locking
+  handles. Background work takes a lease (only one copy runs the digest
+  loop) and is resumable, so nothing is lost or done twice. Schema changes
+  must keep the old code working while they run: add, backfill, use; drop
+  only in a later release (see the note above `MIGRATIONS` in `db.py`).
