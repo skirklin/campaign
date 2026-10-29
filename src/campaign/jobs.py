@@ -155,20 +155,34 @@ def _transcript(run: Run) -> str:
 
 
 def run_scan(run: Run) -> dict[str, Any]:
-    """A character sheet read from a scan or PDF becomes a new character, owned by whoever uploaded it."""
+    """A character sheet read from a scan or PDF becomes a new character, owned by whoever uploaded it.
+
+    Claude can look things up in the campaign's reference material while it
+    reads, as the uploader sees it (a player's scan doesn't see DM-only material).
+    """
+    import anthropic
+
     from . import sheetscan
+    from .agent import describe_tool_call
     from .charsheet import CharacterSheet
+    from .tools import ToolContext
 
     s, name = run.store, run.input["name"]
     if run.input.get("sheet") is None:
         run.log.emit("status", f"Claude is reading {name}…")
+        ctx = ToolContext(s, run.campaign, user_id=run.job["requested_by"])
+
+        def on_tool(tool: str, args: dict[str, Any]) -> None:
+            run.log.emit("tool", describe_tool_call(tool, args).strip(" ·"))
+
         try:
             sheet, unreadable = sheetscan.read_sheet(
-                s.blobs.get(run.input["blob"]), name, check=run.check, on_thinking=lambda t: run.log.emit("text", t),
+                s.blobs.get(run.input["blob"]), name, ctx, check=run.check,
+                on_thinking=lambda t: run.log.emit("text", t), on_tool=on_tool,
             )
         except sheetscan.ScanError as err:
             raise Permanent(str(err)) from err
-        except sheetscan.anthropic.BadRequestError as err:  # the same request would be refused again
+        except anthropic.BadRequestError as err:  # the same request would be refused again
             raise Permanent(f"Claude's API refused the request: {err.message}") from err
         run.save_input(sheet=sheet.model_dump(), unreadable=unreadable)
     sheet = CharacterSheet.model_validate(run.input["sheet"])

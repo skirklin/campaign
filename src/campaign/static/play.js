@@ -90,7 +90,8 @@ export class PlayView extends SheetView {
   renderHead() {
     const s = this.sheet, d = this.derived, hp = s.hp;
     const classes = s.classes.map((c) => `${c.name} ${c.level}`).join(" / ");
-    const pct = hp.max ? Math.max(0, Math.min(100, (100 * hp.current) / hp.max)) : 0;
+    const max = n(d.hp_max);
+    const pct = max ? Math.max(0, Math.min(100, (100 * hp.current) / max)) : 0;
     const level = hp.current === 0 ? "down" : pct <= 25 ? "low" : pct <= 50 ? "mid" : "ok";
     this.head.replaceChildren(...[
       h("div.play-title",
@@ -103,15 +104,15 @@ export class PlayView extends SheetView {
       ),
       h("div.play-vitals",
         h(`button.hp-pill.${level}`, {
-          onclick: () => this.hpSheet(), disabled: !this.canEdit, "aria-label": `Hit points ${hp.current} of ${hp.max}. Change`,
+          onclick: () => this.hpSheet(), disabled: !this.canEdit, "aria-label": `Hit points ${hp.current} of ${max}. Change`,
         },
           h("span.hp-fill", { style: `width:${pct}%` }),
           h("span.hp-label", "HP"),
-          h("span.hp-now", hp.current), h("span.hp-max", `/${hp.max}`),
+          h("span.hp-now", hp.current), h("span.hp-max", `/${max}`),
           hp.temp > 0 && h("span.hp-temp", `+${hp.temp}`)),
-        vital("AC", s.ac),
-        vital("Init", sign(d.initiative), () => this.roll("Initiative", d.initiative)),
-        vital("Speed", s.speed),
+        vital("AC", n(d.ac)),
+        vital("Init", sign(n(d.initiative)), () => this.roll("Initiative", d.initiative)),
+        vital("Speed", n(d.speed)),
       ),
       s.conditions.length > 0 && h("div.play-conditions",
         s.conditions.map((c) => h("button.chip.condition", { onclick: () => this.conditionSheet(), disabled: !this.canEdit }, c))),
@@ -148,18 +149,18 @@ export class PlayView extends SheetView {
         h("span.ab-score", s.abilities[a] ?? 10)))),
       h("div.play-strip",
         mini("Prof", sign(d.proficiency_bonus)),
-        mini("Passive Perc.", d.passive_perception),
-        d.spell_save_dc !== undefined && mini("Spell DC", d.spell_save_dc),
-        d.spell_attack !== undefined && mini("Spell atk", sign(d.spell_attack), () => this.roll("Spell attack", d.spell_attack))),
-      s.attacks.length > 0 && block("Attacks", s.attacks.map((a) => h("button.play-row.attack", { onclick: () => this.attack(a) },
+        mini("Passive Perc.", n(d.passive_perception)),
+        d.spell_save_dc !== undefined && mini("Spell DC", n(d.spell_save_dc)),
+        d.spell_attack !== undefined && mini("Spell atk", sign(n(d.spell_attack)), () => this.roll("Spell attack", d.spell_attack))),
+      s.attacks.length > 0 && block("Attacks", s.attacks.map((a, i) => h("button.play-row.play-attack", { onclick: () => this.attack(a, d.attacks[i]) },
         h("span.row-main", h("strong", a.name || "Attack"), a.notes && h("small.muted", a.notes)),
-        a.to_hit && h("span.badge-num", a.to_hit),
-        a.damage && h("span.row-side", a.damage)))),
+        h("span.badge-num", sign(n(d.attacks[i].to_hit))),
+        d.attacks[i].text && h("span.row-side", d.attacks[i].text)))),
       otherResources.length > 0 && block("Resources", otherResources.map((r) => this.resource(r))),
       block("Saving throws", h("div.play-saves", ABILITIES.map((a) => h("button.play-save", {
         className: `play-save${s.save_proficiencies.includes(a) ? " prof" : ""}`,
         onclick: () => this.roll(`${ABILITY_NAMES[a]} save`, d.saves[a]),
-      }, h("span", a.toUpperCase()), h("strong", sign(d.saves[a])))))),
+      }, h("span", a.toUpperCase()), h("strong", sign(n(d.saves[a]))))))),
       this.canEdit && h("div.play-actions",
         h("button", { onclick: () => this.conditionSheet() }, "Conditions…"),
         h("button", { onclick: () => this.rest(false) }, "Short rest"),
@@ -171,9 +172,9 @@ export class PlayView extends SheetView {
     const s = this.sheet, d = this.derived;
     return [
       h("div.play-strip",
-        mini("Passive Perc.", d.passive_perception),
-        mini("Passive Insight", 10 + d.skills.insight),
-        mini("Passive Invest.", 10 + d.skills.investigation)),
+        mini("Passive Perc.", n(d.passive_perception)),
+        mini("Passive Insight", 10 + n(d.skills.insight)),
+        mini("Passive Invest.", 10 + n(d.skills.investigation))),
       block("Skills", h("div.play-list", Object.entries(SKILLS).map(([skill, ab]) => {
         const mark = s.skill_expertise.includes(skill) ? "◆" : s.skill_proficiencies.includes(skill) ? "●" : "";
         return h("button.play-row.skill", {
@@ -181,7 +182,7 @@ export class PlayView extends SheetView {
         },
           h("span.prof-mark", { title: mark === "◆" ? "Expertise" : mark ? "Proficient" : "" }, mark),
           h("span.row-main", cap(skill), h("small.muted", ` ${ab.toUpperCase()}`)),
-          h("span.badge-num", sign(d.skills[skill])));
+          h("span.badge-num", sign(n(d.skills[skill]))));
       }))),
     ];
   }
@@ -200,8 +201,8 @@ export class PlayView extends SheetView {
     const shown = (sp) => !this.preparedOnly || sp.prepared || sp.level === 0;
     return [
       h("div.play-strip",
-        d.spell_save_dc !== undefined && mini("Spell DC", d.spell_save_dc),
-        d.spell_attack !== undefined && mini("Spell atk", sign(d.spell_attack), () => this.roll("Spell attack", d.spell_attack)),
+        d.spell_save_dc !== undefined && mini("Spell DC", n(d.spell_save_dc)),
+        d.spell_attack !== undefined && mini("Spell atk", sign(n(d.spell_attack)), () => this.roll("Spell attack", d.spell_attack)),
         s.spells.some((sp) => !sp.prepared) && h("label.play-toggle",
           h("input", { type: "checkbox", checked: this.preparedOnly, onchange: (e) => { this.preparedOnly = e.target.checked; this.renderPanel(); } }),
           "Prepared only")),
@@ -246,19 +247,33 @@ export class PlayView extends SheetView {
       beforeMove: () => this.flush(),
       onCharacter: (r) => {
         Object.assign(this, { sheet: r.sheet, derived: r.derived, log: r.log });
-        this.renderPanel();
+        this.rerender();  // what's equipped changes AC and the rest
       },
     }));
   }
 
+  // An item: its notes and bonuses, equipping and attuning it, and putting it in the stash.
   itemSheet(item) {
+    const toggle = (key, label) => h("label.play-toggle",
+      h("input", {
+        type: "checkbox", checked: item[key], disabled: !this.canEdit,
+        onchange: (e) => {
+          item[key] = e.target.checked;
+          this.changed(`${item.name} ${e.target.checked ? "" : "un"}${key}`);  // the save brings back the new AC etc.
+          this.renderPanel();
+        },
+      }), label);
+    const bonuses = item.bonuses || [];
     const dialog = bottomSheet(item.name || "Item",
       item.notes ? h("p", item.notes) : h("p.muted", "No notes. Add them in Edit."),
+      bonuses.length > 0 && h("p.muted.small", bonuses.map((b) => `${typeof b.amount === "number" ? sign(b.amount) : b.amount} ${b.target}`).join(", ")
+        + (item.requires_attunement ? " · needs attunement" : "")),
+      h("div.item-toggles", toggle("equipped", "Equipped"), item.requires_attunement && toggle("attuned", "Attuned")),
       this.canEdit && h("button.wide", {
         onclick: async () => {
           dialog.close();
-          const n = await askQty(`Put ${item.name} in the party stash`, item.qty, "Put in the stash");
-          if (n) this.stash().move("stash", { [item.name]: n });
+          const qty = await askQty(`Put ${item.name} in the party stash`, item.qty, "Put in the stash");
+          if (qty) this.stash().move("stash", { [item.name]: qty });
         },
       }, "Put in the party stash"));
   }
@@ -341,7 +356,7 @@ export class PlayView extends SheetView {
     let amount = 0;
     const go = (fn) => () => { if (!amount) return; dialog.close(); fn(amount); };
     const dialog = bottomSheet("Hit points",
-      h("p.hp-summary", h("strong", hp.current), ` / ${hp.max}`, hp.temp ? h("span.hp-temp", ` +${hp.temp} temp`) : ""),
+      h("p.hp-summary", h("strong", hp.current), ` / ${n(this.derived.hp_max)}`, hp.temp ? h("span.hp-temp", ` +${hp.temp} temp`) : ""),
       ...keypad((n) => (amount = n)),
       h("div.hp-buttons",
         h("button.danger-solid", { onclick: go((n) => this.action("POST", `/api/characters/${this.id}/hp`, { delta: -n })) }, "Damage"),
@@ -396,7 +411,9 @@ export class PlayView extends SheetView {
   // -- dice -------------------------------------------------------------------
 
   // A d20 roll. A second d20 is shown alongside for advantage or disadvantage.
-  roll(label, mod) {
+  // `bonus` is a number, or {total, parts} from the server, whose parts are shown.
+  roll(label, bonus) {
+    const mod = n(bonus);
     const a = d(20), b = d(20);
     const flag = a === 20 ? "crit" : a === 1 ? "fumble" : "";
     const detail = `d20: ${a} ${fmtMod(mod)}`.trim();
@@ -404,37 +421,40 @@ export class PlayView extends SheetView {
       h("div.roll-total", { className: `roll-total${flag ? ` ${flag}` : ""}` }, a + mod),
       h("div.roll-detail", detail),
       h("div.roll-detail.muted", `2nd d20: ${b} → ${b + mod} · adv ${Math.max(a, b) + mod} · dis ${Math.min(a, b) + mod}`),
+      bonus?.parts?.length > 0 && h("div.roll-detail.muted", partsText(bonus)),
     ]);
     this.record({ label, summary: String(a + mod), detail: `${detail} · 2nd d20: ${b} → ${b + mod}`, flag });
   }
 
-  attack(a) {
-    const toHit = parseInt(a.to_hit, 10);
-    const dmg = parseExpr(a.damage);
-    const first = d(20);
+  // To hit and every damage part, from the server's numbers (`da`: derived.attacks[i]).
+  attack(a, da) {
+    const toHit = n(da.to_hit);
+    const first = d(20), second = d(20);
     const crit = first === 20;
     const flag = crit ? "crit" : first === 1 ? "fumble" : "";
-    const parts = [], summary = [], detail = [];
-    if (!Number.isNaN(toHit)) {
-      const second = d(20);
-      parts.push(
-        h("div.roll-total", { className: `roll-total${flag ? ` ${flag}` : ""}` }, first + toHit, h("small", " to hit")),
-        h("div.roll-detail", `d20: ${first} ${fmtMod(toHit)}${crit ? " · critical!" : ""}`),
-        h("div.roll-detail.muted", `2nd d20: ${second} → ${second + toHit}`));
-      summary.push(`to hit ${first + toHit}`);
-      detail.push(`d20: ${first} ${fmtMod(toHit)} · 2nd d20: ${second} → ${second + toHit}`);
+    const parts = [
+      h("div.roll-total", { className: `roll-total${flag ? ` ${flag}` : ""}` }, first + toHit, h("small", " to hit")),
+      h("div.roll-detail", `d20: ${first} ${fmtMod(toHit)}${crit ? " · critical!" : ""}`),
+      h("div.roll-detail.muted", `2nd d20: ${second} → ${second + toHit}`),
+    ];
+    const summary = [`to hit ${first + toHit}`];
+    const detail = [`d20: ${first} ${fmtMod(toHit)} · 2nd d20: ${second} → ${second + toHit}`];
+    const damage = da.damage.map((part) => {
+      const expr = parseExpr(`${part.dice || "0"}${part.bonus.total ? sign(part.bonus.total) : ""}`);
+      const r = expr.dice.length ? rollExpr(expr, { crit }) : { total: expr.mod, detail: String(expr.mod) };
+      return { total: Math.max(0, r.total), type: part.type || "damage", detail: r.detail };
+    });
+    if (damage.length) {
+      const total = damage.reduce((t, x) => t + x.total, 0);
+      const each = damage.map((x) => `${x.total} ${x.type}`).join(" + ");
+      parts.push(h("div.roll-total.damage", total, h("small", ` ${damage.length > 1 ? "damage" : damage[0].type}`)),
+        damage.length > 1 && h("div.roll-detail", each),
+        h("div.roll-detail", damage.map((x) => x.detail).join(" · ") + (crit ? " (crit: dice doubled)" : "")));
+      summary.push(each);
+      detail.push(damage.map((x) => x.detail).join(" · ") + (crit ? " (crit)" : ""));
     }
-    if (dmg?.dice.length) {
-      const r = rollExpr(dmg, { crit });
-      const total = Math.max(0, r.total);
-      parts.push(h("div.roll-total.damage", total, h("small", ` ${dmg.rest || "damage"}`)),
-        h("div.roll-detail", r.detail + (crit ? " (crit: dice doubled)" : "")));
-      summary.push(`${total} ${dmg.rest || "damage"}`);
-      detail.push(r.detail + (crit ? " (crit)" : ""));
-    }
-    if (!parts.length) return toast("Add a to-hit bonus or damage dice to this attack in Edit.");
     this.showRoll(a.name || "Attack", parts);
-    this.record({ label: a.name || "Attack", summary: summary.join(" · "), detail: detail.join(" · "), flag: Number.isNaN(toHit) ? "" : flag });
+    this.record({ label: a.name || "Attack", summary: summary.join(" · "), detail: detail.join(" · "), flag });
   }
 
   // -- roll history ---------------------------------------------------------------
@@ -548,7 +568,7 @@ export class PlayView extends SheetView {
 
   showRoll(label, body) {
     clearTimeout(this.rollTimer);
-    this.rollBox.replaceChildren(h("div.roll-label", label), ...body);
+    this.rollBox.replaceChildren(h("div.roll-label", label), ...body.filter(Boolean));
     this.rollBox.hidden = false;
     this.rollBox.classList.remove("pop");
     void this.rollBox.offsetWidth;
@@ -559,6 +579,9 @@ export class PlayView extends SheetView {
 
 // -- helpers -----------------------------------------------------------------
 
+// A computed number: {total, parts} from the server, or a plain number.
+const n = (v) => (v && typeof v === "object" ? v.total : v ?? 0);
+const partsText = (v) => v.parts.map((p) => `${p.label} ${sign(p.value)}`).join(" · ");
 const cap = (s) => s.replace(/\b\w/g, (c) => c.toUpperCase());
 function rollList(rolls, limit) {
   if (!rolls.length) return h("p.empty", "No rolls yet.");

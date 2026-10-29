@@ -125,7 +125,8 @@ export class StashView {
           const next = { name: name.value.trim(), qty: Math.max(0, Math.trunc(Number(qty.value) || 0)), notes: notes.value.trim() };
           if (!next.name) return name.focus();
           const items = [...this.data.stash.items];
-          if (i === null) items.push(next); else items[i] = next;
+          // Keep what this form doesn't show (an item's bonuses, attunement).
+          if (i === null) items.push(next); else items[i] = { ...items[i], ...next };
           save(items.filter((x) => x.qty > 0), i === null ? `added ${next.name}${next.qty !== 1 ? ` ×${next.qty}` : ""}` : `edited ${next.name}`);
         },
       },

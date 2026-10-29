@@ -4,7 +4,7 @@ from pathlib import Path
 import pymupdf
 import pytest
 
-from campaign.charsheet import CharacterSheet, PartyStash, merge_patch, move
+from campaign.charsheet import Attack, Bonus, CharacterSheet, Damage, Item, PartyStash, merge_patch, move
 from campaign.db import Store
 from campaign.ingest import chunk_file, chunk_markdown
 from campaign.tools import ToolContext, build_tools
@@ -77,17 +77,90 @@ def test_character_sheet_derived_and_patch(store):
     sheet = CharacterSheet.model_validate_json(EXAMPLE.read_text())
     d = sheet.derived()
     assert d["proficiency_bonus"] == 2
-    assert d["saves"]["wis"] == 5 and d["skills"]["insight"] == 5
-    assert d["spell_save_dc"] == 13 and d["passive_perception"] == 13
+    assert d["saves"]["wis"]["total"] == 5 and d["skills"]["insight"]["total"] == 5
+    assert d["spell_save_dc"]["total"] == 13 and d["passive_perception"]["total"] == 13
 
     t = tools(store, "chars")
     t["update_character"](name=sheet.name, patch=sheet.model_dump(), reason="import")
     assert "Updated" in t["update_character"](name=sheet.name, patch={"hp": {"current": 10}}, reason="ghoul")
     assert "Rejected" in t["update_character"](name=sheet.name, patch={"hp": {"current": "lots"}}, reason="bad")
     saved = json.loads(t["get_character"](name=sheet.name))
-    assert saved["sheet"]["hp"] == {"max": 27, "current": 10, "temp": 0}
+    assert saved["sheet"]["hp"] == {"base": 18, "current": 10, "temp": 0} and saved["derived"]["hp_max"]["total"] == 27
     character_id = store.find_character(sheet.name)["id"]
     assert [r["reason"] for r in store.character_log(character_id)][:2] == ["ghoul", "import"]
+
+
+def parts(value):
+    return {p["label"]: p["value"] for p in value["parts"]}
+
+
+def test_numbers_follow_the_character():
+    """Numbers are kept as parts: change a score or a level and everything built on it moves."""
+    sheet = CharacterSheet.model_validate_json(EXAMPLE.read_text())
+    d = sheet.derived()
+    assert d["attacks"][0]["to_hit"]["total"] == 4 and d["attacks"][0]["text"] == "1d8+2 bludgeoning"
+    assert parts(d["ac"]) == {"Chain mail": 16, "Shield": 2}
+    assert parts(d["hp_max"]) == {"Hit dice": 18, "CON x 3": 6, "Dwarven Toughness": 3}
+
+    sheet.abilities["str"] = 18  # +2 -> +4
+    sheet.abilities["con"] = 17  # +2 -> +3
+    sheet.classes[0].level = 5  # proficiency +2 -> +3
+    d = sheet.derived()
+    assert parts(d["attacks"][0]["to_hit"]) == {"STR": 4, "Proficiency": 3}
+    assert d["attacks"][0]["text"] == "1d8+4 bludgeoning"
+    assert d["skills"]["athletics"]["total"] == 4 and d["saves"]["wis"]["total"] == 3 + 3
+    assert d["spell_save_dc"]["total"] == 8 + 3 + 3
+    assert d["hp_max"]["total"] == 18 + 3 * 5 + 5  # CON and Dwarven Toughness both scale with level
+
+    # An item's bonuses count while it's equipped (and attuned, if it needs it).
+    sheet.inventory[2].equipped = False  # shield off
+    sheet.inventory.append(Item(name="Cloak of protection", equipped=True, requires_attunement=True,
+                                bonuses=[Bonus(target="ac", amount=1), Bonus(target="save", amount=1)]))
+    assert sheet.derived()["ac"]["total"] == 16
+    sheet.inventory[-1].attuned = True
+    d = sheet.derived()
+    assert parts(d["ac"]) == {"Chain mail": 16, "Cloak of protection": 1}
+    assert parts(d["saves"]["dex"]) == {"Cloak of protection": 1}  # DEX +0 isn't listed
+
+    # References in amounts follow the sheet; a switched-off bonus doesn't count.
+    sheet.bonuses.append(Bonus(target="initiative", amount="half_prof", source="Jack of all trades"))
+    sheet.bonuses.append(Bonus(target="damage:str", amount=2, source="Rage", active=False))
+    d = sheet.derived()
+    assert d["initiative"]["total"] == 1 and d["attacks"][0]["text"] == "1d8+4 bludgeoning"
+
+
+def test_attacks_resolve_finesse_spell_and_magic():
+    sheet = CharacterSheet(
+        name="Vex", classes=[{"name": "Rogue", "level": 1}], abilities={"str": 10, "dex": 16, "int": 14},
+        spellcasting_ability="int",
+        attacks=[
+            Attack(name="Rapier +1", ability="finesse", bonus=1,
+                   damage=[Damage(dice="1d8", type="piercing", add_ability=True), Damage(dice="1d6", type="fire")]),
+            Attack(name="Fire bolt", ability="spell", damage=[Damage(dice="1d10", type="fire")]),
+        ],
+    )
+    rapier, bolt = sheet.derived()["attacks"]
+    assert parts(rapier["to_hit"]) == {"DEX": 3, "Proficiency": 2, "Magic": 1}
+    assert rapier["text"] == "1d8+4 piercing + 1d6 fire"
+    assert bolt["to_hit"]["total"] == 4 and bolt["text"] == "1d10 fire"
+
+
+def test_sheets_from_before_parts_keep_their_numbers():
+    old = {
+        "name": "Old", "classes": [{"name": "Fighter", "level": 4}], "abilities": {"con": 14},
+        "ac": 17, "hp": {"max": 38, "current": 30, "temp": 0},
+        "attacks": [{"name": "Longsword", "to_hit": "+6", "damage": "1d8+3 slashing + 1d6 radiant", "notes": "silvered"}],
+    }
+    sheet = CharacterSheet.model_validate(old)
+    d = sheet.derived()
+    assert d["ac"]["total"] == 17 and d["hp_max"]["total"] == 38 and sheet.hp.base == 30
+    assert d["attacks"][0]["to_hit"]["total"] == 6
+    assert d["attacks"][0]["text"] == "1d8+3 slashing + 1d6 radiant" and sheet.attacks[0].notes == "silvered"
+    # A patch that sets the maximum (the old way) still works.
+    sheet = CharacterSheet.model_validate(merge_patch(sheet.model_dump(), {"hp": {"max": 40}}))
+    assert sheet.hp_max == 40
+    with pytest.raises(ValueError):
+        Bonus(target="ac", amount="lots")
 
 
 def test_moving_between_a_character_and_the_party_stash():
@@ -100,6 +173,13 @@ def test_moving_between_a_character_and_the_party_stash():
     # Putting in moves the whole stack when it's all of it, and makes a stash item.
     move(sheet, stash, "stash", {"Shield": 1})
     assert "Shield" not in [i.name for i in sheet.inventory] and stash.items[-1].name == "Shield"
+    # A magic item keeps its bonuses through the stash; it comes out unequipped.
+    sheet.inventory.append(Item(name="Cloak of protection", equipped=True, attuned=True, requires_attunement=True,
+                                bonuses=[Bonus(target="ac", amount=1)]))
+    move(sheet, stash, "stash", {"Cloak of protection": 1})
+    move(sheet, stash, "character", {"Cloak of protection": 1})
+    cloak = sheet.inventory[-1]
+    assert cloak.bonuses[0].amount == 1 and cloak.requires_attunement and not cloak.equipped and not cloak.attuned
     # Not enough changes nothing.
     before = (sheet.model_dump(), stash.model_dump())
     with pytest.raises(ValueError, match="only 1"):
@@ -119,7 +199,7 @@ def test_party_stash_tools(store):
     assert "Rejected" in t["update_party_stash"](patch={"items": [{"qty": 2}]}, reason="bad")
     t["update_party_stash"](patch={"items": [{"name": "Silver mirror"}]}, reason="the crypt")
     stash = json.loads(t["get_party_stash"]())
-    assert stash["currency"]["gp"] == 340 and stash["items"] == [{"name": "Silver mirror", "qty": 1, "notes": ""}]
+    assert stash["currency"]["gp"] == 340 and [(i["name"], i["qty"]) for i in stash["items"]] == [("Silver mirror", 1)]
     assert [r["reason"] for r in store.party_stash_log(store.campaign("loot").id)] == ["the crypt", "the crypt"]
 
 

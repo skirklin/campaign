@@ -338,6 +338,23 @@ function jobList(c, kind, initial, owner, opts) {
   return { el, watch };
 }
 
+// Claude's own words in a job's log (its reasoning while it reads) are hidden
+// unless asked for; the choice is remembered, and applies to every job.
+const REASONING_KEY = "campaign.showReasoning";
+let showReasoning = false;
+try {
+  showReasoning = localStorage.getItem(REASONING_KEY) === "1";
+} catch {}
+
+function setReasoning(on) {
+  showReasoning = on;
+  try {
+    localStorage.setItem(REASONING_KEY, on ? "1" : "0");
+  } catch {}
+  for (const el of document.querySelectorAll(".job")) el.classList.toggle("show-reasoning", on);
+  for (const b of document.querySelectorAll(".reasoning-toggle")) b.textContent = on ? "Hide reasoning" : "Show reasoning";
+}
+
 // One job's card: its state, Retry/Cancel, and its log. It loads the whole
 // log once; after that, update() applies what the live stream sends (new
 // lines, and the last line again while it's still growing).
@@ -349,7 +366,10 @@ function jobPanel(c, id, opts) {
   const actions = h("span.job-actions");
   const title = h("strong", "…");
   const result = h("div");
-  const el = h("div.job", h("div.job-head", title, statusEl, actions), out, result);
+  const toggle = h("button.link.reasoning-toggle", { hidden: true, onclick: () => setReasoning(!showReasoning) },
+    showReasoning ? "Hide reasoning" : "Show reasoning");
+  const el = h("div.job", h("div.job-head", title, statusEl, toggle, actions), out, result);
+  el.classList.toggle("show-reasoning", showReasoning);
   let finished = false;
   const act = (label, method, path, cls = "") => (canEdit(c) || opts.anyone) && h(`button${cls}`, {
     onclick: async () => {
@@ -370,6 +390,7 @@ function jobPanel(c, id, opts) {
       const line = lines.get(entry.seq) || out.appendChild(h(`div.log-${entry.kind}`));
       lines.set(entry.seq, line);
       line.textContent = entry.text;
+      if (entry.kind === "text") toggle.hidden = false;
     }
     out.scrollTop = out.scrollHeight;
     const waiting = job.state === "wanted" && job.retry_at;

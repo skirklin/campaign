@@ -8,10 +8,14 @@
   "abilities": {"str": 14, "dex": 10, "con": 15, "int": 10, "wis": 16, "cha": 12},
   "save_proficiencies": ["wis", "cha"],
   "skill_proficiencies": ["insight", "medicine", "religion", "persuasion"],
-  "ac": 18,
+  "ac": {"label": "Chain mail", "base": 16, "abilities": []},
   "speed": 25,
-  "hp": {"max": 27, "current": 27, "temp": 0},
-  "attacks": [{"name": "Warhammer", "to_hit": "+4", "damage": "1d8+2 bludgeoning"}],
+  "hp": {"base": 18, "current": 27, "temp": 0},
+  "attacks": [
+    {"name": "Warhammer", "ability": "str", "range": "5 ft",
+     "damage": [{"dice": "1d8", "type": "bludgeoning", "add_ability": true}]}
+  ],
+  "bonuses": [{"target": "hp_max", "amount": "level", "source": "Dwarven Toughness"}],
   "resources": [
     {"name": "Spell slots (1st)", "max": 4, "recharge": "long rest"},
     {"name": "Spell slots (2nd)", "max": 2, "recharge": "long rest"},
@@ -31,7 +35,7 @@
   "inventory": [
     {"name": "Warhammer", "equipped": true},
     {"name": "Chain mail", "equipped": true},
-    {"name": "Shield", "equipped": true},
+    {"name": "Shield", "equipped": true, "bonuses": [{"target": "ac", "amount": 2}]},
     {"name": "Holy symbol (amulet)", "equipped": true},
     {"name": "Potion of healing", "qty": 2}
   ],

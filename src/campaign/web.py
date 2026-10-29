@@ -883,7 +883,7 @@ def create_app(
             "mine": local or ch["owner_id"] == user_of(request)["id"],
             "summary": " / ".join(f"{c.name} {c.level}" for c in sheet.classes),
             "species": sheet.species,
-            "hp": sheet.hp.model_dump(),
+            "hp": sheet.hp.model_dump() | {"max": sheet.hp_max},
         }
 
     @app.get("/api/characters")

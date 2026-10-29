@@ -2,6 +2,7 @@
 
 import json
 import time
+from dataclasses import replace
 
 import httpx2 as httpx
 import pytest
@@ -9,10 +10,13 @@ import pytest
 from campaign import agent as agent_mod
 from campaign import jobs, sheetscan
 from campaign.accounts import Accounts
-from campaign.charsheet import ClassLevel, HitPoints
+from campaign.charsheet import ArmorClass, Bonus, ClassLevel
+from campaign.charsheet import CharacterSheet
 from campaign.db import Store
 from campaign.jobs import JobLoop, Log
 from campaign.world import World
+from types import SimpleNamespace as NS
+
 from test_agent import FakeClient, text, tool_use
 
 SCRIPT = [
@@ -144,27 +148,25 @@ SCAN = sheetscan.ScannedSheet(
     classes=[ClassLevel(name="Wizard", level=3)], xp=900,
     abilities=sheetscan.Abilities(strength=8, dexterity=14, constitution=12, intelligence=17, wisdom=12, charisma=10),
     save_proficiencies=["Intelligence", "wis"], skill_proficiencies=["Arcana", "History", "Basket weaving"],
-    skill_expertise=[], ac=12, speed=30, hp=HitPoints(max=17, current=17), attacks=[], resources=[],
+    skill_expertise=[], ac=ArmorClass(base=10, abilities=["dex"]), printed_ac=12, speed=30,
+    hp=sheetscan.ScannedHitPoints(max=17, current=17, temp=0), attacks=[], bonuses=[], resources=[],
     spellcasting_ability="Intelligence", spells=[], inventory=[], currency=sheetscan.Coins(gp=12),
     features=["Arcane Recovery"], proficiencies=["Daggers"], personality="", notes="Has a cat.",
     unreadable=["Wisdom score"],
 )
 
 
-class Delta:
-    def __init__(self, thinking):
-        self.delta = type("D", (), {"type": "thinking_delta", "thinking": thinking})()
-
-
-def scan_client(monkeypatch, *replies, events=("Looking at the sheet. ", "Wizard 3.")):
-    """A fake Claude that streams some thinking, then answers with each of `replies` in turn
-    (default: SCAN as JSON, wrapped in a few words). Returns the list of calls made."""
-    replies = list(replies) or [f"Here it is:\n```json\n{SCAN.model_dump_json()}\n```"]
+def scan_client(monkeypatch, *script, events=("Looking at the sheet. ", "Wizard 3.")):
+    """A fake Claude for sheet scans: each request streams some thinking, then gets the next of `script`
+    (a reply string, or (content, stop_reason)); the last one repeats. By default it answers with SCAN
+    as JSON, wrapped in a few words. Returns the list of requests made."""
+    script = [r if isinstance(r, tuple) else ([text(r)], "end_turn") for r in script] or [
+        ([text(f"Here it is:\n```json\n{SCAN.model_dump_json()}\n```")], "end_turn")]
     calls = []
 
     class Stream:
-        def __init__(self, reply):
-            self.reply = reply
+        def __init__(self, content, stop):
+            self.message = NS(content=content, stop_reason=stop)
 
         def __enter__(self):
             return self
@@ -173,21 +175,18 @@ def scan_client(monkeypatch, *replies, events=("Looking at the sheet. ", "Wizard
             return False
 
         def __iter__(self):
-            return iter([Delta(t) for t in events])
+            for t in events:
+                yield NS(type="content_block_delta", delta=NS(type="thinking_delta", thinking=t))
 
         def get_final_message(self):
-            content = [type("B", (), {"type": "text", "text": self.reply})()]
-            return type("M", (), {"stop_reason": "end_turn", "content": content})()
+            return self.message
 
-    class Client:
-        class beta:
-            class messages:
-                @staticmethod
-                def stream(**kw):
-                    calls.append({**kw, "messages": list(kw["messages"])})
-                    return Stream(replies[min(len(calls), len(replies)) - 1])
+    def stream(**kw):
+        calls.append({**kw, "messages": list(kw["messages"])})
+        return Stream(*script[min(len(calls), len(script)) - 1])
 
-    monkeypatch.setattr(sheetscan.anthropic, "Anthropic", lambda: Client())
+    client = NS(beta=NS(messages=NS(stream=stream)))
+    monkeypatch.setattr(agent_mod.anthropic, "Anthropic", lambda: client)
     return calls
 
 
@@ -216,6 +215,9 @@ def test_a_scan_becomes_a_character(scan_job, monkeypatch):
     assert calls[0]["messages"][0]["content"][0]["type"] == "document"
     assert calls[0]["thinking"]["display"] == "summarized"  # else the thinking shown as progress is empty
     assert "output_format" not in calls[0] and '"unreadable"' in calls[0]["system"]  # plain JSON, schema in the prompt
+    assert 'campaign "Strahd"' in calls[0]["system"]
+    tools = {t["name"] for t in calls[0]["tools"]}
+    assert {"search_reference", "read_reference", "lookup"} <= tools and "record_fact" not in tools  # read-only
     assert [(e["kind"], e["text"]) for e in s.job_log(job_id)] == [
         ("status", "Claude is reading ireth.pdf…"), ("text", "Looking at the sheet. Wizard 3."), ("status", "Made Ireth."),
     ]
@@ -280,15 +282,10 @@ def test_a_request_the_api_refuses_fails_at_once(scan_job, monkeypatch):
     s, camp, db, job_id, _ = scan_job
     response = httpx.Response(400, request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"))
 
-    class Client:
-        class beta:
-            class messages:
-                @staticmethod
-                def stream(**kw):
-                    raise sheetscan.anthropic.BadRequestError("The compiled grammar is too large", response=response,
-                                                              body=None)
+    def stream(**kw):
+        raise agent_mod.anthropic.BadRequestError("The compiled grammar is too large", response=response, body=None)
 
-    monkeypatch.setattr(sheetscan.anthropic, "Anthropic", lambda: Client())
+    monkeypatch.setattr(agent_mod.anthropic, "Anthropic", lambda: NS(beta=NS(messages=NS(stream=stream))))
     assert JobLoop(db).pass_once()
     job = s.job(job_id)
     assert job["state"] == "failed" and job["attempts"] == 1 and job["retry_at"] is None
@@ -335,3 +332,78 @@ def test_ingests_move_over_to_jobs_keeping_their_ids(tmp_path):
                             "played_on": "2026-10-25"}
     assert s.job_log(7) == [{"seq": 0, "kind": "status", "text": "Transcribing…"}]
     s.close()
+
+
+def test_a_scan_looks_up_what_it_cannot_place_in_the_campaign_books(scan_job, monkeypatch):
+    s, camp, db, job_id, _ = scan_job
+    from campaign.library import add_reference
+
+    add_reference(s, camp, b"# Barbarian Paths\n## Path of the Herculean\nYou draw on the strength of a hero.\n",
+                  "paths.md", kind="notes")
+    herculean = SCAN.model_copy(update={"classes": [ClassLevel(name="Barbarian", level=3, subclass="Path of the Herculean")]})
+    calls = scan_client(
+        monkeypatch,
+        ([tool_use("t1", "search_reference", query="barbarian path HP")], "tool_use"),
+        herculean.model_dump_json(),
+    )
+    assert JobLoop(db).pass_once()
+    job = s.job(job_id)
+    assert job["state"] == "done"
+    assert s.character(job["result"]["character"])["sheet"]["classes"][0]["subclass"] == "Path of the Herculean"
+    # The lookup ran against the campaign's books, and the job's log shows it.
+    result = calls[1]["messages"][-1]["content"][0]
+    assert result["type"] == "tool_result" and "Herculean" in result["content"]
+    assert any(e["kind"] == "tool" and "search_reference" in e["text"] for e in s.job_log(job_id))
+
+
+def test_a_players_scan_cannot_see_dm_only_material(scan_job, monkeypatch):
+    s, camp, db, job_id, _ = scan_job
+    from campaign.library import add_reference
+
+    add_reference(s, camp, b"# Secrets\nThe Herculean Path was founded by the villain.\n", "secrets.md",
+                  kind="notes", dm_only=True)
+    s.update_job(job_id, state="done")
+    player = replace(camp, role="player")
+    job_id = s.add_job(player, "scan", {"blob": s.blobs.put(b"%PDF-1.7"), "name": "cid.pdf"}, None)
+    calls = scan_client(
+        monkeypatch,
+        ([tool_use("t1", "search_reference", query="Herculean")], "tool_use"),
+        SCAN.model_dump_json(),
+    )
+    assert JobLoop(db).pass_once() and s.job(job_id)["state"] == "done"
+    assert "villain" not in calls[1]["messages"][-1]["content"][0]["content"]
+
+
+def test_a_scan_records_parts_and_flags_totals_that_do_not_add_up(scan_job, monkeypatch):
+    s, camp, db, job_id, _ = scan_job
+    axe = sheetscan.ScannedAttack(
+        name="Greataxe", ability="str", proficient=True, printed_to_hit="+6", printed_damage="1d12 + 3 slashing",
+        damage=[{"dice": "1d12", "type": "slashing", "add_ability": True}],
+    )
+    bow = sheetscan.ScannedAttack(  # printed +9: more than its parts (DEX +2, proficiency +3)
+        name="Longbow", ability="dex", printed_to_hit="+9", printed_damage="1d8+2 piercing",
+        damage=[{"dice": "1d8", "type": "piercing", "add_ability": True}],
+    )
+    barbarian = SCAN.model_copy(update={
+        "abilities": sheetscan.Abilities(strength=16, dexterity=14, constitution=14, intelligence=8, wisdom=10, charisma=10),
+        "classes": [ClassLevel(name="Barbarian", level=5)],
+        "ac": ArmorClass(label="Unarmored defense", base=10, abilities=["dex", "con"]), "printed_ac": 15,
+        "hp": sheetscan.ScannedHitPoints(max=55, current=55, temp=0), "attacks": [axe, bow],
+        "bonuses": [Bonus(target="damage:str", amount=2, source="Rage", active=False)],
+        "spellcasting_ability": "",
+    })
+    scan_client(monkeypatch, barbarian.model_dump_json())
+    assert JobLoop(db).pass_once()
+    job = s.job(job_id)
+    sheet = CharacterSheet.model_validate(s.character(job["result"]["character"])["sheet"])
+    d = sheet.derived()
+    assert sheet.hp.base == 45 and d["hp_max"]["total"] == 55  # 55 printed = 45 from hit dice + CON 2 x 5
+    assert d["attacks"][0]["to_hit"]["total"] == 6 and d["attacks"][0]["text"] == "1d12+3 slashing"
+    assert job["result"]["unreadable"] == [
+        "Wisdom score", "skill: Basket weaving",
+        "AC: the sheet says 15, its parts add up to 14",
+        "Longbow: the sheet says +9 to hit, its parts add up to +5",
+    ]
+    # Rage is recorded but off until switched on; then Strength attacks gain it.
+    sheet.bonuses[0].active = True
+    assert sheet.derived()["attacks"][0]["text"] == "1d12+5 slashing"
