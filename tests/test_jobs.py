@@ -406,3 +406,36 @@ def test_a_scan_records_parts_and_flags_totals_that_do_not_add_up(scan_job, monk
     # Rage is recorded but off until switched on; then Strength attacks gain it.
     sheet.bonuses[0].active = True
     assert sheet.derived()["attacks"][0]["text"] == "1d12+5 slashing"
+
+
+def test_explanations_and_prose_in_damage_get_sent_back_once(scan_job, monkeypatch):
+    s, camp, db, job_id, _ = scan_job
+    wordy = SCAN.model_copy(update={
+        "attacks": [sheetscan.ScannedAttack(
+            name="Greataxe", printed_to_hit="", printed_damage="",
+            damage=[{"dice": "1d12", "type": "slashing, or 1d10 when used two-handed", "add_ability": True}])],
+        "unreadable": ["The Wisdom score was hard to make out because the scan is blurry in that corner, "
+                       "so I used 10 as instructed"],
+    })
+    tidy = SCAN.model_copy(update={
+        "attacks": [sheetscan.ScannedAttack(
+            name="Greataxe", printed_to_hit="", printed_damage="", properties=["heavy", "two-handed"],
+            damage=[{"dice": "1d12", "type": "slashing", "add_ability": True}])],
+        "unreadable": ["Wisdom score blurry"],
+    })
+    calls = scan_client(monkeypatch, wordy.model_dump_json(), tidy.model_dump_json())
+    loop = JobLoop(db)
+    assert loop.pass_once()
+    job = s.job(job_id)
+    assert job["state"] == "done" and len(calls) == 2
+    feedback = calls[1]["messages"][-1]["content"]
+    assert "damage type" in feedback and "unreadable entry" in feedback
+    sheet = s.character(job["result"]["character"])["sheet"]
+    assert sheet["attacks"][0]["damage"][0]["type"] == "slashing" and sheet["attacks"][0]["properties"] == ["heavy", "two-handed"]
+
+    # Still untidy after its one chance: taken as it is rather than failing the scan.
+    job_id = s.add_job(camp, "scan", {"blob": s.blobs.put(b"%PDF-1.7"), "name": "again.pdf"}, None)
+    s.conn.execute("DELETE FROM characters")
+    s.conn.commit()
+    scan_client(monkeypatch, wordy.model_dump_json())
+    assert loop.pass_once() and s.job(job_id)["state"] == "done"
