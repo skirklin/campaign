@@ -218,30 +218,8 @@ CREATE TABLE summaries (
     created_at  TEXT NOT NULL
 );
 
-CREATE TABLE characters (
-    id           INTEGER PRIMARY KEY,
-    campaign_id  INTEGER REFERENCES campaigns(id) ON DELETE SET NULL,
-    name         TEXT NOT NULL UNIQUE,
-    sheet        TEXT NOT NULL,
-    updated_at   TEXT NOT NULL
-);
-
-CREATE TABLE character_log (
-    id            INTEGER PRIMARY KEY,
-    character_id  INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
-    change        TEXT NOT NULL,
-    reason        TEXT NOT NULL DEFAULT '',
-    created_at    TEXT NOT NULL
-);
-"""
-
-# Databases older than this are retired and replaced, not migrated.
-BASELINE = 3
-
-# v4: people. Users sign in (when sign-in is on), belong to campaigns as a
-# DM or a player with owner, editor or viewer access, and arrive by invite.
-# Character sheets get an owner, and names need only be unique per campaign.
-SCHEMA_V4 = """
+-- People. Users sign in (when sign-in is on), belong to campaigns as a DM
+-- or a player with owner, editor or viewer access, and arrive by invite.
 CREATE TABLE users (
     id            INTEGER PRIMARY KEY,
     email         TEXT NOT NULL UNIQUE COLLATE NOCASE,
@@ -277,7 +255,8 @@ CREATE TABLE invites (
     revoked      INTEGER NOT NULL DEFAULT 0
 );
 
-CREATE TABLE characters_v4 (
+-- A sheet belongs to the person who made it and, optionally, a campaign.
+CREATE TABLE characters (
     id           INTEGER PRIMARY KEY,
     campaign_id  INTEGER REFERENCES campaigns(id) ON DELETE SET NULL,
     owner_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
@@ -286,18 +265,26 @@ CREATE TABLE characters_v4 (
     updated_at   TEXT NOT NULL,
     UNIQUE (campaign_id, name)
 );
-INSERT INTO characters_v4 (id, campaign_id, name, sheet, updated_at)
-    SELECT id, campaign_id, name, sheet, updated_at FROM characters;
-DROP TABLE characters;
-ALTER TABLE characters_v4 RENAME TO characters;
 CREATE INDEX characters_owner ON characters(owner_id);
+
+CREATE TABLE character_log (
+    id            INTEGER PRIMARY KEY,
+    character_id  INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+    change        TEXT NOT NULL,
+    reason        TEXT NOT NULL DEFAULT '',
+    created_at    TEXT NOT NULL
+);
 """
+
+# Databases older than this are retired and replaced, not migrated. While
+# there's no data worth migrating, schema changes edit SCHEMA and bump this.
+BASELINE = 4
+
 
 # Append only, for changes small enough to migrate. Each step runs in its
 # own transaction and then sets user_version to its number.
 MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (BASELINE, SCHEMA),
-    (4, SCHEMA_V4),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 
