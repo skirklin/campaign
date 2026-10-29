@@ -15,7 +15,7 @@
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="#/characters">⚔ Campaign</a>
+    <a class="brand" href="#/characters" aria-label="Campaign">⚔<span class="brand-name"> Campaign</span></a>
     <nav>
       <a href="#/characters" data-nav="characters">Characters</a>
       <a href="#/campaigns" data-nav="campaigns">Campaigns</a>
@@ -23,7 +23,8 @@
     </nav>
     <form id="account" method="post" action="/auth/logout" hidden>
       <a id="account-email" href="#/account" title="Your account and connected apps"></a>
-      <button type="submit">Sign out</button>
+      <a id="account-icon" href="#/account" title="Account and sign out" aria-label="Account and sign out">👤</a>
+      <button type="submit" class="sign-out">Sign out</button>
     </form>
   </header>
   <main id="view"></main>

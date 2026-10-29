@@ -145,13 +145,45 @@ export async function streamPost(url, body, onEvent) {
   }
 }
 
-// A sheet that slides up from the bottom of the screen; closes on × or a tap outside.
+// Let the browser's back (a swipe on a phone) close an overlay rather than leave the page.
+// Opening one adds a history entry; going back calls onBack. Closing it any other way
+// calls the returned function, which takes that entry off again. Entries are added and
+// removed one at a time, so an overlay opened as another closes can't lose its own.
+let settled = Promise.resolve();
+export function backCloses(onBack) {
+  let pushed = false, done = false;
+  const pop = () => {
+    window.removeEventListener("popstate", pop);
+    pushed = false;
+    if (!done) { done = true; onBack(); }
+  };
+  settled.then(() => {
+    if (done) return;
+    history.pushState({ overlay: true }, "");
+    pushed = true;
+    window.addEventListener("popstate", pop);
+  });
+  return () => {
+    if (done) return;
+    done = true;
+    window.removeEventListener("popstate", pop);
+    if (!pushed) return;
+    settled = new Promise((resolve) => {
+      const back = () => { window.removeEventListener("popstate", back); resolve(); };
+      window.addEventListener("popstate", back);
+      history.back();
+    });
+  };
+}
+
+// A sheet that slides up from the bottom of the screen; closes on ×, a tap outside, or back.
 export function bottomSheet(title, ...body) {
   const dialog = h("dialog.bottom-sheet",
     h("div.sheet-grip"),
     h("div.sheet-title", h("h2", title), h("button.icon", { onclick: () => dialog.close(), "aria-label": "Close" }, "×")),
     ...body);
-  dialog.addEventListener("close", () => dialog.remove());
+  const release = backCloses(() => dialog.close());
+  dialog.addEventListener("close", () => { release(); dialog.remove(); });
   dialog.addEventListener("click", (e) => { if (e.target === dialog) dialog.close(); });
   document.body.append(dialog);
   dialog.showModal();

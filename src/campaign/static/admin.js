@@ -74,7 +74,9 @@ export async function accountView() {
   const url = `${location.origin}/mcp`;
   return h("section.page",
     h("h1", "Account"),
-    h("p.muted", "Signed in as ", h("strong", me.email)),
+    h("div.signed-in",
+      h("p.muted", "Signed in as ", h("strong", me.email)),
+      h("form", { method: "post", action: "/auth/logout" }, h("button", { type: "submit" }, "Sign out"))),
     h("h2.section-title", "Use your campaigns from the Claude app"),
     h("ol.steps",
       h("li", "In Claude (claude.ai, desktop or mobile), open Settings → Connectors and add a custom connector."),
