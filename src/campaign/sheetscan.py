@@ -15,11 +15,10 @@ import os
 from pathlib import Path
 from typing import Any, Callable
 
-import anthropic
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from .charsheet import ABILITIES, SKILLS, Attack, CharacterSheet, ClassLevel, HitPoints, Item, Resource, Spell
-from .digest import fallback_params
+from .tools import ToolContext
 
 MODEL = os.environ.get("CAMPAIGN_SHEET_MODEL", os.environ.get("CAMPAIGN_MODEL", "claude-opus-5-5"))
 MAX_BYTES = 20_000_000
@@ -29,7 +28,8 @@ MEDIA_TYPES = {
 
 SYSTEM = """\
 You read Dungeons & Dragons 5e character sheets: scans, photos or filled-in
-PDFs, often handwritten. Copy what the sheet says into the output fields.
+PDFs, often handwritten, for the campaign "{name}". Copy what the sheet
+says into the output fields.
 
 - Record what's written. Don't compute values the sheet doesn't show, and
   don't invent anything. A blank field stays empty (0 for numbers that are
@@ -45,6 +45,23 @@ PDFs, often handwritten. Copy what the sheet says into the output fields.
 - Put anything that doesn't fit a field (backstory, allies, notes in the
   margins) in notes, and anything you couldn't read in unreadable, naming
   the field (e.g. "Wisdom score", "third inventory line").
+
+The tools search this campaign's reference material: the books and notes
+the table plays from, which may include a setting's own subclasses,
+species, feats, gifts and magic items. Use them (search_reference, then
+read_reference or outline; lookup for things named in the campaign) when
+the sheet names something you don't know or can't read with confidence:
+an abbreviated, misspelt or smudged class, subclass, species, background,
+feature, spell or item, or anything that isn't standard 5e. Find what it
+stands for and write the full name: two letters beside a class are often
+the initials of a subclass from the setting's book, and a letter that
+reads one way may be another that matches a real option. When a magic
+item or a weapon with special properties is named but the sheet doesn't
+say what it does, look it up and put a short summary of its effect in
+that item's notes (and its attack's notes), with where it's from (source
+and page). Don't look up standard rules you already know, and don't
+change anything the sheet says plainly. If a lookup finds nothing, keep
+what the sheet says and list it in unreadable.
 """
 
 
@@ -98,9 +115,11 @@ class ScannedSheet(Model):
 
 
 # The answer's shape, spelled out for Claude (it's checked against ScannedSheet when it arrives).
+# Braces are doubled because SYSTEM is a format string (the campaign's name).
 SYSTEM += (
-    "\nAnswer with only a JSON object matching this JSON Schema, with no other text:\n"
-    + json.dumps(ScannedSheet.model_json_schema(), separators=(",", ":"))
+    "\nWhen you're done looking things up, answer with only a JSON object matching this JSON Schema,"
+    " with no other text:\n"
+    + json.dumps(ScannedSheet.model_json_schema(), separators=(",", ":")).replace("{", "{{").replace("}", "}}")
 )
 
 ABILITY_NAMES = dict(zip(("strength", "dexterity", "constitution", "intelligence", "wisdom", "charisma"), ABILITIES))
@@ -165,54 +184,56 @@ def _json_object(text: str) -> str:
 
 
 def read_sheet(
-    data: bytes, filename: str, client: Any = None, model: str = MODEL,
+    data: bytes, filename: str, ctx: ToolContext, model: str = MODEL,
     check: Callable[[], None] | None = None, on_thinking: Callable[[str], None] | None = None,
+    on_tool: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> tuple[CharacterSheet, list[str]]:
-    """Read the sheet. `check` is called as the answer streams in and may raise to stop;
-    `on_thinking` gets Claude's thinking as it goes, to show progress.
+    """Read the sheet, looking things up in the campaign `ctx` as needed (read-only).
+
+    `check` is called as the answer streams in and before each lookup, and
+    may raise to stop; `on_thinking` gets Claude's thinking as it goes, and
+    `on_tool` each lookup, to show progress.
 
     The answer is plain JSON checked against ScannedSheet, not a constrained
     structured output: the sheet's schema is too big for the API to compile
     into a grammar. A reply that doesn't fit gets one chance to be corrected.
     """
+    from .agent import Agent
+
     media_type = check_upload(data, filename)
     block_type = "document" if media_type == "application/pdf" else "image"
     source = {"type": "base64", "media_type": media_type, "data": base64.standard_b64encode(data).decode()}
-    client = client or anthropic.Anthropic()
-    messages: list[dict[str, Any]] = [{"role": "user", "content": [
+
+    def thinking(text: str) -> None:
+        if check:
+            check()
+        if on_thinking:
+            on_thinking(text)
+
+    def tool(name: str, args: dict[str, Any]) -> None:
+        if check:
+            check()
+        if on_tool:
+            on_tool(name, args)
+
+    agent = Agent(
+        store=ctx.store, ctx=ctx, system=SYSTEM.format(name=ctx.campaign.name), writable=False, model=model,
+        on_text=lambda _: None, on_thinking=thinking, on_tool=tool,
+    )
+    message: Any = [
         {"type": block_type, "source": source},
         {"type": "text", "text": "Read this character sheet."},
-    ]}]
+    ]
     for attempt in range(2):
-        with client.beta.messages.stream(
-            model=model,
-            max_tokens=32000,
-            system=SYSTEM,
-            messages=messages,
-            thinking={"type": "adaptive", "display": "summarized"},
-            output_config={"effort": "medium"},
-            **fallback_params(model),
-        ) as stream:
-            for event in stream:
-                if check:
-                    check()
-                delta = getattr(event, "delta", None)
-                if on_thinking and getattr(delta, "type", None) == "thinking_delta" and delta.thinking:
-                    on_thinking(delta.thinking)
-            msg = stream.get_final_message()
-        if msg.stop_reason == "refusal":
+        text = agent.send(message, max_turns=20)
+        if agent.stop_reason == "refusal":
             raise ScanError("Claude declined to read this file")
-        if msg.stop_reason == "max_tokens":
+        if agent.stop_reason == "max_tokens":
             raise ScanError("the sheet's answer ran too long to finish")
-        text = "".join(b.text for b in msg.content if b.type == "text")
         try:
             return to_sheet(ScannedSheet.model_validate_json(_json_object(text)))
         except ValidationError as err:
             if attempt:
                 raise ScanError(f"couldn't read a character sheet from this file ({err.error_count()} problems)") from err
-            messages += [
-                {"role": "assistant", "content": msg.content},
-                {"role": "user", "content": f"That doesn't match the schema:\n{err}\n"
-                                            "Reply again with only the corrected JSON object."},
-            ]
+            message = f"That doesn't match the schema:\n{err}\nReply again with only the corrected JSON object."
     raise AssertionError("unreachable")
