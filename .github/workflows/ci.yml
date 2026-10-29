@@ -32,6 +32,9 @@ jobs:
           for f in src/campaign/static/*.js; do
             cp "$f" "$RUNNER_TEMP/check.mjs" && node --check "$RUNNER_TEMP/check.mjs" || { echo "::error file=$f::syntax error"; exit 1; }
           done
+      - uses: azure/setup-kubectl@v4
+      - name: Render the manifests the release applies
+        run: kubectl kustomize deploy/k8s > /dev/null
 
   # On pull requests, make sure the image still builds. Releases build and push it.
   image:

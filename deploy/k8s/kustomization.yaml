@@ -1,11 +1,14 @@
-# One-time setup, with admin credentials:  kubectl apply -k deploy/k8s
-# The campaign-secrets Secret is created separately (docs/deploy.md, step 2)
-# so no credentials live in the repo.
+# What the release workflow applies, as the `deployer` ServiceAccount, with
+# the image pinned to the digest it just built. The namespace, its quota and
+# the deployer itself belong to the homelab repo (infra/k8s/tenants/campaign.yaml).
+# The campaign-secrets Secret is created by hand (docs/deploy.md, step 2) so
+# no credentials live in the repo.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
+namespace: campaign
+labels:
+  - pairs: {app.kubernetes.io/part-of: campaign}
 resources:
-  - namespace.yaml
   - pvc.yaml
   - deployment.yaml
   - service.yaml
-  - deployer.yaml
