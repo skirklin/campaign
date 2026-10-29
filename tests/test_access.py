@@ -138,11 +138,21 @@ def test_character_sheets_belong_to_their_players(site):
     assert bob.post(f"/api/characters/{cid}/hp", json={"delta": -3}).status_code == 403
     assert dm.post(f"/api/characters/{cid}/hp", json={"delta": -3}).status_code == 200
     assert alice.post(f"/api/characters/{cid}/rest", json={"long": True}).status_code == 200
-    # A private sheet (no campaign) is invisible to others.
-    private = bob.post("/api/characters", json={"name": "Side character"}).json()["id"]
-    assert alice.get(f"/api/characters/{private}").status_code == 404
+    # A player sees their own character in the world, even before anything has happened to it.
+    assert alice.get(f"/api/campaigns/strahd/entities/{sheet['entity_id']}").json()["kind"] == "pc"
+    # A sheet in a campaign you're not in is invisible.
+    assert bob.post("/api/campaigns", json={"name": "Side Game", "role": "dm"}).status_code == 201
+    side = bob.post("/api/characters", json={"name": "Side character", "campaign": "side-game"}).json()["id"]
+    assert alice.get(f"/api/characters/{side}").status_code == 404
     assert {c["name"] for c in alice.get("/api/characters").json()} == {"Ireth"}
     assert {c["name"] for c in bob.get("/api/characters").json()} == {"Ireth", "Side character"}
+    # Copying: only into a campaign you're in, and only a sheet you could edit.
+    assert alice.post(f"/api/characters/{cid}/copy", json={"campaign": "side-game"}).status_code == 404
+    assert bob.post(f"/api/characters/{cid}/copy", json={"campaign": "side-game"}).status_code == 403
+    assert alice.post("/api/campaigns", json={"name": "One Shot", "role": "player"}).status_code == 201
+    copy = alice.post(f"/api/characters/{cid}/copy", json={"campaign": "one-shot"}).json()
+    assert copy["copied_from"]["id"] == cid and copy["can_edit"]
+    assert bob.get(f"/api/characters/{copy['id']}").status_code == 404
 
 
 def test_admin_pages(site):

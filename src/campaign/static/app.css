@@ -144,6 +144,13 @@ button.link { background: none; border: 0; padding: 0; text-align: left; color: 
 .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: .8rem; }
 a.card { color: inherit; text-decoration: none; display: flex; flex-direction: column; gap: .3rem; }
 a.card:hover { border-color: var(--accent); }
+.char-group { margin-bottom: 1rem; }
+.char-group > h3 { font-size: 1rem; margin: .6rem 0 .4rem; }
+.timeline { list-style: none; padding: 0; margin: 0; display: grid; gap: .3rem; }
+.timeline .session-num { font-size: .85rem; margin-right: .2rem; }
+.copy-dialog { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: inherit; padding: 1rem 1.2rem; max-width: 26rem; }
+.copy-dialog select { width: 100%; margin: .5rem 0; }
+.copy-dialog::backdrop { background: rgb(0 0 0 / .35); }
 
 .hpbar {
   position: relative; height: 1.3rem; border-radius: 6px; overflow: hidden;

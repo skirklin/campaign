@@ -24,11 +24,18 @@ def test_index_and_static(client):
 
 
 def test_character_lifecycle(client):
-    r = client.post("/api/characters/import", files={"file": ("c.json", EXAMPLE.read_bytes())})
+    # A character belongs to a campaign.
+    assert client.post("/api/characters/import", files={"file": ("c.json", EXAMPLE.read_bytes())}).status_code == 422
+    client.post("/api/campaigns", json={"name": "Strahd"})
+    client.post("/api/campaigns", json={"name": "Avernus"})
+    r = client.post("/api/characters/import", files={"file": ("c.json", EXAMPLE.read_bytes())},
+                    data={"campaign": "strahd"})
     assert r.status_code == 201
     cid = r.json()["id"]
-    assert r.json()["can_edit"] and r.json()["campaign"] is None
+    assert r.json()["can_edit"] and r.json()["campaign"] == {"slug": "strahd", "name": "Strahd"}
     assert client.get("/api/characters").json()[0]["hp"]["current"] == 27
+    assert [c["id"] for c in client.get("/api/campaigns/strahd/characters").json()] == [cid]
+    assert client.get("/api/campaigns/avernus/characters").json() == []
 
     r = client.post(f"/api/characters/{cid}/hp", json={"delta": -30})
     assert r.json()["sheet"]["hp"]["current"] == 0
@@ -47,20 +54,40 @@ def test_character_lifecycle(client):
     sheet = r.json()["sheet"] | {"hp": {"max": 27, "current": "lots", "temp": 0}}
     assert client.put(f"/api/characters/{cid}", json={"sheet": sheet}).status_code == 422
 
+    # The sheet is a player character in the campaign's world.
+    eid = r.json()["entity_id"]
+    entity = client.get(f"/api/campaigns/strahd/entities/{eid}").json()
+    assert entity["kind"] == "pc" and entity["name"] == sheet["name"]
+    assert entity["character"] == {"id": cid, "name": sheet["name"]}
+
+    old_name = sheet["name"]
     sheet["hp"]["current"] = 5
-    sheet["name"] = "Brannoc the Bold"  # renaming keeps the id
+    sheet["name"] = "Brannoc the Bold"  # renaming keeps the id, and the world follows
     assert client.put(f"/api/characters/{cid}", json={"sheet": sheet}).status_code == 200
-    assert client.get(f"/api/characters/{cid}").json()["sheet"]["name"] == "Brannoc the Bold"
+    renamed = client.get(f"/api/characters/{cid}").json()
+    assert renamed["sheet"]["name"] == "Brannoc the Bold" and renamed["entity_id"] == eid
+    entity = client.get(f"/api/campaigns/strahd/entities/{eid}").json()
+    assert entity["name"] == "Brannoc the Bold" and old_name in entity["aliases"]
+
+    # Copying takes the character to another campaign as a separate sheet.
+    copy = client.post(f"/api/characters/{cid}/copy", json={"campaign": "avernus"})
+    assert copy.status_code == 201
+    copy = copy.json()
+    assert copy["id"] != cid and copy["campaign"]["slug"] == "avernus" and copy["entity_id"] != eid
+    assert copy["copied_from"] == {"id": cid, "name": "Brannoc the Bold", "campaign": {"slug": "strahd", "name": "Strahd"}}
+    assert client.post(f"/api/characters/{cid}/hp", json={"delta": -2}).json()["sheet"]["hp"]["current"] == 3
+    assert client.get(f"/api/characters/{copy['id']}").json()["sheet"]["hp"]["current"] == 5  # independent
+    assert client.post(f"/api/characters/{cid}/copy", json={"campaign": "strahd"}).status_code == 422
+    assert client.post(f"/api/characters/{cid}/copy", json={"campaign": "avernus"}).status_code == 409
 
     # Names are unique within a campaign, not across them.
-    client.post("/api/campaigns", json={"name": "Strahd"})
-    client.post("/api/campaigns", json={"name": "Avernus"})
     assert client.post("/api/characters", json={"name": "Bob", "campaign": "strahd"}).status_code == 201
     assert client.post("/api/characters", json={"name": "Bob", "campaign": "strahd"}).status_code == 409
     other = client.post("/api/characters", json={"name": "Bob", "campaign": "avernus"})
     assert other.status_code == 201 and other.json()["campaign"] == {"slug": "avernus", "name": "Avernus"}
     assert client.delete(f"/api/characters/{cid}").status_code == 204
     assert client.get(f"/api/characters/{cid}").status_code == 404
+    assert client.get(f"/api/characters/{copy['id']}").json()["copied_from"] is None  # the original is gone
 
 
 def test_reference_upload_and_search(client):

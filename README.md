@@ -87,6 +87,15 @@ localhost without it, unless you pass `--no-auth`. With sign-in on:
   editor or viewer access. A campaign's **Members** tab manages this.
 - **Character sheets belong to their players.** Everyone in the campaign
   can read them; their owner and the campaign's DMs can change them.
+- **A character lives in one campaign**, on its **Party** tab. The sheet is
+  the same character as the player-character entry in that campaign's
+  world: the sheet shows its timeline, the world entry links to the sheet,
+  and the assistant finds the sheet by any name the world knows it by.
+  Renaming the sheet renames the entry and keeps the old name as an alias.
+  Taking a character to another campaign (a sequel, a one-shot) copies it
+  with **Copy to campaign…**: the copy changes on its own and links back
+  to the original. The top-level **Characters** page lists yours across
+  campaigns.
 - **An admin page** manages users and app-wide invites.
 [docs/deploy.md](docs/deploy.md) covers running it on the homelab cluster:
 the container image, Kubernetes manifests, the Caddy route, and the
@@ -112,8 +121,8 @@ uv run campaign journal
 uv run campaign state --kind quest --status active
 uv run campaign revert 7      # undo what that ingest wrote, if it got things wrong
 
-# character sheets
-uv run campaign char import examples/character.json
+# character sheets (each belongs to a campaign: -c picks it)
+uv run campaign char import examples/character.json -c curse-of-strahd
 uv run campaign char show "Brannoc Ashvale"
 uv run campaign char hp "Brannoc Ashvale" -- -9
 uv run campaign char rest "Brannoc Ashvale" --long
@@ -172,7 +181,7 @@ Add `--read-only` to expose only the lookup tools.
  digest ─────apply as session 0──▶ world model: entities, aliases, facts over sessions, events
  transcript ──Claude + tools────▶ the same world model, dated to that session; session recap
  chat ────────Claude + tools────▶ same tools; reads and writes
- character sheet (JSON, validated) ◀── update_character / `campaign char …`
+ character sheet (JSON, validated) ◀── update_character / `campaign char …`; linked to its pc entity
 ```
 
 - **Storage** (`db.py`): one SQLite file. Reference text is split into

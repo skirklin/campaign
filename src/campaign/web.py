@@ -67,7 +67,11 @@ class NewCampaign(BaseModel):
 
 class NewCharacter(BaseModel):
     name: str
-    campaign: str | None = None
+    campaign: str
+
+
+class CopyCharacter(BaseModel):
+    campaign: str
 
 
 class SheetUpdate(BaseModel):
@@ -480,6 +484,7 @@ def create_app(db: Path | str, auth: AuthConfig | None = None, exchange: Callabl
         view["all_facts"] = w.facts(entity_id)
         view["timeline"] = w.timeline(entity_id)
         view["all_events"] = w.events(entity_id=entity_id)
+        view["character"] = s.character_for_entity(entity_id)
         return view
 
     @app.post("/api/campaigns/{slug}/entities/{entity_id}/facts", status_code=201)
@@ -589,16 +594,16 @@ def create_app(db: Path | str, auth: AuthConfig | None = None, exchange: Callabl
         return {"status": job.status, "result": job.result, "error": job.error, "log": job.log[start:], "from": start}
 
     # -- characters ----------------------------------------------------------------
-    # A sheet belongs to the person who made it and, optionally, a campaign.
-    # Its owner can edit it; so can the campaign's DMs who have editor access.
-    # Anyone in the campaign can read it.
+    # A sheet belongs to one campaign and to the person who made it. Its owner
+    # can edit it; so can the campaign's DMs who have editor access. Anyone in
+    # the campaign can read it. Taking a character to another campaign copies it.
 
     def character_rights(s: Store, request: Request, ch: dict[str, Any]) -> tuple[bool, bool]:
         """(can read, can edit) for the current user."""
         if local:
             return True, True
         user = user_of(request)
-        m = Accounts(s).membership(ch["campaign_id"], user["id"]) if ch["campaign_id"] else None
+        m = Accounts(s).membership(ch["campaign_id"], user["id"])
         mine = ch["owner_id"] == user["id"]
         return mine or m is not None, mine or bool(m and m["role"] == "dm" and at_least(m["access"], "editor"))
 
@@ -611,16 +616,21 @@ def create_app(db: Path | str, auth: AuthConfig | None = None, exchange: Callabl
             raise HTTPException(403, "only the character's owner or the campaign's DM can change it")
         return ch | {"can_edit": can_edit}
 
-    def campaign_label(s: Store, campaign_id: int | None) -> dict[str, str] | None:
-        if campaign_id is None:
-            return None
+    def campaign_label(s: Store, campaign_id: int) -> dict[str, str]:
         c = s.campaign_by_id(campaign_id)
         return {"slug": c.slug, "name": c.name}
 
-    def sheet_payload(s: Store, ch: dict[str, Any]) -> dict[str, Any]:
+    def sheet_payload(s: Store, request: Request, ch: dict[str, Any]) -> dict[str, Any]:
         sheet = CharacterSheet.model_validate(ch["sheet"])
+        origin = s.character(ch["copied_from"]) if ch["copied_from"] else None
+        copied_from = None
+        if origin:
+            copied_from = {"name": origin["name"], "campaign": campaign_label(s, origin["campaign_id"]),
+                           # Linked only for someone who can still open the original.
+                           "id": origin["id"] if character_rights(s, request, origin)[0] else None}
         return {
             "id": ch["id"], "campaign": campaign_label(s, ch["campaign_id"]), "can_edit": ch["can_edit"],
+            "entity_id": s.link_character(ch["id"]), "copied_from": copied_from,
             "sheet": sheet.model_dump(), "derived": sheet.derived(), "log": s.character_log(ch["id"], limit=30),
         }
 
@@ -629,32 +639,38 @@ def create_app(db: Path | str, auth: AuthConfig | None = None, exchange: Callabl
             s.update_character(ch["id"], sheet.model_dump(), reason=reason)
         except sqlite3.IntegrityError:
             raise HTTPException(409, f"this campaign already has a character called {sheet.name}")
-        return sheet_payload(s, character_or_404(s, request, ch["id"]))
+        return sheet_payload(s, request, character_or_404(s, request, ch["id"]))
+
+    def character_card(s: Store, request: Request, ch: dict[str, Any]) -> dict[str, Any]:
+        sheet = CharacterSheet.model_validate(ch["sheet"])
+        return {
+            "id": ch["id"],
+            "name": sheet.name,
+            "campaign": campaign_label(s, ch["campaign_id"]),
+            "mine": local or ch["owner_id"] == user_of(request)["id"],
+            "summary": " / ".join(f"{c.name} {c.level}" for c in sheet.classes),
+            "species": sheet.species,
+            "hp": sheet.hp.model_dump(),
+        }
 
     @app.get("/api/characters")
     def characters(request: Request, s: Store = Depends(store)) -> list[dict[str, Any]]:
+        """Characters across the campaigns you're in: yours, and the rest of each party."""
         if local:
             rows = s.characters()
         else:
             uid = user_of(request)["id"]
+            # Your own stay listed even after you leave their campaign.
             rows = s.characters(campaign_ids=[c.id for c, _ in Accounts(s).campaigns_for(uid)], owner_id=uid)
-        out = []
-        for ch in rows:
-            sheet = CharacterSheet.model_validate(ch["sheet"])
-            out.append({
-                "id": ch["id"],
-                "name": sheet.name,
-                "campaign": campaign_label(s, ch["campaign_id"]),
-                "mine": local or ch["owner_id"] == user_of(request)["id"],
-                "summary": " / ".join(f"{c.name} {c.level}" for c in sheet.classes),
-                "species": sheet.species,
-                "hp": sheet.hp.model_dump(),
-            })
-        return out
+        return [character_card(s, request, ch) for ch in rows]
 
-    def campaign_for_new_character(s: Store, request: Request, slug: str | None) -> int | None:
+    @app.get("/api/campaigns/{slug}/characters")
+    def party(request: Request, c: Campaign = Depends(reader), s: Store = Depends(store)) -> list[dict[str, Any]]:
+        return [character_card(s, request, ch) for ch in s.characters(campaign_ids=[c.id])]
+
+    def campaign_for_new_character(s: Store, request: Request, slug: str | None) -> int:
         if not slug:
-            return None
+            raise HTTPException(422, "a character belongs to a campaign: pick one")
         try:
             c = s.campaign(slug)
         except KeyError:
@@ -663,13 +679,17 @@ def create_app(db: Path | str, auth: AuthConfig | None = None, exchange: Callabl
             raise HTTPException(404, f"no campaign {slug!r}")
         return c.id
 
-    def create(s: Store, request: Request, sheet: CharacterSheet, campaign_id: int | None, reason: str) -> dict:
+    def create(
+        s: Store, request: Request, sheet: CharacterSheet, campaign_id: int, reason: str, copied_from: int | None = None,
+    ) -> dict:
         owner_id = None if local else user_of(request)["id"]
         try:
-            character_id = s.create_character(sheet.model_dump(), campaign_id, owner_id, reason=reason)
+            character_id = s.create_character(
+                sheet.model_dump(), campaign_id, owner_id, reason=reason, copied_from=copied_from,
+            )
         except sqlite3.IntegrityError:
             raise HTTPException(409, f"this campaign already has a character called {sheet.name}")
-        return sheet_payload(s, character_or_404(s, request, character_id))
+        return sheet_payload(s, request, character_or_404(s, request, character_id))
 
     @app.post("/api/characters", status_code=201)
     def new_character(body: NewCharacter, request: Request, s: Store = Depends(store)) -> dict[str, Any]:
@@ -690,9 +710,20 @@ def create_app(db: Path | str, auth: AuthConfig | None = None, exchange: Callabl
         campaign_id = campaign_for_new_character(s, request, campaign or None)
         return create(s, request, sheet, campaign_id, f"imported {file.filename}")
 
+    @app.post("/api/characters/{character_id}/copy", status_code=201)
+    def copy_character(character_id: int, body: CopyCharacter, request: Request, s: Store = Depends(store)) -> dict:
+        """Take a character to another campaign: a new sheet there, owned by you, that changes on its own."""
+        ch = character_or_404(s, request, character_id, write=True)
+        campaign_id = campaign_for_new_character(s, request, body.campaign)
+        if campaign_id == ch["campaign_id"]:
+            raise HTTPException(422, "the character is already in that campaign")
+        origin = s.campaign_by_id(ch["campaign_id"]).name
+        sheet = CharacterSheet.model_validate(ch["sheet"])
+        return create(s, request, sheet, campaign_id, f"copied from {origin}", copied_from=ch["id"])
+
     @app.get("/api/characters/{character_id}")
     def get_character(character_id: int, request: Request, s: Store = Depends(store)) -> dict[str, Any]:
-        return sheet_payload(s, character_or_404(s, request, character_id))
+        return sheet_payload(s, request, character_or_404(s, request, character_id))
 
     @app.put("/api/characters/{character_id}")
     def put_character(character_id: int, body: SheetUpdate, request: Request, s: Store = Depends(store)) -> dict:
