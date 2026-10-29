@@ -112,6 +112,15 @@ def test_reference_upload_and_search(client):
     assert client.delete(f"/api/campaigns/strahd/sources/{sources[1]['id']}").status_code == 204
 
 
+def wait_for(client, job_id, slug="strahd"):
+    for _ in range(100):
+        job = client.get(f"/api/campaigns/{slug}/jobs/{job_id}").json()
+        if job["state"] not in ("wanted", "running"):
+            return job
+        time.sleep(0.05)
+    return job
+
+
 def test_ingest_job_runs_in_background(client, monkeypatch):
     fake = FakeClient([
         ([tool_use("t1", "record_fact", entity="Ismark", kind="npc", statement="Ismark is alive",
@@ -130,13 +139,8 @@ def test_ingest_job_runs_in_background(client, monkeypatch):
         data={"played_on": "2026-10-25"},
     )
     assert r.json()["session"] == 1
-    ingest_id = r.json()["ingest"]
-    for _ in range(100):
-        job = client.get(f"/api/campaigns/strahd/ingests/{ingest_id}").json()
-        if job["state"] not in ("wanted", "running"):
-            break
-        time.sleep(0.05)
-    assert job["state"] == "done", job
+    job = wait_for(client, r.json()["job"])
+    assert job["state"] == "done" and job["kind"] == "ingest" and job["name"] == "s1.txt", job
     assert job["result"]["title"] == "Blood on the Vine"
     assert any(e["kind"] == "tool" and "record_fact" in e["text"] for e in job["log"])
     assert client.get("/api/campaigns/strahd/sessions").json()["ingests"] == []  # finished: it's a session now
@@ -206,51 +210,24 @@ def test_digest_endpoints_and_original_kept(client, monkeypatch):
 
 
 def test_character_from_a_scan(client, monkeypatch):
-    from campaign import sheetscan
-    from campaign.charsheet import ClassLevel, HitPoints
+    """The upload is checked at once; the reading is a job (test_jobs.py covers it in depth)."""
+    from test_jobs import scan_client
 
-    scan = sheetscan.ScannedSheet(
-        name="Ireth", player="Sam", species="Elf", background="Sage", alignment="NG",
-        classes=[ClassLevel(name="Wizard", level=3)], xp=900,
-        abilities=sheetscan.Abilities(strength=8, dexterity=14, constitution=12, intelligence=17, wisdom=12, charisma=10),
-        save_proficiencies=["Intelligence", "wis"], skill_proficiencies=["Arcana", "History", "Basket weaving"],
-        skill_expertise=[], ac=12, speed=30, hp=HitPoints(max=17, current=17), attacks=[], resources=[],
-        spellcasting_ability="Intelligence", spells=[], inventory=[], currency=sheetscan.Coins(gp=12),
-        features=["Arcane Recovery"], proficiencies=["Daggers"], personality="", notes="", unreadable=["Wisdom score"],
-    )
-    seen = {}
-
-    class Stream:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-        def get_final_message(self):
-            return type("M", (), {"stop_reason": "end_turn", "parsed_output": scan})()
-
-    class Client:
-        class beta:
-            class messages:
-                @staticmethod
-                def stream(**kw):
-                    seen.update(kw)
-                    return Stream()
-
-    monkeypatch.setattr(sheetscan.anthropic, "Anthropic", lambda: Client())
+    scan_client(monkeypatch)
     client.post("/api/campaigns", json={"name": "Strahd"})
-    r = client.post("/api/campaigns/strahd/characters/from-scan", files={"file": ("ireth.pdf", b"%PDF-1.7 fake")})
-    assert r.status_code == 201
-    body = r.json()
-    sheet = body["sheet"]
-    assert sheet["name"] == "Ireth" and sheet["abilities"]["int"] == 17 and sheet["save_proficiencies"] == ["int", "wis"]
-    assert sheet["skill_proficiencies"] == ["arcana", "history"] and sheet["currency"]["gp"] == 12
-    assert body["derived"]["spell_save_dc"] == 8 + 3 + 2
-    assert body["unreadable"] == ["Wisdom score", "skill: Basket weaving"]
-    assert body["log"][0]["reason"] == "read from ireth.pdf" and body["entity_id"]
-    assert seen["messages"][0]["content"][0]["type"] == "document"
     assert client.post("/api/campaigns/strahd/characters/from-scan",
                        files={"file": ("notes.txt", b"hi")}).status_code == 422
-    assert client.post("/api/campaigns/strahd/characters/from-scan",
-                       files={"file": ("ireth.png", b"png")}).status_code == 409  # same name again
+    r = client.post("/api/campaigns/strahd/characters/from-scan", files={"file": ("ireth.pdf", b"%PDF-1.7 fake")})
+    assert r.status_code == 202
+    job = wait_for(client, r.json()["job"])
+    assert job["state"] == "done" and job["kind"] == "scan", job
+    body = client.get(f"/api/characters/{job['result']['character']}").json()
+    assert body["sheet"]["name"] == "Ireth" and body["derived"]["spell_save_dc"] == 8 + 3 + 2 and body["entity_id"]
+    assert body["log"][0]["reason"] == f"read from ireth.pdf (job {job['id']})"
+    assert [j["id"] for j in client.get("/api/campaigns/strahd/jobs?kind=scan").json()] == [job["id"]]
+
+    # Reading the same sheet again: the name is taken, so it fails, and says why.
+    again = wait_for(client, client.post("/api/campaigns/strahd/characters/from-scan",
+                                         files={"file": ("ireth.png", b"png")}).json()["job"])
+    assert again["state"] == "failed" and "already has a character called Ireth" in again["error"]
+    assert client.post(f"/api/campaigns/strahd/jobs/{again['id']}/retry").status_code == 202

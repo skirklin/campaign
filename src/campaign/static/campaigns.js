@@ -160,18 +160,33 @@ async function askTab(c) {
 // -- party ---------------------------------------------------------------------
 
 async function partyTab(c) {
-  const [party, mine] = await Promise.all([api("GET", `/api/campaigns/${c.slug}/characters`), api("GET", "/api/characters")]);
+  const base = `/api/campaigns/${c.slug}`;
+  const [party, mine, scans] = await Promise.all([
+    api("GET", `${base}/characters`), api("GET", "/api/characters"), api("GET", `${base}/jobs?kind=scan`)]);
+  const cards = h("div.cards");
+  const renderParty = (list) => cards.replaceChildren(
+    list.length === 0 ? h("p.empty", "No characters in this campaign yet.") : "",
+    ...list.map((x) => characterCard(x)));
+  renderParty(party);
+  // Sheets being read from scans: jobs, so they carry on in the background.
+  const jobs = jobList(c, "scan", scans.filter((j) => j.state !== "done" && j.state !== "cancelled"), cards, {
+    anyone: true,  // your own scans, even without edit access; the server checks
+    title: (job) => `Reading ${job.name}`,
+    result: (job) => h("div.job-result",
+      h("p", h("a", { href: `#/characters/${job.result.character}` }, `Open ${job.result.name}`),
+        job.result.unreadable.length ? h("span.muted", ` · some things weren't clear; they're listed in the sheet's notes`) : "")),
+    onFinish: async () => renderParty(await api("GET", `${base}/characters`)),
+  });
   // Your characters elsewhere, which can be copied into this campaign.
   const elsewhere = mine.filter((x) => x.mine && x.campaign.slug !== c.slug);
   const pick = h("select", { "aria-label": "Character to copy" },
     elsewhere.map((x) => h("option", { value: x.id }, `${x.name} (${x.campaign.name})`)));
   return h("div",
-    h("div.cards",
-      party.length === 0 && h("p.empty", "No characters in this campaign yet."),
-      party.map((x) => characterCard(x))),
+    cards,
     h("h2.section-title", "Add a character"),
     newCharacterForm([], c),
-    scanForm(c),
+    scanForm(c, jobs),
+    jobs.el,
     elsewhere.length > 0 && h("form.inline-form", {
       onsubmit: async (e) => {
         e.preventDefault();
@@ -187,28 +202,25 @@ async function partyTab(c) {
   );
 }
 
-// Upload a scan or PDF of a paper sheet; Claude reads it into a new character.
-function scanForm(c) {
+// Upload a scan or PDF of a paper sheet; Claude reads it into a new character, in the background.
+function scanForm(c, jobs) {
   const file = h("input", { type: "file", accept: ".pdf,.png,.jpg,.jpeg,.webp", hidden: true });
   const btn = h("button", { type: "button", onclick: () => file.click() }, "From a scan or PDF…");
   file.addEventListener("change", async () => {
     const fd = new FormData();
     fd.append("file", file.files[0]);
     btn.disabled = true;
-    btn.textContent = "Reading the sheet…";
     try {
-      const r = await api("POST", `/api/campaigns/${c.slug}/characters/from-scan`, fd);
-      if (r.unreadable.length) toast(`Check these, they weren't clear: ${r.unreadable.join("; ")}`);
-      location.hash = `#/characters/${r.id}`;
+      jobs.watch({ id: (await api("POST", `/api/campaigns/${c.slug}/characters/from-scan`, fd)).job });
     } catch (err) {
       toast(err.message, true);
-      btn.disabled = false;
-      btn.textContent = "From a scan or PDF…";
     }
+    btn.disabled = false;
     file.value = "";
   });
   return h("p.inline-form", btn, file,
-    h("span.muted.small", "A photo or PDF of a paper sheet. Claude reads it into a new character you can then correct."));
+    h("span.muted.small", "A photo or PDF of a paper sheet. Claude reads it into a new character you can then "
+      + "correct; it takes a minute or two and carries on if you leave the page."));
 }
 
 // -- sessions & ingest ---------------------------------------------------------
@@ -248,24 +260,20 @@ async function sessionsTab(c) {
   const file = h("input", { type: "file", accept: ".txt,.md,.mp3,.m4a,.wav,.ogg,.flac,.opus,.webm", "aria-label": "Transcript or recording file" });
   const submit = h("button.primary", { type: "submit" }, "Ingest session");
 
-  // Ingests are targets the server works through in the background: they carry on
-  // whether or not this page is open, and survive restarts. Each shows its log here,
-  // kept current by the live event stream.
-  const ingestsEl = h("div.ingests");
-  const panels = new Map();
-  const watch = (ing) => {
-    if (panels.has(ing.id)) return;
-    const panel = ingestPanel(c, ing.id, async (done) => {
-      if (done.state === "done") {
-        toast(`Session ${done.result.session} recorded`);
-        const fresh = await api("GET", `${base}/sessions`);
-        number.value = fresh.next;
-        renderSessions(fresh.sessions);
-      }
-    });
-    panels.set(ing.id, panel);
-    ingestsEl.append(panel.el);
-  };
+  // Ingests are jobs the server works through in the background: they carry on
+  // whether or not this page is open, and survive restarts.
+  const jobs = jobList(c, "ingest", data.ingests, list, {
+    title: (job) => `Session ${job.session}: ${job.name}`,
+    result: (job) => h("div.job-result",
+      h("h3", `Session ${job.result.session}: ${job.result.title || "(untitled)"}`),
+      h("p.muted", `${job.result.facts} facts and ${job.result.journal_entries} journal ${job.result.journal_entries === 1 ? "entry" : "entries"} recorded.`)),
+    onFinish: async (job) => {
+      toast(`Session ${job.result.session} recorded`);
+      const fresh = await api("GET", `${base}/sessions`);
+      number.value = fresh.next;
+      renderSessions(fresh.sessions);
+    },
+  });
 
   const form = h("form.card.ingest-form", {
     onsubmit: async (e) => {
@@ -280,7 +288,7 @@ async function sessionsTab(c) {
         text.value = "";
         file.value = "";
         number.value = r.session + 1;
-        watch({ id: r.ingest });
+        jobs.watch({ id: r.job });
       } catch (err) {
         toast(err.message, true);
       }
@@ -295,64 +303,87 @@ async function sessionsTab(c) {
       + "and carries on in the background: you can close this page.")),
   );
 
-  data.ingests.forEach(watch);
-  live(c.slug, list, {
-    ingest: (ing) => {
-      if (!panels.has(ing.id) && (ing.state === "wanted" || ing.state === "running")) watch(ing);  // started elsewhere
-      panels.get(ing.id)?.update(ing);
-    },
-  });
-  return h("div", canEdit(c) && form, ingestsEl, h("h2.section-title", "Sessions"), list);
+  return h("div", canEdit(c) && form, jobs.el, h("h2.section-title", "Sessions"), list);
 }
 
-const INGEST_STATES = { wanted: "Queued", running: "Running", done: "Done", failed: "Failed", cancelled: "Cancelled" };
+// -- jobs ------------------------------------------------------------------------
 
-// One ingest's card: its state, Retry/Cancel, and its log. It loads the whole
+const JOB_STATES = { wanted: "Queued", running: "Running", done: "Done", failed: "Failed", cancelled: "Cancelled" };
+
+// The jobs of one kind, as cards: the ones in `initial`, ones this page starts
+// (watch), and ones started elsewhere that the live stream reports. `owner` is
+// an element of the tab, so the stream closes when the tab goes away.
+// opts: title(job), result(job) -> element, onFinish(job), anyone (whether
+// people who can't edit may retry and cancel: their own jobs, say).
+function jobList(c, kind, initial, owner, opts) {
+  const el = h("div.jobs");
+  const panels = new Map();
+  const watch = (job) => {
+    if (panels.has(job.id)) return;
+    const panel = jobPanel(c, job.id, opts);
+    panels.set(job.id, panel);
+    el.append(panel.el);
+  };
+  initial.forEach(watch);
+  live(c.slug, owner, {
+    job: (job) => {
+      if (job.kind !== kind) return;
+      if (!panels.has(job.id) && (job.state === "wanted" || job.state === "running")) watch(job);  // started elsewhere
+      panels.get(job.id)?.update(job);
+    },
+  });
+  return { el, watch };
+}
+
+// One job's card: its state, Retry/Cancel, and its log. It loads the whole
 // log once; after that, update() applies what the live stream sends (new
 // lines, and the last line again while it's still growing).
-function ingestPanel(c, id, onFinish) {
+function jobPanel(c, id, opts) {
   const base = `/api/campaigns/${c.slug}`;
   const lines = new Map();
   const out = h("div.job-log");
   const statusEl = h("span.job-status.running", "Queued");
   const actions = h("span.job-actions");
-  const title = h("strong", "Ingest");
+  const title = h("strong", "…");
   const result = h("div");
   const el = h("div.job", h("div.job-head", title, statusEl, actions), out, result);
   let finished = false;
-  const act = (label, method, path, cls = "") => canEdit(c) && h(`button${cls}`, {
-    onclick: async () => update(await api(method, `${base}/ingests/${id}${path}`) || { id, state: "cancelled", log: [] }),
+  const act = (label, method, path, cls = "") => (canEdit(c) || opts.anyone) && h(`button${cls}`, {
+    onclick: async () => {
+      try {
+        update(await api(method, `${base}/jobs/${id}${path}`) || { id, state: "cancelled", log: [] });
+      } catch (err) {
+        toast(err.message, true);
+      }
+    },
   }, label);
-  const update = (ing) => {
-    if (ing.session) title.textContent = `Session ${ing.session}: ${ing.input_name}`;
-    if (ing.log?.length && ing.log[0].seq === 0 && lines.size) {  // a retry starts the log over
+  const update = (job) => {
+    if (job.name) title.textContent = opts.title(job);
+    if (job.log?.length && job.log[0].seq === 0 && lines.size) {  // a retry starts the log over
       lines.clear();
       out.replaceChildren();
     }
-    for (const entry of ing.log || []) {
+    for (const entry of job.log || []) {
       const line = lines.get(entry.seq) || out.appendChild(h(`div.log-${entry.kind}`));
       lines.set(entry.seq, line);
       line.textContent = entry.text;
     }
     out.scrollTop = out.scrollHeight;
-    const waiting = ing.state === "wanted" && ing.retry_at;
-    statusEl.textContent = waiting ? `Retrying at ${new Date(ing.retry_at * 1000).toLocaleTimeString()} (${ing.error})`
-      : ing.state === "failed" ? `Failed: ${ing.error}` : INGEST_STATES[ing.state];
-    statusEl.className = `job-status ${ing.state === "wanted" ? "running" : ing.state}`;
+    const waiting = job.state === "wanted" && job.retry_at;
+    statusEl.textContent = waiting ? `Retrying at ${new Date(job.retry_at * 1000).toLocaleTimeString()} (${job.error})`
+      : job.state === "failed" ? `Failed: ${job.error}` : JOB_STATES[job.state];
+    statusEl.className = `job-status ${job.state === "wanted" ? "running" : job.state}`;
     actions.replaceChildren(
-      ing.state === "failed" || ing.state === "cancelled" ? act("Retry", "POST", "/retry") : "",
-      ing.state === "wanted" || ing.state === "running" ? act("Cancel", "DELETE", "", ".danger") : "",
+      job.state === "failed" || job.state === "cancelled" ? act("Retry", "POST", "/retry") : "",
+      job.state === "wanted" || job.state === "running" ? act("Cancel", "DELETE", "", ".danger") : "",
     );
-    if (ing.state === "done" && ing.result && !finished) {
+    if (job.state === "done" && job.result && !finished) {
       finished = true;
-      result.replaceChildren(h("div.job-result",
-        h("h3", `Session ${ing.result.session}: ${ing.result.title || "(untitled)"}`),
-        h("p.muted", `${ing.result.facts} facts and ${ing.result.journal_entries} journal ${ing.result.journal_entries === 1 ? "entry" : "entries"} recorded.`),
-      ));
-      onFinish(ing);
+      result.replaceChildren(opts.result(job));
+      opts.onFinish?.(job);
     }
   };
-  api("GET", `${base}/ingests/${id}`).then(update, (err) => (statusEl.textContent = err.message));
+  api("GET", `${base}/jobs/${id}`).then(update, (err) => (statusEl.textContent = err.message));
   return { el, update };
 }
 

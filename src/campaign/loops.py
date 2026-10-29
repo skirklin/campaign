@@ -1,8 +1,9 @@
 """Background loops that converge the database toward what it asks for.
 
-Digests and session ingests are both declared as targets in the database
-and carried out by a loop that keeps no state of its own, so a restart or
-a deploy just means the next pass starts from the database again. While a
+Digests and jobs (session ingests, sheet scans) are declared as targets in
+the database and carried out by a loop that keeps no state of its own, so a
+restart or a deploy just means the next pass starts from the database
+again. While a
 rolling deploy has two servers up, a lease makes sure only one runs each
 loop; it's handed over on shutdown and expires if a server dies holding it.
 """

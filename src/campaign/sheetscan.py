@@ -12,7 +12,7 @@ from __future__ import annotations
 import base64
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import anthropic
 from pydantic import BaseModel, ConfigDict
@@ -141,12 +141,23 @@ class ScanError(Exception):
     pass
 
 
-def read_sheet(data: bytes, filename: str, client: Any = None, model: str = MODEL) -> tuple[CharacterSheet, list[str]]:
+def check_upload(data: bytes, filename: str) -> str:
+    """The upload's media type, or ScanError if it isn't something Claude can read as a sheet."""
     media_type = MEDIA_TYPES.get(Path(filename).suffix.lower())
     if media_type is None:
         raise ScanError("upload a PDF or a photo (.png, .jpg, .webp) of the sheet")
     if len(data) > MAX_BYTES:
         raise ScanError("that file is too big; keep scans under 20 MB")
+    return media_type
+
+
+def read_sheet(
+    data: bytes, filename: str, client: Any = None, model: str = MODEL,
+    check: Callable[[], None] | None = None, on_thinking: Callable[[str], None] | None = None,
+) -> tuple[CharacterSheet, list[str]]:
+    """Read the sheet. `check` is called as the answer streams in and may raise to stop;
+    `on_thinking` gets Claude's thinking as it goes, to show progress."""
+    media_type = check_upload(data, filename)
     block_type = "document" if media_type == "application/pdf" else "image"
     source = {"type": "base64", "media_type": media_type, "data": base64.standard_b64encode(data).decode()}
     client = client or anthropic.Anthropic()
@@ -163,6 +174,12 @@ def read_sheet(data: bytes, filename: str, client: Any = None, model: str = MODE
         output_config={"effort": "medium"},
         **fallback_params(model),
     ) as stream:
+        for event in stream:
+            if check:
+                check()
+            delta = getattr(event, "delta", None)
+            if on_thinking and getattr(delta, "type", None) == "thinking_delta":
+                on_thinking(delta.thinking)
         msg = stream.get_final_message()
     if msg.stop_reason == "refusal":
         raise ScanError("Claude declined to read this file")

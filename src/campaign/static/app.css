@@ -292,7 +292,7 @@ a.card:hover { border-color: var(--accent); }
 .job-head { display: flex; gap: .6rem; align-items: center; padding: .5rem .8rem; background: var(--surface-2); }
 .job-head > strong { margin-right: auto; }
 .job-actions { display: flex; gap: .4rem; }
-.ingests .job + .job { margin-top: .6rem; }
+.jobs .job + .job { margin-top: .6rem; }
 .job-status.running { color: var(--warn); }
 .job-status.running::after { content: " …"; }
 .job-status.done { color: var(--ok); }
