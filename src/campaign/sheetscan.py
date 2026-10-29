@@ -109,8 +109,8 @@ prints into the printed_ fields, which are only used to check your parts:
   sets it, like Gauntlets of Ogre Power at 19). Amounts can reference the
   sheet: "prof", "level", "2*level", "cha".
 - Statuses are what the character switches on in play: Rage for a
-  barbarian (resource "Rage", spent when it starts), and Concentration
-  for anyone who casts concentration spells. A bonus that only counts
+  barbarian (resource "Rage", spent when it starts, duration 10 rounds),
+  and Concentration for anyone who casts concentration spells. A bonus that only counts
   during one names it in during: Rage's damage is a "damage:str" bonus
   during "Rage".
 - hp.max is the printed maximum; the hit-dice part is worked out from it.

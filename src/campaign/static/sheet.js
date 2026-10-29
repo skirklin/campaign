@@ -693,7 +693,8 @@ export class SheetView {
     const list = this.sheet.statuses;
     return h("div.rows",
       list.length === 0 && h("p.empty", "Rage, Concentration, Bless… switched on in play."),
-      list.map((st, i) => h("div.row.status-row", { style: "grid-template-columns:auto 1fr 1fr 8rem auto" },
+      list.length > 0 && h("p.muted.small", "Rounds: how long it lasts (Rage, Bless: 10), shown in combat; 0 if open-ended."),
+      list.map((st, i) => h("div.row.status-row", { style: "grid-template-columns:auto 1fr 1fr 8rem 4.5rem auto" },
         h("input", { type: "checkbox", checked: st.active, title: "On now", "aria-label": `${st.name || "status"} on`,
           onchange: (e) => { st.active = e.target.checked; this.changed(`${st.name || "status"} ${st.active ? "on" : "off"}`); } }),
         this.field(`statuses.${i}.name`, { placeholder: "Status", reason: "status", after: () => this.refresh("bonuses") }),
@@ -703,6 +704,8 @@ export class SheetView {
           h("option", { value: "" }, "spends nothing"),
           [...new Set([...this.sheet.resources.map((r) => r.name), st.resource].filter(Boolean))]
             .map((name) => h("option", { value: name }, `spends ${name}`))),
+        this.field(`statuses.${i}.duration`, { type: "number", min: 0, placeholder: "rounds", label: undefined, reason: "status duration",
+          cls: "status-rounds" }),
         h("button.icon", { title: "Remove status", "aria-label": "Remove status",
           onclick: () => { list.splice(i, 1); this.changed("removed status"); this.refresh("statuses"); this.refresh("bonuses"); } }, "×"),
       )),

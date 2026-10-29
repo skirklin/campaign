@@ -329,7 +329,8 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         applies sometimes (Sneak Attack, "vs undead", Charge) is a damage
         part with situational set to when it applies; it's added when
         rolling, not in the attack's damage (spends names a resource it
-        uses up, like a smite's slot). Choices made before an attack roll
+        uses up, like a smite's slot). A status's duration is the rounds
+        it lasts (Rage 10). Choices made before an attack roll
         are attack_options {name, applies_to, advantage, to_hit, damage,
         note}: Reckless Attack applies_to ["str", "melee"] with advantage
         "advantage" and the note that attacks against you have advantage;
@@ -385,7 +386,8 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         applies sometimes (Sneak Attack, "vs undead", Charge) is a damage
         part with situational set to when it applies; it's added when
         rolling, not in the attack's damage (spends names a resource it
-        uses up, like a smite's slot). Choices made before an attack roll
+        uses up, like a smite's slot). A status's duration is the rounds
+        it lasts (Rage 10). Choices made before an attack roll
         are attack_options {name, applies_to, advantage, to_hit, damage,
         note}: Reckless Attack applies_to ["str", "melee"] with advantage
         "advantage" and the note that attacks against you have advantage;

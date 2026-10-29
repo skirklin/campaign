@@ -52,12 +52,16 @@ export function h(spec, attrs = {}, ...children) {
 }
 
 let toastTimer;
-export function toast(msg, isError = false) {
+// A message at the bottom of the screen. With `action` ({label, run}), it carries a button
+// (Undo) and stays a little longer.
+export function toast(msg, isError = false, action = null) {
   const el = document.getElementById("toast");
-  el.textContent = msg;
-  el.className = "show" + (isError ? " error" : "");
+  el.replaceChildren(h("span", msg), action && h("button.toast-action", {
+    onclick: () => { el.className = ""; action.run(); },
+  }, action.label));
+  el.className = "show" + (isError ? " error" : "") + (action ? " has-action" : "");
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (el.className = ""), isError ? 6000 : 2500);
+  toastTimer = setTimeout(() => (el.className = ""), isError ? 6000 : action ? 5000 : 2500);
 }
 
 export const sign = (n) => (n >= 0 ? `+${n}` : `${n}`);

@@ -43,6 +43,9 @@ export class PlayView extends SheetView {
     this.screenEl = h("div.roll-screen", { hidden: true, role: "dialog", "aria-modal": "true" });
     const el = h("div.play", this.head, this.panel, this.screenEl, this.tabbar);
     this.el = el;
+    this.shadow = structuredClone(this.sheet);  // the sheet as it was before the latest change
+    this.undoStack = [];
+    this.combat = loadCombat(this.id);
     this.rerender();
     keepAwake();
     return el;
@@ -67,12 +70,43 @@ export class PlayView extends SheetView {
     this.renderTabs();
   }
 
+  // -- undo -------------------------------------------------------------------
+  // Every change made here can be taken back: the sheet as it was before is kept,
+  // and undoing saves it again. The latest change is offered as an Undo on the toast.
+
+  changed(reason) {
+    if (!this.undoing) this.remember(reason, this.shadow);
+    this.shadow = structuredClone(this.sheet);
+    super.changed(reason);
+  }
+
+  remember(reason, before) {
+    this.undoStack.push({ reason, sheet: before });
+    if (this.undoStack.length > 30) this.undoStack.shift();
+    toast(capFirst(reason), false, { label: "Undo", run: () => this.undo() });
+  }
+
+  undo() {
+    const last = this.undoStack.pop();
+    if (!last) return;
+    this.sheet = last.sheet;
+    this.undoing = true;
+    this.changed(`undid ${last.reason}`);
+    this.undoing = false;
+    this.rerender();
+    const more = this.undoStack.length > 0;
+    toast(`Undid ${last.reason}`, false, more ? { label: "Undo more", run: () => this.undo() } : null);
+  }
+
   // HP and rests go through the server; the answer replaces the sheet in place.
-  async action(method, url, body) {
+  async action(method, url, body, reason) {
     await this.flush();
+    const before = structuredClone(this.sheet);
     try {
       const r = await api(method, url, body);
       Object.assign(this, { sheet: r.sheet, derived: r.derived, log: r.log, files: r.files || this.files });
+      this.shadow = structuredClone(this.sheet);
+      if (reason) this.remember(reason, before);
       this.rerender();
     } catch (err) {
       toast(err.message, true);
@@ -114,15 +148,21 @@ export class PlayView extends SheetView {
         vital("Init", sign(n(d.initiative)), () => this.roll("Initiative", d.initiative)),
         vital("Speed", n(d.speed)),
       ),
-      s.statuses.length > 0 && h("div.play-statuses",
-        s.statuses.map((st) => h("button.chip.status", {
-          className: `chip status${st.active ? " on" : ""}`, "aria-pressed": String(st.active), disabled: !this.canEdit,
-          title: st.active ? `End ${st.name}` : `Start ${st.name}${st.resource ? ` (spends a use of ${st.resource})` : ""}`,
-          onclick: () => this.toggleStatus(st),
-        }, st.name, st.active && st.note ? h("small", ` ${st.note}`) : ""))),
+      this.combat && this.combatBar(),
+      s.statuses.some((st) => st.active) && h("div.play-statuses",
+        s.statuses.filter((st) => st.active).map((st) => h("button.chip.status.on", {
+          title: `${st.name} is on: see it on Main`, onclick: () => this.showTab("main"),
+        }, st.name, this.statusClock(st) && h("small", ` ${this.statusClock(st)}`)))),
       s.conditions.length > 0 && h("div.play-conditions",
         s.conditions.map((c) => h("button.chip.condition", { onclick: () => this.conditionSheet(), disabled: !this.canEdit }, c))),
     ].filter(Boolean));
+  }
+
+  showTab(key) {
+    this.tab = key;
+    this.renderPanel();
+    this.renderTabs();
+    window.scrollTo({ top: 0 });
   }
 
   renderTabs() {
@@ -145,8 +185,14 @@ export class PlayView extends SheetView {
     const s = this.sheet, d = this.derived;
     const dying = s.hp.current === 0 || s.death_saves.successes > 0 || s.death_saves.failures > 0;
     const otherResources = s.resources.filter((r) => !isSlot(r));
+    const combat = this.combat;
     return [
       dying && this.deathSaves(),
+      this.canEdit && !combat && h("button.start-combat", { onclick: () => this.startCombat() }, "⚔ Start combat"),
+      combat && this.turnEconomy(),
+      combat && this.statusCards(),
+      combat && this.attacksBlock(),
+      combat && otherResources.length > 0 && block("Resources", otherResources.map((r) => this.resource(r))),
       h("div.play-abilities", ABILITIES.map((a) => h("button.play-ability", {
         onclick: () => this.roll(`${ABILITY_NAMES[a]} check`, d.modifiers[a]), "aria-label": `${ABILITY_NAMES[a]} check ${sign(d.modifiers[a])}`,
       },
@@ -158,11 +204,9 @@ export class PlayView extends SheetView {
         mini("Passive Perc.", n(d.passive_perception)),
         d.spell_save_dc !== undefined && mini("Spell DC", n(d.spell_save_dc)),
         d.spell_attack !== undefined && mini("Spell atk", sign(n(d.spell_attack)), () => this.roll("Spell attack", d.spell_attack))),
-      s.attacks.length > 0 && block("Attacks", s.attacks.map((a, i) => h("button.play-row.play-attack", { onclick: () => this.attack(i) },
-        h("span.row-main", h("strong", a.name || "Attack"), a.notes && h("small.muted", a.notes)),
-        h("span.badge-num", sign(n(d.attacks[i].to_hit))),
-        d.attacks[i].text && h("span.row-side", d.attacks[i].text)))),
-      otherResources.length > 0 && block("Resources", otherResources.map((r) => this.resource(r))),
+      !combat && this.attacksBlock(),
+      !combat && this.statusCards(),
+      !combat && otherResources.length > 0 && block("Resources", otherResources.map((r) => this.resource(r))),
       block("Saving throws", h("div.play-saves", ABILITIES.map((a) => h("button.play-save", {
         className: `play-save${s.save_proficiencies.includes(a) ? " prof" : ""}`,
         onclick: () => this.roll(`${ABILITY_NAMES[a]} save`, d.saves[a]),
@@ -172,6 +216,121 @@ export class PlayView extends SheetView {
         h("button", { onclick: () => this.rest(false) }, "Short rest"),
         h("button", { onclick: () => this.rest(true) }, "Long rest")),
     ];
+  }
+
+  attacksBlock() {
+    const s = this.sheet, d = this.derived;
+    return s.attacks.length > 0 && block("Attacks", s.attacks.map((a, i) => h("button.play-row.play-attack", { onclick: () => this.attack(i) },
+      h("span.row-main", h("strong", a.name || "Attack"), a.notes && h("small.muted", a.notes)),
+      h("span.badge-num", sign(n(d.attacks[i].to_hit))),
+      d.attacks[i].text && h("span.row-side", d.attacks[i].text))));
+  }
+
+  // -- statuses -----------------------------------------------------------------
+  // Each is a card: off, a button to start it (saying what it spends); on, what it's
+  // doing, how long it has run in combat, and End.
+
+  statusCards() {
+    const list = this.sheet.statuses;
+    if (!list.length) return null;
+    return block("Statuses", h("div.status-cards", list.map((st) => {
+      const r = this.statusResource(st);
+      const left = r && `${r.max - r.used}/${r.max} left`;
+      const effects = this.statusEffects(st);
+      if (!st.active) {
+        return h("button.choice.status-card", { disabled: !this.canEdit, onclick: () => this.toggleStatus(st) },
+          h("span.choice-name", `Start ${st.name}`),
+          h("span.choice-detail", [r && `spends 1 ${r.name} (${left})`, effects, st.duration && `${st.duration} rounds`].filter(Boolean).join(" · ")));
+      }
+      return h("div.status-card.on",
+        h("div.status-main",
+          h("span.choice-name", st.name, st.note && h("small", ` ${st.note}`)),
+          h("span.choice-detail", [this.statusClock(st), effects, left].filter(Boolean).join(" · "))),
+        this.canEdit && h("button", { onclick: () => this.toggleStatus(st) }, "End"));
+    })));
+  }
+
+  statusResource(st) {
+    return st.resource && this.sheet.resources.find((x) => x.name.toLowerCase() === st.resource.toLowerCase());
+  }
+
+  // "+2 STR damage, +1 AC" from the bonuses that count while it's on.
+  statusEffects(st) {
+    const name = st.name.toLowerCase();
+    const bonuses = [...this.sheet.bonuses, ...this.sheet.inventory.filter((it) => it.equipped).flatMap((it) => it.bonuses || [])];
+    return bonuses.filter((b) => b.during && b.during.toLowerCase() === name && b.active)
+      .map((b) => `${typeof b.amount === "number" ? sign(b.amount) : `+${b.amount}`} ${targetLabel(b.target)}`).join(", ");
+  }
+
+  // "round 3 of 10" in combat, for a status started this fight; past its duration it
+  // says so, and stays on until it's ended.
+  statusClock(st) {
+    const since = this.combat?.since?.[st.name];
+    if (!st.active || since === undefined) return "";
+    const round = this.combat.round - since + 1;
+    if (!st.duration) return `round ${round}`;
+    return round > st.duration ? `round ${round} · lasts ${st.duration}` : `round ${round} of ${st.duration}`;
+  }
+
+  // -- combat -------------------------------------------------------------------
+  // A layout for the fight, and a scratch pad: a round tally, the turn's actions to tick
+  // off, how long statuses have run. It decides nothing: it doesn't roll, end statuses
+  // or limit what can be used. Kept on this device (combat:<id>), so a reload carries on.
+
+  startCombat() {
+    this.combat = { round: 1, used: {}, moved: 0, since: {} };
+    for (const st of this.sheet.statuses) if (st.active) this.combat.since[st.name] = 1;
+    saveCombat(this.id, this.combat);
+    this.rerender();
+  }
+
+  // The next round: the turn's ticks are cleared, like rubbing out pencil marks.
+  nextTurn() {
+    const c = this.combat;
+    c.round += 1;
+    c.used = {};
+    c.moved = 0;
+    saveCombat(this.id, c);
+    this.rerender();
+  }
+
+  endCombat() {
+    this.combat = null;
+    saveCombat(this.id, null);
+    this.rerender();
+  }
+
+  combatBar() {
+    const c = this.combat;
+    return h("div.combat-bar",
+      h("span.combat-round", "⚔ Round ", h("strong", c.round)),
+      this.canEdit && h("button.primary", { onclick: () => this.nextTurn() }, "Next turn ▸"),
+      this.canEdit && h("button", { onclick: () => this.endCombat() }, "End"));
+  }
+
+  // Action, bonus action, reaction and movement: tap to mark used; Next turn clears them.
+  turnEconomy() {
+    const c = this.combat;
+    const speed = n(this.derived.speed);
+    const mark = (key, label) => h("button.turn-slot", {
+      className: `turn-slot${c.used[key] ? " used" : ""}`, "aria-pressed": String(!!c.used[key]),
+      onclick: () => { c.used[key] = !c.used[key]; saveCombat(this.id, c); this.renderPanel(); },
+    }, label);
+    const left = Math.max(0, speed - c.moved);
+    return h("div.turn-economy",
+      mark("action", "Action"), mark("bonus", "Bonus"), mark("reaction", "Reaction"),
+      h("button.turn-slot", { className: `turn-slot${left === 0 ? " used" : ""}`, onclick: () => this.moveSheet() },
+        "Move", h("small", ` ${left}/${speed} ft`)));
+  }
+
+  moveSheet() {
+    const c = this.combat;
+    let amount = 0;
+    const dialog = bottomSheet(`Moved this turn: ${c.moved} ft`,
+      ...keypad((v) => (amount = v)),
+      h("div.hp-buttons",
+        h("button", { onclick: () => { c.moved = 0; saveCombat(this.id, c); dialog.close(); this.renderPanel(); } }, "Reset"),
+        h("button.primary", { onclick: () => { c.moved += amount; saveCombat(this.id, c); dialog.close(); this.renderPanel(); } }, "Moved")));
   }
 
   skillsTab() {
@@ -253,6 +412,9 @@ export class PlayView extends SheetView {
       beforeMove: () => this.flush(),
       onCharacter: (r) => {
         Object.assign(this, { sheet: r.sheet, derived: r.derived, log: r.log, files: r.files || this.files });
+        // The stash changed too, which undo can't take back: start over from here.
+        this.shadow = structuredClone(this.sheet);
+        this.undoStack = [];
         this.rerender();  // what's equipped changes AC and the rest
       },
     }));
@@ -367,8 +529,8 @@ export class PlayView extends SheetView {
       h("p.hp-summary", h("strong", hp.current), ` / ${n(this.derived.hp_max)}`, hp.temp ? h("span.hp-temp", ` +${hp.temp} temp`) : ""),
       ...keypad((n) => (amount = n)),
       h("div.hp-buttons",
-        h("button.danger-solid", { onclick: go((n) => this.action("POST", `/api/characters/${this.id}/hp`, { delta: -n })) }, "Damage"),
-        h("button.ok-solid", { onclick: go((n) => this.action("POST", `/api/characters/${this.id}/hp`, { delta: n })) }, "Heal"),
+        h("button.danger-solid", { onclick: go((n) => this.action("POST", `/api/characters/${this.id}/hp`, { delta: -n }, `${n} damage`)) }, "Damage"),
+        h("button.ok-solid", { onclick: go((n) => this.action("POST", `/api/characters/${this.id}/hp`, { delta: n }, `healed ${n}`)) }, "Heal"),
         h("button", { onclick: go((n) => { this.sheet.hp.temp = n; this.changed(`temp hp ${n}`); this.rerender(); }) }, "Set temp")),
     );
   }
@@ -409,6 +571,11 @@ export class PlayView extends SheetView {
       }
     }
     st.active = !st.active;
+    if (this.combat) {
+      if (st.active) this.combat.since[st.name] = this.combat.round;
+      else delete this.combat.since[st.name];
+      saveCombat(this.id, this.combat);
+    }
     this.changed(`${st.name} ${st.active ? "on" : "off"}`);
     this.renderHead();
     this.renderPanel();
@@ -434,7 +601,7 @@ export class PlayView extends SheetView {
   rest(long) {
     const what = long ? "Long rest: restore HP and everything that recharges on a short or long rest?" : "Short rest: restore everything that recharges on a short rest?";
     if (!confirm(what)) return;
-    this.action("POST", `/api/characters/${this.id}/rest`, { long });
+    this.action("POST", `/api/characters/${this.id}/rest`, { long }, long ? "long rest" : "short rest");
   }
 
   // -- dice -------------------------------------------------------------------
@@ -778,6 +945,35 @@ export class PlayView extends SheetView {
 // A computed number: {total, parts} from the server, or a plain number.
 const n = (v) => (v && typeof v === "object" ? v.total : v ?? 0);
 const partsText = (v) => v.parts.map((p) => `${p.label} ${sign(p.value)}`).join(" · ");
+const capFirst = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+
+// "damage:str" -> "STR damage", "save" -> "saves", "ac" -> "AC".
+function targetLabel(t) {
+  const [what, which] = t.split(":");
+  const names = { ac: "AC", hp_max: "max HP", speed: "speed", initiative: "initiative", attack: "to hit", damage: "damage",
+    save: "saves", skill: "skills", check: "checks", passive_perception: "passive Perception", spell_dc: "spell DC",
+    spell_attack: "spell attack", score: "", score_set: "" };
+  const base = names[what] ?? what;
+  return which ? `${which.length <= 3 ? which.toUpperCase() : which} ${base}`.trim() : base;
+}
+
+function loadCombat(id) {
+  try {
+    return JSON.parse(localStorage.getItem(`combat:${id}`));
+  } catch {
+    return null;
+  }
+}
+
+function saveCombat(id, state) {
+  try {
+    if (state) localStorage.setItem(`combat:${id}`, JSON.stringify(state));
+    else localStorage.removeItem(`combat:${id}`);
+  } catch {
+    // Storage blocked: combat still works until the page is left.
+  }
+}
+
 const cap = (s) => s.replace(/\b\w/g, (c) => c.toUpperCase());
 function rollList(rolls, limit) {
   if (!rolls.length) return h("p.empty", "No rolls yet.");

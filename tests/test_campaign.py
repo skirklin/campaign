@@ -300,3 +300,11 @@ def test_attack_options_apply_to_the_attacks_they_name():
     assert d["attacks"][2]["damage"][1]["spends"] == "Thunderous Shot"
     with pytest.raises(ValueError):
         CharacterSheet(name="X", attack_options=[{"name": "Odd", "advantage": "always"}])
+
+
+def test_statuses_can_say_how_many_rounds_they_last():
+    sheet = CharacterSheet(name="Cid", statuses=[{"name": "Rage", "resource": "Rage", "duration": 10}])
+    assert sheet.statuses[0].duration == 10
+    assert CharacterSheet(name="X", statuses=[{"name": "Bless"}]).statuses[0].duration == 0  # open-ended
+    with pytest.raises(ValueError):
+        CharacterSheet(name="X", statuses=[{"name": "Odd", "duration": -1}])

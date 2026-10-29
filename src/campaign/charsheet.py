@@ -107,6 +107,7 @@ class Status(Model):
     active: bool = False
     note: str = ""  # what it's on: the spell being concentrated on
     resource: str = ""  # a resource's name, spent when switched on
+    duration: int = Field(default=0, ge=0)  # rounds it lasts (Rage, Bless: 10), shown in combat; 0 if open-ended
 
 
 class HitPoints(Model):

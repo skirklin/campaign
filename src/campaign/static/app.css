@@ -169,7 +169,7 @@ a.card:hover { border-color: var(--accent); }
   max-width: min(90vw, 36rem);
   padding: .6rem 1rem; border-radius: 8px;
   background: var(--text); color: var(--bg);
-  transition: transform .2s, opacity .2s, visibility .2s; z-index: 20;
+  transition: transform .2s, opacity .2s, visibility .2s; z-index: 40;
 }
 #toast.show { transform: translate(-50%, 0); opacity: 1; visibility: visible; }
 #toast.error { background: var(--danger); color: #fff; }
@@ -791,3 +791,41 @@ button.choice.on .choice-name::after { content: " ✓"; color: var(--accent); }
 .extras button.choice { padding: .5rem .7rem; }
 .extras .choice-detail { font-size: .8rem; }
 .signed-in { display: flex; align-items: center; justify-content: space-between; gap: .8rem; flex-wrap: wrap; }
+
+/* -- undo on the toast ---------------------------------------------------------------- */
+#toast.has-action { display: flex; align-items: center; gap: .8rem; pointer-events: auto; }
+.toast-action {
+  padding: .35rem .8rem; border-radius: 6px; font-weight: 700;
+  background: transparent; color: inherit; border: 1px solid currentColor;
+}
+/* Above the Play view's tab bar and the roll screen's buttons, not on them. */
+body:has(.play) #toast { bottom: calc(4.6rem + env(safe-area-inset-bottom)); }
+
+/* -- combat mode ---------------------------------------------------------------------- */
+button.start-combat {
+  width: 100%; padding: .8rem; font-size: 1.05rem; font-weight: 600; border-radius: 12px;
+  border: 2px dashed var(--accent); color: var(--accent); background: var(--surface);
+}
+.combat-bar { display: flex; align-items: center; gap: .5rem; }
+.combat-round { flex: 1; font-size: 1rem; }
+.combat-round strong { font: 700 1.3rem var(--serif); }
+.combat-bar button { padding: .5rem .9rem; border-radius: 10px; font-weight: 600; }
+.turn-economy { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .4rem; }
+button.turn-slot {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  min-height: 3.2rem; padding: .4rem .2rem; border-radius: 10px; font-weight: 600; white-space: normal;
+  background: var(--surface); border: 2px solid var(--accent); color: var(--text);
+}
+button.turn-slot small { font-weight: 400; font-size: .75rem; color: var(--muted); }
+button.turn-slot.used { border-color: var(--border); color: var(--muted); background: var(--surface-2); text-decoration: line-through; }
+button.turn-slot.used small { text-decoration: none; }
+
+.status-cards { display: flex; flex-direction: column; gap: .45rem; }
+button.status-card { border-style: dashed; }
+.status-card.on {
+  display: flex; align-items: center; gap: .6rem; padding: .6rem .8rem; border-radius: 12px;
+  border: 2px solid var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+}
+.status-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.status-card.on .choice-name::before { content: "● "; color: var(--accent); }
+.status-card.on button { padding: .5rem .9rem; border-radius: 10px; }
