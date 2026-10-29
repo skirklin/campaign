@@ -499,6 +499,85 @@ def pending_calls(root: DNode | None) -> int:
     return 0 if root is None else sum(1 for n in root.walk() if n.output is None)
 
 
+# -- cost ------------------------------------------------------------------------------
+
+# Dollars per million tokens (input, output). A model not listed gets no dollar figure.
+PRICES = {
+    "claude-opus-5-5": (4.00, 20.00),
+    "claude-sonnet-5-5": (2.00, 10.00),
+    "claude-haiku-5-5": (0.10, 0.50),
+}
+
+# Guesses for estimating before anything has been digested with a model. Once
+# enough sections have been, their measured ratios replace these.
+CHARS_PER_TOKEN = 3.5
+LEAF_OVERHEAD = 1500  # system prompt + output schema, in tokens
+LEAF_OUT_PER_IN = 0.5  # thinking + summary + entities, per input token
+BRANCH_OVERHEAD = 1200
+BRANCH_OUT_PER_IN = 0.3
+VISIBLE_SHARE = 0.5  # of a node's output tokens, how much is the summary/entities its parent reads
+MIN_SAMPLES = 5
+
+
+def cost(model: str, input_tokens: int, output_tokens: int) -> float | None:
+    price = PRICES.get(model)
+    if price is None:
+        return None
+    return (input_tokens * price[0] + output_tokens * price[1]) / 1_000_000
+
+
+def spent(usage: list[dict[str, Any]]) -> float | None:
+    """Dollars for a source's digested nodes, from Store.digest_usage."""
+    costs = [cost(u["model"], u["input_tokens"], u["output_tokens"]) for u in usage]
+    return None if None in costs else sum(c for c in costs if c is not None)
+
+
+def estimate(store: Store, root: DNode | None, model: str = MODEL) -> dict[str, Any]:
+    """Roughly what digesting the uncached part of a planned tree will cost.
+
+    A leaf's input is its text; a branch's input is its children's summaries
+    and entities, which for children not yet digested are themselves guesses.
+    Ratios come from earlier digests with the same model when there are
+    enough of them, else from the defaults above. Effort level and how much
+    a section mentions move the real number either way.
+    """
+    history = store.digest_history(model)
+    leaves = [h for h in history if h["kind"] == "leaf" and h["chars"]]
+    branches = [h for h in history if h["kind"] == "branch"]
+    if len(leaves) >= MIN_SAMPLES:
+        leaf_in = lambda chars: chars * sum(h["input_tokens"] for h in leaves) / sum(h["chars"] for h in leaves)
+        leaf_ratio = sum(h["output_tokens"] for h in leaves) / sum(h["input_tokens"] for h in leaves)
+    else:
+        leaf_in = lambda chars: LEAF_OVERHEAD + chars / CHARS_PER_TOKEN
+        leaf_ratio = LEAF_OUT_PER_IN
+    branch_ratio = (
+        sum(h["output_tokens"] for h in branches) / sum(h["input_tokens"] for h in branches)
+        if len(branches) >= MIN_SAMPLES else BRANCH_OUT_PER_IN
+    )
+
+    totals = {"calls": 0, "input_tokens": 0.0, "output_tokens": 0.0}
+
+    def visible(n: DNode) -> float:
+        """Tokens of n's output that its parent reads; adds n's own call to the totals if pending."""
+        if n.output is not None:
+            return len(json.dumps(n.output, ensure_ascii=False)) / CHARS_PER_TOKEN
+        i = leaf_in(len(n.text)) if n.is_leaf else BRANCH_OVERHEAD + sum(visible(c) for c in n.children)
+        o = i * (leaf_ratio if n.is_leaf else branch_ratio)
+        totals["calls"] += 1
+        totals["input_tokens"] += i
+        totals["output_tokens"] += o
+        return o * VISIBLE_SHARE
+
+    if root is not None:
+        visible(root)
+    i, o = round(totals["input_tokens"]), round(totals["output_tokens"])
+    return {
+        "model": model, "calls": totals["calls"], "input_tokens": i, "output_tokens": o,
+        "usd": cost(model, i, o) if totals["calls"] else 0.0,
+        "calibrated_on": len(leaves) if len(leaves) >= MIN_SAMPLES else 0,
+    }
+
+
 def run(
     db: Path | str,
     source_id: int,

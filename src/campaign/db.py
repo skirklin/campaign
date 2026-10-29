@@ -709,6 +709,36 @@ class Store:
         ).fetchone()
         return {**dict(row), "entities": len(self.source_catalog(source_id))}
 
+    def digest_usage(self, source_id: int) -> list[dict[str, Any]]:
+        """Tokens spent on a source's digested nodes, per model."""
+        rows = self.conn.execute(
+            "SELECT d.model, sum(d.input_tokens) AS input_tokens, sum(d.output_tokens) AS output_tokens"
+            " FROM digest_nodes n JOIN digests d ON d.key = n.digest_key WHERE n.source_id = ? GROUP BY d.model",
+            (source_id,),
+        )
+        return [dict(r) for r in rows]
+
+    def digest_history(self, model: str) -> list[dict[str, Any]]:
+        """Every digest call made with a model: kind, tokens, and a leaf's text size if still planned."""
+        rows = self.conn.execute(
+            "SELECT d.kind, d.input_tokens, d.output_tokens,"
+            " (SELECT max(n.chars) FROM digest_nodes n WHERE n.digest_key = d.key) AS chars"
+            " FROM digests d WHERE d.model = ? AND d.input_tokens > 0",
+            (model,),
+        )
+        return [dict(r) for r in rows]
+
+    def digest_node_output(self, node_id: int) -> tuple[int, dict[str, Any] | None] | None:
+        """A digest node's source and its output (None until digested)."""
+        row = self.conn.execute(
+            "SELECT n.source_id, d.output FROM digest_nodes n LEFT JOIN digests d ON d.key = n.digest_key"
+            " WHERE n.id = ?",
+            (node_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return row["source_id"], json.loads(row["output"]) if row["output"] else None
+
     def digest_outline(self, source_id: int) -> list[dict[str, Any]]:
         """The digest tree with each node's summary (None until digested)."""
         rows = self.conn.execute(
