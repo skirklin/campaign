@@ -103,7 +103,11 @@ uv run campaign web            # http://127.0.0.1:8765
   site's top bar gives way to a ‹ back to the list.
 - **Campaigns**: create DM or player campaigns, then use the tabs:
   - **Ask**: chat with the campaign assistant. Answers stream in as
-    they're written, with the lookups it makes shown along the way.
+    they're written, with the lookups it makes folded into one line
+    above them. Answers are Markdown, rendered as it arrives (headings,
+    lists, tables; the book's read-aloud text as a boxed quote); a stat
+    block comes as a card laid out like the books', and dice in any answer
+    or stat block ("3d8+5", "+8 to hit") are buttons that roll.
     Conversations are kept (per person), so you can come back to one; in
     a player campaign it only knows what the party knows. With editor
     access it can also record what you tell it happened.

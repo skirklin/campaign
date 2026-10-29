@@ -56,9 +56,9 @@ let toastTimer;
 // (Undo) and stays a little longer.
 export function toast(msg, isError = false, action = null) {
   const el = document.getElementById("toast");
-  el.replaceChildren(h("span", msg), action && h("button.toast-action", {
+  el.replaceChildren(h("span", msg), ...(action ? [h("button.toast-action", {
     onclick: () => { el.className = ""; action.run(); },
-  }, action.label));
+  }, action.label)] : []));
   el.className = "show" + (isError ? " error" : "") + (action ? " has-action" : "");
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => (el.className = ""), isError ? 6000 : action ? 5000 : 2500);

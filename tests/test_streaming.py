@@ -116,7 +116,7 @@ def test_chat_streams_and_is_kept(app, monkeypatch):
         got = events(r)
     got = [(e, d) for e, d in got if not (e == "text" and not d.strip())]  # the newline after a tool round
     assert [e for e, _ in got] == ["tool", "text", "done"]
-    assert "list_sessions" in got[0][1] and got[1][1] == "No sessions yet."
+    assert "Listed the sessions" in got[0][1] and got[1][1] == "No sessions yet."
 
     # A second turn sends the whole stored history back, exactly as it was.
     with client.stream("POST", f"/api/campaigns/strahd/chats/{chat['id']}/messages", json={"text": "And now?"}) as r:

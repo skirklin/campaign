@@ -5,6 +5,7 @@ import { api, h, toast, enc, whoami, canEdit, live, streamPost } from "./util.js
 import { membersTab } from "./people.js";
 import { characterCard, newCharacterForm } from "./sheet.js";
 import { StashView } from "./stash.js";
+import { renderMarkdown, inline, statBlockFromData } from "./markdown.js";
 
 export async function campaignList() {
   const [campaigns, info] = await Promise.all([api("GET", "/api/campaigns"), api("GET", "/api/info").catch(() => null)]);
@@ -70,12 +71,42 @@ async function askTab(c) {
   let current = null;
   const thread = h("div.chat-thread");
   const pick = h("select", { "aria-label": "Conversation" });
-  const input = h("textarea", { rows: 3, placeholder: c.role === "player"
+  const input = h("textarea", { rows: 1, placeholder: c.role === "player"
     ? "Ask about the campaign: what the party knows, rules, your character…"
     : "Ask about the module, the world, or tell it what happened…", "aria-label": "Message" });
-  const send = h("button.primary", { type: "submit" }, "Send");
+  const send = h("button.primary.send", { type: "submit", title: "Send", "aria-label": "Send" }, "↑");
 
-  const bubble = (role, kind, text) => h(`div.chat-${kind === "tool" ? "tool" : role}`, text);
+  // What the assistant looked up on the way to an answer: one quiet line per run
+  // of tool calls, opened to see each.
+  const activity = () => {
+    const list = h("ol");
+    const label = h("span", "");
+    const el = h("details.chat-activity", h("summary", label), list);
+    el.add = (text) => {
+      list.append(h("li", text));
+      const n = list.children.length;
+      label.textContent = n === 1 ? text : `${n} lookups · ${text}`;
+    };
+    return el;
+  };
+  const say = (role, text) => (role === "user"
+    ? h("div.chat-user", h("div.bubble", text))
+    : h("div.chat-assistant", renderMarkdown(text)));
+  const turnsEls = (turns) => {
+    const out = [];
+    let act = null;
+    for (const t of turns) {
+      if (t.kind === "tool") {
+        if (!act) out.push(act = activity());
+        act.add(t.text);
+      } else {
+        act = null;
+        out.push(say(t.role, t.text));
+      }
+    }
+    return out;
+  };
+  const scrollDown = () => thread.lastElementChild?.scrollIntoView({ block: "end", behavior: "smooth" });
   const fillPick = () => pick.replaceChildren(
     h("option", { value: "" }, chats.length ? "New conversation" : "No conversations yet"),
     ...chats.map((x) => h("option", { value: x.id }, x.title || "(untitled)")),
@@ -84,13 +115,20 @@ async function askTab(c) {
     current = id ? Number(id) : null;
     pick.value = id || "";
     if (!current) {
-      thread.replaceChildren(h("p.empty", "Ask anything about this campaign. "
-        + (c.role === "player" ? "It only knows what the party knows." : "It can look things up in the module and the world, and record what happened.")));
+      thread.replaceChildren(h("div.chat-welcome",
+        h("p", "Ask anything about this campaign."),
+        h("p.muted", c.role === "player"
+          ? "It only knows what the party knows."
+          : "It can look things up in the module and the world, roll on the book's tables, and record what happened at the table."),
+        h("div.chat-suggestions", (c.role === "player"
+          ? ["What do we know about our current quest?", "Remind me what happened last session", "Who is our patron?"]
+          : ["What's coming up next for the party?", "Give me the stat block for the next fight", "Roll a random encounter"])
+          .map((q) => h("button.suggestion", { type: "button", onclick: () => { input.value = q; form.requestSubmit(); } }, q)))));
       return;
     }
     const conv = await api("GET", `${base}/chats/${current}`);
-    thread.replaceChildren(...conv.turns.map((t) => bubble(t.role, t.kind, t.text)));
-    thread.scrollTop = thread.scrollHeight;
+    thread.replaceChildren(...turnsEls(conv.turns));
+    thread.lastElementChild?.scrollIntoView({ block: "end" });
   };
   pick.addEventListener("change", () => open(pick.value));
 
@@ -105,35 +143,57 @@ async function askTab(c) {
           const conv = await api("POST", `${base}/chats`);
           current = conv.id;
           chats = [conv, ...chats];
-          if (thread.querySelector(".empty")) thread.replaceChildren();
+          if (thread.querySelector(".chat-welcome")) thread.replaceChildren();
         }
         input.value = "";
-        thread.append(bubble("user", "text", text));
-        let answer = null;
+        fit();
+        thread.append(say("user", text));
+        const typing = thread.appendChild(h("div.chat-typing", { "aria-label": "Thinking" }, h("span"), h("span"), h("span")));
+        scrollDown();
+        let answer = null;  // {el, text} of the answer being streamed in
+        let act = null;
+        let frame = 0;
+        const paint = () => {
+          frame = 0;
+          answer.el.replaceChildren(renderMarkdown(answer.text));
+        };
         await streamPost(`${base}/chats/${current}/messages`, { text }, (type, data) => {
           if (type === "text") {
             if (!data.trim() && !answer) return;  // the line break after a round of tool calls
-            answer ||= thread.appendChild(bubble("assistant", "text", ""));
-            answer.textContent += data;
+            if (!answer) {
+              answer = { el: h("div.chat-assistant"), text: "" };
+              thread.insertBefore(answer.el, typing);
+              act = null;
+            }
+            answer.text += data;
+            frame ||= requestAnimationFrame(paint);  // re-render at most once a frame
           } else if (type === "tool") {
-            thread.append(bubble("assistant", "tool", data));
+            if (!act) act = thread.insertBefore(activity(), typing);
+            act.add(data);
             answer = null;  // text after a tool call starts a new paragraph
           } else if (type === "error") {
-            thread.append(h("div.chat-error", data));
+            thread.insertBefore(h("div.chat-error", data), typing);
           }
-          thread.scrollTop = thread.scrollHeight;
         });
+        if (frame) { cancelAnimationFrame(frame); paint(); }
+        typing.remove();
         chats = await api("GET", `${base}/chats`);
         fillPick();
         pick.value = current;
       } catch (err) {
         toast(err.message, true);
       } finally {
+        thread.querySelector(".chat-typing")?.remove();
         send.disabled = false;
         input.focus();
       }
     },
-  }, input, h("div.actions", send, h("span.muted.small", "Enter to send, Shift+Enter for a new line")));
+  }, h("div.composer", input, send), h("p.muted.small.hint", "Enter to send · Shift+Enter for a new line · tap dice to roll"));
+  const fit = () => {  // grow with what's typed, up to the CSS max-height
+    input.style.height = "auto";
+    input.style.height = `${input.scrollHeight}px`;
+  };
+  input.addEventListener("input", fit);
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -145,7 +205,7 @@ async function askTab(c) {
   await open(chats[0]?.id || "");
   return h("div.chat",
     h("div.chat-head", pick,
-      h("button", { onclick: () => open("") }, "New"),
+      h("button", { onclick: () => open("") }, "+ New"),
       h("button.danger", {
         onclick: async () => {
           if (!current || !confirm("Delete this conversation?")) return;
@@ -696,14 +756,10 @@ function refCard(e) {
       e.pages.length > 0 && h("span.muted.small", `p. ${e.pages.join(", ")}`)),
     e.aliases.length > 0 && h("p.muted.small", "aka ", e.aliases.join(" · ")),
     e.summary && h("p", e.summary),
-    e.facts.length > 0 && h("ul.facts", e.facts.map((f) => h("li", f))),
+    e.facts.length > 0 && h("ul.facts", e.facts.map((f) => h("li", inline(f)))),
     sb && h("details.statblock",
-      h("summary", `AC ${sb.armor_class} · HP ${sb.hit_points}${sb.challenge ? ` · CR ${sb.challenge}` : ""}`),
-      h("p.small", `Speed ${sb.speed}`),
-      h("div.stat-abilities", ["strength", "dexterity", "constitution", "intelligence", "wisdom", "charisma"].map((a) =>
-        h("div", h("span.label", a.slice(0, 3).toUpperCase()), h("span", sb[a] ?? "—")))),
-      [...sb.traits, ...sb.actions, ...sb.other].map((t) => h("p.small", t)),
-    ),
+      h("summary", `Stat block · AC ${sb.armor_class} · HP ${sb.hit_points}${sb.challenge ? ` · CR ${sb.challenge}` : ""}`),
+      statBlockFromData(e.name, sb)),
   );
 }
 
@@ -852,9 +908,13 @@ function factSections(c, e, t, isNow) {
   const facts = e.all_facts.filter((f) => f.valid_from <= t);
   const openAt = (f) => f.valid_to === null || f.valid_to > t;
   const current = facts.filter((f) => openAt(f) && f.modality === "fact");
-  const attrs = current.filter((f) => f.attribute && f.attribute !== "stat_block");
-  const statements = current.filter((f) => !f.attribute);
+  const BULKY = ["stat_block", "read_aloud"];
+  const attrs = current.filter((f) => f.attribute && !BULKY.includes(f.attribute));
+  const TREASURE = "Treasure: ";
+  const statements = current.filter((f) => !f.attribute && !f.statement.startsWith(TREASURE));
+  const treasure = current.filter((f) => !f.attribute && f.statement.startsWith(TREASURE));
   const statBlocks = current.filter((f) => f.attribute === "stat_block");
+  const readAloud = current.filter((f) => f.attribute === "read_aloud");
   const maybe = facts.filter((f) => openAt(f) && f.modality !== "fact");
   const past = facts.filter((f) => !openAt(f));
   const events = e.all_events.filter((ev) => ev.session <= t);
@@ -867,7 +927,7 @@ function factSections(c, e, t, isNow) {
     },
   }, "×");
   const factRow = (f, text) => h("li.fact",
-    h("span", text || f.statement),
+    h("span", text || inline(f.statement)),
     h("span.fact-meta", range(f), " · ", sourceLabel(f), f.party_knows_from === null ? " · party doesn't know" : ""),
     endButton(f));
 
@@ -900,13 +960,20 @@ function factSections(c, e, t, isNow) {
   })();
 
   return [
+    ...readAloud.map((f) => h("figure.read-aloud",
+      h("figcaption", "Read aloud"), h("blockquote", f.value), h("span.fact-meta", sourceLabel(f)))),
     h("section.card",
       h("h2", isNow ? "True now" : `True at the end of session ${t}`),
       attrs.length > 0 && h("ul.facts.attrs", attrs.map((f) => factRow(f, h("span", h("strong", f.attribute), ": ", f.value)))),
       statements.length > 0 && h("ul.facts", statements.map((f) => factRow(f))),
       attrs.length + statements.length === 0 && h("p.empty", "Nothing recorded."),
-      statBlocks.map((f) => statBlockEl(JSON.parse(f.value), sourceLabel(f))),
     ),
+    treasure.length > 0 && h("section.card.treasure",
+      h("h2", "Treasure"),
+      h("ul.facts", treasure.map((f) => factRow(f, inline(f.statement.slice(TREASURE.length))))),
+      isNow && h("p.muted.small", "When the party takes something, mark it no longer true (×) and add it to the party stash.")),
+    ...statBlocks.map((f) => h("div.statblock-wrap",
+      statBlockFromData(e.name, JSON.parse(f.value)), h("p.fact-meta", sourceLabel(f)))),
     maybe.length > 0 && h("section.card", h("h2", "Rumors and possibilities"),
       h("ul.facts", maybe.map((f) => factRow(f, `${f.modality === "rumor" ? "Rumor: " : "Possible: "}${f.statement}`)))),
     past.length > 0 && h("section.card", h("h2", "No longer true"), h("ul.facts.past", past.map((f) => factRow(f)))),
@@ -914,16 +981,6 @@ function factSections(c, e, t, isNow) {
       h("ol.events", events.map((ev) => h("li", h("span.session-num", `S${ev.session}`), " ", ev.text)))),
     add,
   ];
-}
-
-function statBlockEl(sb, source) {
-  return h("details.statblock",
-    h("summary", `Stat block: AC ${sb.armor_class} · HP ${sb.hit_points}${sb.challenge ? ` · CR ${sb.challenge}` : ""}`, h("span.fact-meta", ` ${source}`)),
-    h("p.small", `Speed ${sb.speed}`),
-    h("div.stat-abilities", ["strength", "dexterity", "constitution", "intelligence", "wisdom", "charisma"].map((a) =>
-      h("div", h("span.label", a.slice(0, 3).toUpperCase()), h("span", sb[a] ?? "—")))),
-    [...sb.traits, ...sb.actions, ...sb.other].map((x) => h("p.small", x)),
-  );
 }
 
 // -- journal ---------------------------------------------------------------------------
