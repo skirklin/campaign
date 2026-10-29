@@ -126,7 +126,7 @@ export async function sheetView(id) {
 }
 
 export class SheetView {
-  constructor({ id, campaign, can_edit, entity_id, copied_from, sheet, derived, log }) {
+  constructor({ id, campaign, can_edit, entity_id, copied_from, sheet, derived, log, files }) {
     this.id = id;
     this.campaign = campaign;
     this.entityId = entity_id;
@@ -135,6 +135,7 @@ export class SheetView {
     this.sheet = sheet;
     this.derived = derived;
     this.log = log;
+    this.files = files || [];
     this.reasons = new Set();
     this.queue = Promise.resolve();
     this.sections = {};
@@ -193,6 +194,33 @@ export class SheetView {
     for (const el of this.el.querySelectorAll("input, select, textarea, button")) {
       if (!el.classList.contains("keep-enabled")) el.disabled = true;
     }
+  }
+
+  // The scan the sheet was read from (and anything else attached), to check the sheet against.
+  filesLine() {
+    const input = h("input", { type: "file", accept: ".pdf,.png,.jpg,.jpeg,.webp", hidden: true,
+      onchange: async () => {
+        const fd = new FormData();
+        fd.append("file", input.files[0]);
+        try {
+          this.replaceWith(await api("POST", `/api/characters/${this.id}/files`, fd));
+        } catch (err) {
+          toast(err.message, true);
+        }
+      } });
+    const remove = async (f) => {
+      if (!confirm(`Remove ${f.name} from this character?`)) return;
+      await api("DELETE", `/api/characters/${this.id}/files/${f.id}`);
+      this.reload();
+    };
+    return h("p.files-line.small",
+      this.files.length > 0 && h("span.muted", this.files.length > 1 ? "Scans: " : "Scan: "),
+      this.files.map((f, i) => [i > 0 && " · ",
+        h("a", { href: f.url, target: "_blank", rel: "noopener" }, f.name),
+        this.canEdit && h("button.icon.link", { title: `Remove ${f.name}`, "aria-label": `Remove ${f.name}`, onclick: () => remove(f) }, "×")]),
+      this.canEdit && [this.files.length > 0 && " · ",
+        h("button.link", { onclick: () => input.click() }, this.files.length ? "Attach another" : "Attach the paper sheet (photo or PDF)…"), input],
+    );
   }
 
   // -- saving ----------------------------------------------------------------
@@ -389,6 +417,7 @@ export class SheetView {
         this.copiedFrom && [" · copied from ", this.copiedFrom.id
           ? h("a", { href: `#/characters/${this.copiedFrom.id}` }, `${this.copiedFrom.name} (${this.copiedFrom.campaign.name})`)
           : `${this.copiedFrom.name} (${this.copiedFrom.campaign.name})`]),
+      this.filesLine(),
       h("div.identity",
         this.field("species", { label: "Species" }),
         this.field("background", { label: "Background" }),

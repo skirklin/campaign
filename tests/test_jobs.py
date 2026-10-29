@@ -316,8 +316,8 @@ def test_ingests_move_over_to_jobs_keeping_their_ids(tmp_path):
     s = Store(db)
     camp = s.create_campaign("Strahd", "dm")
     # The database as the v10 server left it: an ingest in the ingests table, no jobs.
-    s.conn.executescript("DROP TABLE job_log; DROP TABLE jobs; DROP TABLE party_stash_log; DROP TABLE party_stash;"
-                         " PRAGMA user_version = 10;")
+    s.conn.executescript("DROP TABLE character_files; DROP TABLE job_log; DROP TABLE jobs;"
+                         " DROP TABLE party_stash_log; DROP TABLE party_stash; PRAGMA user_version = 10;")
     s.conn.execute(
         "INSERT INTO ingests (id, campaign_id, session, input_blob, input_name, transcript_blob, played_on, role,"
         " state, attempts, error, created_at, updated_at)"
@@ -440,3 +440,21 @@ def test_explanations_and_prose_in_damage_get_sent_back_once(scan_job, monkeypat
     s.conn.commit()
     scan_client(monkeypatch, wordy.model_dump_json())
     assert loop.pass_once() and s.job(job_id)["state"] == "done"
+
+
+def test_scans_read_before_files_were_kept_get_attached(tmp_path):
+    db = tmp_path / "old.db"
+    s = Store(db)
+    camp = s.create_campaign("Odyssey", "dm")
+    character_id = s.create_character({"name": "Cid"}, camp.id)
+    blob = s.blobs.put(b"%PDF-1.7 cid")
+    job_id = s.add_job(camp, "scan", {"blob": blob, "name": "cid character sheet.pdf"}, None)
+    s.update_job(job_id, state="done", result={"character": character_id, "name": "Cid", "unreadable": []})
+    failed = s.add_job(camp, "scan", {"blob": blob, "name": "other.pdf"}, None)
+    s.update_job(failed, state="failed")
+    # The database as the v12 server left it: no files table.
+    s.conn.executescript("DROP TABLE character_files; PRAGMA user_version = 12;")
+    s.close()
+    s = Store(db)  # migrates
+    assert [(f["name"], f["blob"]) for f in s.character_files(character_id)] == [("cid character sheet.pdf", blob)]
+    s.close()
