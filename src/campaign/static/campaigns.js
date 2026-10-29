@@ -330,6 +330,8 @@ function digestLine(d) {
     return h("span.digest-status.done", `Digested · ${d.entities} entries${tokens ? ` · ${ktok(tokens)}, ${usd(d.spent_usd)}` : ""}`);
   }
   const left = d.estimate?.calls ? ` · ${d.estimate.calls} calls left, ${estimateText(d.estimate)}` : "";
+  if (d.stuck) return h("span.digest-status.partial",
+    `${d.done}/${d.total} sections digested; the rest failed or wait on a failure${spent}`);
   if (!d.done) return h("span.digest-status", `Not digested${left}`);
   return h("span.digest-status.partial",
     `${d.done}/${d.total} sections digested${d.failed ? `, ${d.failed} failed` : ""}${spent}${left}`);
@@ -338,7 +340,10 @@ function digestLine(d) {
 function sourceRow(c, s, refresh) {
   const base = `/api/campaigns/${c.slug}`;
   const d = s.digest;
+  // Digesting is a target, not a job: Digest/Retry set it (safely, any number of times), Stop clears it,
+  // and the server's loop works toward it whether or not this page is open.
   const canDigest = canEdit(c) && s.kind !== "transcript" && !d.running && (d.total === 0 || d.done < d.total);
+  const canStop = canEdit(c) && d.running;
   return h("div.source",
     h("div",
       h("a", { href: `#/campaigns/${c.slug}/source/${s.id}` }, h("strong", s.title)), " ",
@@ -363,7 +368,14 @@ function sourceRow(c, s, refresh) {
             toast(err.message, true);
           }
         },
-      }, d.done ? "Resume digest" : "Digest"),
+      }, d.stuck ? "Retry failed" : d.done ? "Resume digest" : "Digest"),
+      canStop && h("button", {
+        title: "Stop digesting: calls already in flight finish and are kept",
+        onclick: async () => {
+          await api("DELETE", `${base}/sources/${s.id}/digest`);
+          refresh();
+        },
+      }, "Stop"),
       canEdit(c) && h("button.icon", {
         title: "Remove", "aria-label": `Remove ${s.title}`,
         onclick: async () => {

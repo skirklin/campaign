@@ -33,6 +33,8 @@ import hashlib
 import json
 import os
 import re
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -464,19 +466,26 @@ def _materialize(store: Store, source_id: int, root: DNode) -> None:
     World(store, campaign).apply_book(source_id, root.output["entities"], key=root.key)
 
 
-def plan(store: Store, source_id: int, model: str = MODEL) -> DNode | None:
+def plan(store: Store, source_id: int, model: str = MODEL, save: bool = True) -> DNode | None:
     """Build the digest tree for a source and match it against the cache. No API calls.
 
-    Saves the tree so the UI can show progress, and if the root is already
-    cached (an unchanged re-upload) refreshes the entity catalog right away.
+    With `save`, records the tree so the UI can show progress, and if the
+    root is already cached (an unchanged re-upload) refreshes the entity
+    catalog right away. A tree with the same shape as the saved one keeps
+    its rows (and their ids), only updating which are done or failed, so
+    planning again and again, as the reconciler does, doesn't churn them.
+    Without `save` it only reads (for cost estimates).
     """
     src = store.source(source_id)
     nodes, chunks = store.source_structure(source_id)
     root = build_tree(src["title"], nodes, chunks) if src else None
     if root is None:
-        store.save_digest_plan(source_id, [])
+        if save:
+            store.save_digest_plan(source_id, [])
         return None
     _resolve(store, root, model)
+    if not save:
+        return root
 
     rows: list[dict[str, Any]] = []
     order: list[DNode] = []
@@ -492,8 +501,23 @@ def plan(store: Store, source_id: int, model: str = MODEL) -> DNode | None:
             flatten(c, idx, depth + 1)
 
     flatten(root, None, 0)
-    for n, row_id in zip(order, store.save_digest_plan(source_id, rows)):
-        n.row_id = row_id
+    for n in order:  # a section that failed for good stays failed until asked again
+        if n.output is None and n.key and (f := store.digest_failure(n.key)) and f["retry_at"] is None:
+            n.error = f["error"]
+    shape = lambda r: (r["parent"], r["title"], bool(r["is_leaf"]), r["chars"])  # noqa: E731
+    existing = store.existing_digest_plan(source_id)
+    if [shape(r) for r in existing] == [shape(r) for r in rows]:
+        updates = []
+        for n, old in zip(order, existing):
+            n.row_id = old["id"]
+            if (n.key, n.error) != (old["digest_key"], old["error"]):
+                updates.append((n.key, n.error, old["id"]))
+        if updates:
+            store.update_digest_nodes(updates)
+    else:
+        for n, row_id in zip(order, store.save_digest_plan(source_id, rows)):
+            n.row_id = row_id
+        store.update_digest_nodes([(None, n.error, n.row_id) for n in order if n.error])
     if root.output is not None:
         _materialize(store, source_id, root)
     return root
@@ -582,6 +606,14 @@ def estimate(store: Store, root: DNode | None, model: str = MODEL) -> dict[str, 
     }
 
 
+class _Stopped(Exception):
+    """A queued call that found, when its turn came, that it's no longer wanted."""
+
+
+MAX_ATTEMPTS = 3  # automatic tries per section before it waits to be asked again
+RETRY_SECONDS = 60  # then 4 min, then give up
+
+
 def run(
     db: Path | str,
     source_id: int,
@@ -590,31 +622,51 @@ def run(
     model: str = MODEL,
     effort: str = EFFORT,
     on_progress: Callable[[dict[str, int]], None] | None = None,
+    keep_going: Callable[[], bool] = lambda: True,
 ) -> dict[str, int]:
-    """Digest everything not already cached, bottom-up, and refresh the entity catalog.
+    """Digest whatever of a source isn't in the cache yet, bottom-up, then refresh its catalog.
 
-    Safe to interrupt and rerun: finished nodes are in the cache, so a rerun
-    resumes where the last one stopped. Opens its own database connection so
-    it can run on a background thread.
+    Idempotent: everything finished is in the cache, so running it again only
+    does what's missing. A section that fails is retried on later runs with
+    backoff, and after MAX_ATTEMPTS waits until someone asks again (see
+    retry_failed). `keep_going` is checked between batches, so a caller can
+    stop it early; calls already made still land in the cache.
     """
     store = Store(db)
     try:
         root = plan(store, source_id, model)
-        stats = {"nodes": 0, "cached": 0, "digested": 0, "failed": 0, "input_tokens": 0, "output_tokens": 0}
+        stats = {"nodes": 0, "cached": 0, "digested": 0, "failed": 0, "waiting": 0,
+                 "input_tokens": 0, "output_tokens": 0}
         if root is None:
             return stats
         nodes = list(root.walk())
         stats["nodes"] = len(nodes)
         stats["cached"] = sum(1 for n in nodes if n.output is not None)
+        stats["waiting"] = sum(1 for n in nodes if n.error)  # gave up earlier; plan() marked them
+        now = int(time.time())
+
+        def backing_off(n: DNode) -> bool:
+            f = store.digest_failure(n.key) if n.key else None
+            if f is None:
+                return False
+            if f["retry_at"] is None or f["retry_at"] > now:
+                n.error = n.error or f["error"]
+                return True
+            return False
+
         client = client or anthropic.Anthropic()
+
+        def work(n: DNode) -> tuple[dict[str, Any], int, int]:
+            if not keep_going():  # checked when the call's turn comes, not just when it was queued
+                raise _Stopped
+            return digest_node(client, n, model, effort)
+
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            while True:
+            while keep_going():
                 ready = [
                     n for n in nodes
                     if n.output is None and n.error is None and all(c.output is not None for c in n.children)
                 ]
-                if not ready:
-                    break
                 futures = {}
                 for n in ready:
                     if not n.is_leaf:
@@ -625,17 +677,31 @@ def run(
                             store.set_digest_node(n.row_id, n.key)
                             stats["cached"] += 1
                             continue
-                    futures[pool.submit(digest_node, client, n, model, effort)] = n
+                    if backing_off(n):
+                        stats["waiting"] += 1
+                        continue
+                    futures[pool.submit(work, n)] = n
+                if not futures:
+                    if not any(n.output is None and n.error is None and not n.is_leaf
+                               and all(c.output is not None for c in n.children) for n in nodes):
+                        break
+                    continue  # branches became ready from the cache; look again
                 for fut in as_completed(futures):
                     n = futures[fut]
                     try:
                         output, i, o = fut.result()
+                    except _Stopped:
+                        continue  # still to do, for whenever it's wanted again
                     except Exception as err:  # keep going; the rest of the tree is still useful
                         n.error = str(err) or type(err).__name__
-                        store.set_digest_node(n.row_id, None, n.error)
+                        f = store.record_digest_failure(n.key, n.error, int(time.time()), MAX_ATTEMPTS, RETRY_SECONDS)
+                        if f["retry_at"] is None:
+                            n.error = f"{n.error} (gave up after {f['attempts']} tries)"
+                        store.set_digest_node(n.row_id, n.key, n.error)
                         stats["failed"] += 1
                     else:
                         store.put_digest(n.key, "leaf" if n.is_leaf else "branch", output, model, i, o)
+                        store.clear_digest_failures([n.key])
                         store.set_digest_node(n.row_id, n.key)
                         n.output = output
                         stats["digested"] += 1
@@ -644,10 +710,109 @@ def run(
                     if on_progress:
                         on_progress(dict(stats))
         for n in nodes:
-            if n.output is None and n.error is None:
+            if n.output is None and n.error is None and any(c.output is None for c in n.children):
                 store.set_digest_node(n.row_id, None, "waiting on a failed subsection")
         if root.output is not None:
             _materialize(store, source_id, root)
         return stats
     finally:
         store.close()
+
+
+def retry_failed(store: Store, source_id: int, model: str = MODEL) -> int:
+    """Forget the failures of a source's sections, so the next run tries them again."""
+    root = plan(store, source_id, model, save=False)
+    keys = [n.key for n in root.walk() if n.key] if root else []
+    store.clear_digest_failures(keys)
+    return len(keys)
+
+
+# -- the reconciliation loop ---------------------------------------------------------
+
+
+class Reconciler:
+    """Keeps every source's digest where its target says it should be.
+
+    The desired state is on the source (digest_model, set by clicking
+    Digest); the actual state is the digest cache. Each pass reads both
+    from the database and runs whatever's missing, so the loop itself
+    remembers nothing: a restart, a deploy, or a second loop (say, the CLI)
+    just picks up where things stand. Clearing a source's target stops it
+    after the calls in flight, which still land in the cache.
+    """
+
+    IDLE_SECONDS = 30
+
+    def __init__(self, db: Path | str, client_factory: Callable[[], Any] | None = None, workers: int = 4):
+        self.db = db
+        self.client_factory = client_factory or (lambda: anthropic.Anthropic())
+        self.workers = workers
+        self._wake = threading.Event()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._loop, name="digest-reconciler", daemon=True)
+        self._thread.start()
+
+    def stop(self, timeout: float | None = 10) -> None:
+        self._stop.set()
+        self._wake.set()
+        if self._thread:
+            self._thread.join(timeout)
+
+    def wake(self) -> None:
+        """Look again now (a target changed), rather than at the next idle tick."""
+        self._wake.set()
+
+    def _loop(self) -> None:
+        import traceback
+
+        while not self._stop.is_set():
+            self._wake.clear()
+            try:
+                busy = self.reconcile_once()
+            except Exception:  # keep the loop alive; the next pass starts from the database again
+                traceback.print_exc()
+                busy = False
+            if not busy:
+                self._wake.wait(self.IDLE_SECONDS)
+
+    def _wanted(self, source_id: int, model: str) -> bool:
+        s = Store(self.db)
+        try:
+            return any(t["id"] == source_id and t["model"] == model for t in s.digest_targets())
+        finally:
+            s.close()
+
+    def reconcile_once(self) -> bool:
+        """One pass over every source with a target. True if it digested anything."""
+        s = Store(self.db)
+        try:
+            pending = [t for t in s.digest_targets() if _unfinished(s, t["id"], t["model"])]
+        finally:
+            s.close()
+        busy = False
+        for t in pending:
+            if self._stop.is_set():
+                break
+            stats = run(
+                self.db, t["id"], client=self.client_factory(), workers=self.workers,
+                model=t["model"], effort=t["effort"] or EFFORT,
+                keep_going=lambda t=t: not self._stop.is_set() and self._wanted(t["id"], t["model"]),
+            )
+            busy = busy or stats["digested"] > 0
+        return busy
+
+
+def _unfinished(store: Store, source_id: int, model: str) -> bool:
+    """Whether a source may still have work: not every saved section is done with this model."""
+    row = store.conn.execute(
+        "SELECT count(n.id) AS total, count(d.key) AS done, sum(d.model != ?) AS other"
+        " FROM digest_nodes n LEFT JOIN digests d ON d.key = n.digest_key WHERE n.source_id = ?",
+        (model, source_id),
+    ).fetchone()
+    return row["total"] == 0 or row["done"] < row["total"] or bool(row["other"])

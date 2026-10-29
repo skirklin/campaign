@@ -109,6 +109,9 @@ def _digest(s: Store, source_id: int) -> None:
             nl=False, err=True,
         )
 
+    # Record the target too, so a server sharing this database finishes the job if this is interrupted.
+    s.set_digest_target(source_id, digest.MODEL, digest.EFFORT)
+    digest.retry_failed(s, source_id)
     stats = digest.run(s.path, source_id, on_progress=progress)
     typer.echo(err=True)
     show(stats | {"entities": s.digest_status(source_id)["entities"]})

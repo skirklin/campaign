@@ -15,7 +15,9 @@ EXAMPLE = Path(__file__).parent.parent / "examples" / "character.json"
 
 @pytest.fixture
 def client(tmp_path):
-    return TestClient(create_app(tmp_path / "web.db"))
+    # As a context manager, so the app's lifespan runs: that's where the digest loop lives.
+    with TestClient(create_app(tmp_path / "web.db")) as c:
+        yield c
 
 
 def test_index_and_static(client):
@@ -186,6 +188,13 @@ def test_digest_endpoints_and_original_kept(client, monkeypatch):
     # Re-uploading the same file is free, and nothing is left to digest.
     again = client.post("/api/campaigns/strahd/sources", files={"file": ("book.md", book)},
                         data={"title": "book", "digest_now": "true"}).json()
+    # Asking for a digest is idempotent, and stopping just clears the target.
+    assert client.post(f"/api/campaigns/strahd/sources/{r['id']}/digest").status_code == 202
+    assert client.post(f"/api/campaigns/strahd/sources/{r['id']}/digest").status_code == 202
+    assert client.get("/api/campaigns/strahd/sources").json()[0]["digest"]["target"] == digest.MODEL
+    assert client.delete(f"/api/campaigns/strahd/sources/{r['id']}/digest").status_code == 204
+    status = client.get("/api/campaigns/strahd/sources").json()[0]["digest"]
+    assert status["target"] is None and not status["running"]
     assert again.pop("estimate")["calls"] == 0
     assert again == {"id": r["id"], "chunks": r["chunks"], "pending": 0, "digesting": False}
     assert client.post(f"/api/campaigns/strahd/sources/{r['id']}/digest").status_code == 202

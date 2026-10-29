@@ -159,6 +159,17 @@ The digest turns a module into two things the assistant can use:
 
 See [How the digest works](#how-the-digest-works) for the caching rules.
 
+**Digesting is a target, not a job.** Clicking **Digest** records on the
+source which model it should be digested with; a loop in the server
+(`digest.Reconciler`) compares that with the digest cache and runs
+whatever's missing. It keeps no state of its own, so it doesn't matter
+whether the page is open, the server restarts or a deploy replaces it: the
+next pass picks up from the database, and nothing finished is paid for
+twice. **Stop** clears the target (calls already in flight finish and are
+kept). A section that fails is retried after 1 and then 4 minutes, then
+waits until someone clicks **Retry failed**, so a broken section can't run
+up a bill.
+
 **In the web UI**, uploading doesn't digest unless you tick the box. The
 source's line shows how many calls are left and a rough dollar estimate,
 and **Digest** asks before spending it. The first estimate is a guess; once
