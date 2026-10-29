@@ -144,3 +144,46 @@ export async function streamPost(url, body, onEvent) {
     }
   }
 }
+
+// A sheet that slides up from the bottom of the screen; closes on × or a tap outside.
+export function bottomSheet(title, ...body) {
+  const dialog = h("dialog.bottom-sheet",
+    h("div.sheet-grip"),
+    h("div.sheet-title", h("h2", title), h("button.icon", { onclick: () => dialog.close(), "aria-label": "Close" }, "×")),
+    ...body);
+  dialog.addEventListener("close", () => dialog.remove());
+  dialog.addEventListener("click", (e) => { if (e.target === dialog) dialog.close(); });
+  document.body.append(dialog);
+  dialog.showModal();
+  return dialog;
+}
+
+// A number pad, so the phone's keyboard doesn't cover the sheet. onAmount(n) on each press.
+export function keypad(onAmount) {
+  let amount = "";
+  const display = h("div.keypad-display", "0");
+  const press = (k) => {
+    amount = k === "⌫" ? amount.slice(0, -1) : k === "C" ? "" : (amount + k).replace(/^0+/, "").slice(0, 5);
+    display.textContent = amount || "0";
+    onAmount(Number(amount) || 0);
+  };
+  return [display, h("div.keypad", ["1", "2", "3", "4", "5", "6", "7", "8", "9", "C", "0", "⌫"].map((k) =>
+    h("button", { onclick: () => press(k) }, k)))];
+}
+
+// How many of something, 1..max: resolves to the number, or null if dismissed.
+export function askQty(title, max, verb) {
+  if (max <= 1) return Promise.resolve(1);
+  return new Promise((resolve) => {
+    let n = 1, done = null;
+    const out = h("span.step-value", n);
+    const step = (by) => { n = Math.max(1, Math.min(max, n + by)); out.textContent = n; };
+    const dialog = bottomSheet(title,
+      h("div.qty-pick",
+        h("span.stepper", h("button", { onclick: () => step(-1), "aria-label": "One less" }, "−"), out,
+          h("button", { onclick: () => step(1), "aria-label": "One more" }, "+")),
+        h("button", { onclick: () => { n = max; out.textContent = n; } }, `All ${max}`)),
+      h("button.primary.wide", { onclick: () => { done = n; dialog.close(); } }, verb));
+    dialog.addEventListener("close", () => resolve(done));
+  });
+}

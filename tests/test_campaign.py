@@ -4,7 +4,7 @@ from pathlib import Path
 import pymupdf
 import pytest
 
-from campaign.charsheet import Attack, Bonus, Damage, Item, CharacterSheet, merge_patch
+from campaign.charsheet import Attack, Bonus, CharacterSheet, Damage, Item, PartyStash, merge_patch, move
 from campaign.db import Store
 from campaign.ingest import chunk_file, chunk_markdown
 from campaign.tools import ToolContext, build_tools
@@ -161,6 +161,46 @@ def test_sheets_from_before_parts_keep_their_numbers():
     assert sheet.hp_max == 40
     with pytest.raises(ValueError):
         Bonus(target="ac", amount="lots")
+
+
+def test_moving_between_a_character_and_the_party_stash():
+    sheet = CharacterSheet.model_validate_json(EXAMPLE.read_text())
+    stash = PartyStash(items=[{"name": "Potion of Healing", "qty": 3}], currency={"gp": 100})
+    # Taking stacks onto what the character has, by name, ignoring case.
+    assert move(sheet, stash, "character", {"potion of healing": 2}, {"gp": 40}) == "Potion of Healing ×2, 40 gp"
+    assert next(i for i in sheet.inventory if i.name == "Potion of healing").qty == 4
+    assert stash.items[0].qty == 1 and stash.currency["gp"] == 60 and sheet.currency["gp"] == 78
+    # Putting in moves the whole stack when it's all of it, and makes a stash item.
+    move(sheet, stash, "stash", {"Shield": 1})
+    assert "Shield" not in [i.name for i in sheet.inventory] and stash.items[-1].name == "Shield"
+    # A magic item keeps its bonuses through the stash; it comes out unequipped.
+    sheet.inventory.append(Item(name="Cloak of protection", equipped=True, attuned=True, requires_attunement=True,
+                                bonuses=[Bonus(target="ac", amount=1)]))
+    move(sheet, stash, "stash", {"Cloak of protection": 1})
+    move(sheet, stash, "character", {"Cloak of protection": 1})
+    cloak = sheet.inventory[-1]
+    assert cloak.bonuses[0].amount == 1 and cloak.requires_attunement and not cloak.equipped and not cloak.attuned
+    # Not enough changes nothing.
+    before = (sheet.model_dump(), stash.model_dump())
+    with pytest.raises(ValueError, match="only 1"):
+        move(sheet, stash, "character", {"Potion of Healing": 1, "Shield": 2})
+    with pytest.raises(ValueError, match="only 60 gp"):
+        move(sheet, stash, "character", {}, {"gp": 61})
+    with pytest.raises(ValueError, match="nothing"):
+        move(sheet, stash, "stash")
+    assert (sheet.model_dump(), stash.model_dump()) == before
+
+
+def test_party_stash_tools(store):
+    store.create_campaign("Loot", "dm")
+    t = tools(store, "loot")
+    assert json.loads(t["get_party_stash"]())["items"] == []
+    assert "Updated" in t["update_party_stash"](patch={"currency": {"gp": 340}}, reason="the crypt")
+    assert "Rejected" in t["update_party_stash"](patch={"items": [{"qty": 2}]}, reason="bad")
+    t["update_party_stash"](patch={"items": [{"name": "Silver mirror"}]}, reason="the crypt")
+    stash = json.loads(t["get_party_stash"]())
+    assert stash["currency"]["gp"] == 340 and [(i["name"], i["qty"]) for i in stash["items"]] == [("Silver mirror", 1)]
+    assert [r["reason"] for r in store.party_stash_log(store.campaign("loot").id)] == ["the crypt", "the crypt"]
 
 
 def test_merge_patch():

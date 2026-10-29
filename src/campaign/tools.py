@@ -13,7 +13,7 @@ from typing import Any, Callable
 
 from pydantic import ValidationError
 
-from .charsheet import CharacterSheet, merge_patch
+from .charsheet import CharacterSheet, PartyStash, merge_patch
 from .db import Campaign, Store
 from .world import World
 
@@ -372,6 +372,30 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
                                               reason=reason)
         return _json({"created": character_id, "derived": sheet.derived()})
 
+    def get_party_stash() -> str:
+        """Read the party stash: items and coin the party holds in common, not on anyone's sheet."""
+        return _json(PartyStash.model_validate(store.party_stash(campaign.id)).model_dump())
+
+    def update_party_stash(patch: dict[str, Any], reason: str) -> str:
+        """Change the party stash with a JSON merge patch.
+
+        Use it for loot the party takes but nobody claims, and the shared
+        purse. Lists are replaced whole, so read the stash first and send the
+        complete new item list. Examples: {"currency": {"gp": 340}},
+        {"items": [{"name": "Potion of healing", "qty": 3}]}.
+
+        Args:
+            patch: Merge patch against the current stash.
+            reason: What happened, e.g. "looted the ghoul nest".
+        """
+        updated = merge_patch(store.party_stash(campaign.id) or PartyStash().model_dump(), patch)
+        try:
+            stash = PartyStash.model_validate(updated)
+        except ValidationError as err:
+            return f"Rejected, stash would be invalid: {err}"
+        store.update_party_stash(campaign.id, stash.model_dump(), reason=reason, user_id=ctx.user_id)
+        return f"Updated the party stash: {reason}"
+
     readers = [
         list_sources,
         outline,
@@ -384,6 +408,8 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         list_sessions,
         recent_journal,
         get_character,
+        get_party_stash,
     ]
-    writers = [record_fact, end_fact, party_learned, add_journal_entry, update_character, create_character]
+    writers = [record_fact, end_fact, party_learned, add_journal_entry, update_character, create_character,
+               update_party_stash]
     return readers + (writers if writable else [])

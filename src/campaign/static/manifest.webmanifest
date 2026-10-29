@@ -1,0 +1,9 @@
+{
+  "name": "Campaign",
+  "short_name": "Campaign",
+  "start_url": "/#/characters",
+  "display": "standalone",
+  "background_color": "#f6f1e7",
+  "theme_color": "#8b2e1f",
+  "icons": [{ "src": "/static/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}
