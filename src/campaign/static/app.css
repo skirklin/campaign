@@ -451,3 +451,6 @@ ol.steps { padding-left: 1.3rem; display: grid; gap: .4rem; max-width: 62ch; }
 .mini input[type=checkbox] { width: auto !important; }
 .attack-bottom .add { width: auto; flex: 0 0 auto; }
 .damage-part input[placeholder="1d8"] { flex: 0 0 4.5rem; }
+.job:not(.show-reasoning) .job-log .log-text { display: none; }
+.reasoning-toggle { font-size: .8rem; }
+.reasoning-toggle { color: var(--accent) !important; text-decoration: underline; }
