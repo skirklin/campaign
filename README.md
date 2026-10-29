@@ -59,7 +59,17 @@ uv run campaign web            # http://127.0.0.1:8765
   first). Resources like spell slots and hit dice are clickable pips. It
   also covers attacks, spells by level, inventory and coin, conditions,
   death saves, short and long rests, export to JSON, and a change history.
-  It works at phone width for use at the table.
+- **Play view**: the same sheet laid out for a phone at the table, and what
+  a sheet opens in (the ✎ button switches to the full editor, and the
+  choice is remembered on that device). HP, AC, initiative and conditions
+  stay pinned at the top; tabs along the bottom hold Main (abilities,
+  attacks, resources, saves, rests), Skills, Spells (slots shown with their
+  level), Gear and Notes. Damage, healing and coin go in on a keypad, so the
+  phone's keyboard doesn't cover the sheet; resources, death saves and
+  conditions are taps. Tapping a modifier or an attack rolls it, with a
+  second d20 shown for advantage or disadvantage and dice doubled on a
+  crit. The screen stays on while it's open, and the app can be added to
+  the home screen.
 - **Campaigns**: create DM or player campaigns, then use the tabs:
   - **Ask**: chat with the campaign assistant. Answers stream in as
     they're written, with the lookups it makes shown along the way.

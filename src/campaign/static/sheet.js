@@ -5,23 +5,26 @@
 // returns the derived numbers (modifiers, skills, DCs), which are patched
 // into elements marked `data-d` so typing never loses focus. Only list
 // sections re-render, when rows are added or removed.
+//
+// That's Edit mode. Play mode (play.js) is the same sheet laid out for the
+// table; the sheet opens in whichever this device used last.
 
 import { api, h, toast, sign, getPath, setPath, debounce } from "./util.js";
 
-const ABILITIES = ["str", "dex", "con", "int", "wis", "cha"];
-const ABILITY_NAMES = { str: "Strength", dex: "Dexterity", con: "Constitution", int: "Intelligence", wis: "Wisdom", cha: "Charisma" };
-const SKILLS = {
+export const ABILITIES = ["str", "dex", "con", "int", "wis", "cha"];
+export const ABILITY_NAMES = { str: "Strength", dex: "Dexterity", con: "Constitution", int: "Intelligence", wis: "Wisdom", cha: "Charisma" };
+export const SKILLS = {
   acrobatics: "dex", "animal handling": "wis", arcana: "int", athletics: "str", deception: "cha",
   history: "int", insight: "wis", intimidation: "cha", investigation: "int", medicine: "wis",
   nature: "int", perception: "wis", performance: "cha", persuasion: "cha", religion: "int",
   "sleight of hand": "dex", stealth: "dex", survival: "wis",
 };
-const CONDITIONS = [
+export const CONDITIONS = [
   "blinded", "charmed", "deafened", "exhaustion", "frightened", "grappled", "incapacitated", "invisible",
   "paralyzed", "petrified", "poisoned", "prone", "restrained", "stunned", "unconscious", "concentrating",
 ];
 const RECHARGE = ["", "short rest", "long rest", "dawn"];
-const COINS = ["cp", "sp", "ep", "gp", "pp"];
+export const COINS = ["cp", "sp", "ep", "gp", "pp"];
 
 // A character lives in exactly one campaign. This page is a view across them:
 // your characters, grouped by campaign, and the rest of each of your parties.
@@ -102,11 +105,13 @@ function hpBar(hp) {
 }
 
 export async function sheetView(id) {
-  const data = await api("GET", `/api/characters/${id}`);
-  return new SheetView(data).el;
+  const [data, { PlayView, preferredMode }] = await Promise.all([api("GET", `/api/characters/${id}`), import("./play.js")]);
+  // A new, empty character opens in Edit: there's nothing to play yet.
+  const play = preferredMode() === "play" && data.sheet.classes.length > 0;
+  return new (play ? PlayView : SheetView)(data).el;
 }
 
-class SheetView {
+export class SheetView {
   constructor({ id, campaign, can_edit, entity_id, copied_from, sheet, derived, log }) {
     this.id = id;
     this.campaign = campaign;
@@ -129,6 +134,7 @@ class SheetView {
   // -- the character in its campaign's world ---------------------------------
 
   async loadWorld() {
+    if (!this.worldBox) return;
     try {
       const e = await api("GET", `/api/campaigns/${this.campaign.slug}/entities/${this.entityId}`);
       const items = e.timeline;
@@ -220,8 +226,22 @@ class SheetView {
   }
 
   replaceWith(data) {
-    const fresh = new SheetView(data);
+    const fresh = new this.constructor(data);
     this.el.replaceWith(fresh.el);
+  }
+
+  data() {
+    return {
+      id: this.id, campaign: this.campaign, can_edit: this.canEdit, entity_id: this.entityId,
+      copied_from: this.copiedFrom, sheet: this.sheet, derived: this.derived, log: this.log,
+    };
+  }
+
+  async play() {
+    await this.flush();
+    const { PlayView, setMode } = await import("./play.js");
+    setMode("play");
+    this.el.replaceWith(new PlayView(this.data()).el);
   }
 
   updateDerived() {
@@ -332,6 +352,7 @@ class SheetView {
         this.field("name", { cls: "name-input", reason: "renamed", placeholder: "Name" }),
         this.status,
         h("div.head-actions",
+          h("button.primary.keep-enabled", { onclick: () => this.play() }, "Play view"),
           h("button.keep-enabled", { onclick: () => this.exportJson() }, "Export"),
           this.canEdit && h("button", { onclick: () => this.copyTo() }, "Copy to campaign…"),
           this.canEdit && h("button.danger", { onclick: () => this.remove() }, "Delete"),
