@@ -19,7 +19,8 @@ from typing import Any, Callable
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from .charsheet import (
-    ABILITIES, SKILLS, ArmorClass, Attack, Bonus, CharacterSheet, ClassLevel, HitPoints, Item, Resource, Spell, Status,
+    ABILITIES, SKILLS, ArmorClass, Attack, AttackOption, Bonus, CharacterSheet, ClassLevel, HitPoints, Item, Resource,
+    Spell, Status,
 )
 from .tools import ToolContext
 
@@ -91,6 +92,12 @@ prints into the printed_ fields, which are only used to check your parts:
   saying when, in a few words: a weapon's "+3d6 force vs giants", Sneak
   Attack (dice "(half_level:rogue)d6", situational "Sneak Attack"), a
   centaur's Charge. Dice that grow with level are written that way.
+- Choices made before an attack roll are attack_options: Reckless Attack
+  (applies_to ["str", "melee"], advantage "advantage", note "attacks
+  against you have advantage until your next turn"), Great Weapon Master
+  (["heavy", "melee"], to_hit -5, damage 10), Sharpshooter (["ranged",
+  "weapon"], to_hit -5, damage 10). Record them there as well as in
+  features.
 - AC as a formula: base, the abilities that add to it and max_dex, e.g.
   chain mail is base 16 with no abilities; leather is 11 with dex; a
   barbarian's unarmored defense is 10 with dex and con. A shield or magic
@@ -162,6 +169,7 @@ class ScannedSheet(Model):
     attacks: list[ScannedAttack]
     bonuses: list[Bonus]
     statuses: list[Status]
+    attack_options: list[AttackOption] = []  # optional: scans read before it existed have none
     resources: list[Resource]
     spellcasting_ability: str
     spells: list[Spell]
@@ -221,6 +229,7 @@ def to_sheet(scan: ScannedSheet) -> tuple[CharacterSheet, list[str]]:
         skill_expertise=known(scan.skill_expertise, set(SKILLS), "expertise"),
         ac=scan.ac, speed=scan.speed, hp=HitPoints(current=scan.hp.current, temp=scan.hp.temp),
         nicknames=scan.nicknames, attacks=attacks, bonuses=scan.bonuses, statuses=scan.statuses,
+        attack_options=scan.attack_options,
         resources=scan.resources,
         spellcasting_ability=_ability(scan.spellcasting_ability) or "",
         spells=scan.spells, inventory=scan.inventory, currency=scan.currency.model_dump(),

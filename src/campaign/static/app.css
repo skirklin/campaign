@@ -608,16 +608,6 @@ button.wide { width: 100%; margin-top: .3rem; padding: .6rem; }
 .play-tabs button.active { color: var(--accent); box-shadow: inset 0 2px 0 var(--accent); }
 .tab-icon { font-size: 1.15rem; line-height: 1.2; }
 
-.roll {
-  position: fixed; left: 50%; bottom: calc(4.2rem + env(safe-area-inset-bottom)); transform: translateX(-50%);
-  width: min(92vw, 24rem); z-index: 15; text-align: center;
-  padding: .7rem 1rem .8rem; border-radius: 14px;
-  /* Dark in both themes, so the crit and fumble colours read the same. */
-  background: #2a2420; color: #f6f1e7; border: 1px solid #4a4038; box-shadow: 0 6px 24px rgb(0 0 0 / 30%);
-}
-.roll[hidden] { display: none; }
-.roll.pop { animation: pop .18s ease-out; }
-@keyframes pop { from { transform: translateX(-50%) scale(.92); opacity: 0; } }
 .roll-label { font-size: .8rem; text-transform: uppercase; letter-spacing: .06em; opacity: .75; }
 .roll-total { font: 700 2.3rem/1.1 var(--serif); }
 .roll-total small { font: 400 .9rem var(--sans); opacity: .8; }
@@ -625,7 +615,6 @@ button.wide { width: 100%; margin-top: .3rem; padding: .6rem; }
 .roll-total.fumble { color: #ff8a7a; }
 .roll-total.damage { font-size: 1.8rem; margin-top: .3rem; }
 .roll-detail { font-size: .85rem; font-variant-numeric: tabular-nums; }
-.roll .muted { color: inherit; opacity: .65; }
 
 dialog.bottom-sheet {
   margin: auto auto 0; width: 100%; max-width: 32rem; max-height: 90dvh;
@@ -705,8 +694,80 @@ li.roll-fumble .roll-line strong { color: var(--danger); }
 .chip.status.on { background: var(--accent); border: 1px solid var(--accent); color: var(--accent-text); }
 .chip.status small { opacity: .85; }
 /* Situational damage offered on an attack roll. */
-.roll-extras { display: flex; flex-wrap: wrap; gap: .4rem; justify-content: center; margin-top: .5rem; }
-.roll-extra { font-size: .85rem; padding: .3rem .7rem; border-radius: 999px; }
-.roll-extra { background: transparent; color: inherit; border: 1px solid currentColor; }
 .attack-top { grid-template-columns: minmax(8rem, 1fr) minmax(0, 1.3fr) auto; }
 .attack-total { white-space: normal; font-size: .9rem; }
+
+/* -- roll screen: checks and attacks take over the screen ------------------------- */
+
+.roll-screen {
+  position: fixed; inset: 0; z-index: 30; overflow-y: auto;
+  display: flex; flex-direction: column;
+  background: var(--bg);
+  padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom);
+}
+.roll-screen[hidden] { display: none; }
+body.screen-open { overflow: hidden; }
+.screen-top {
+  display: flex; align-items: center; justify-content: space-between; gap: .5rem;
+  padding: .7rem 1rem; border-bottom: 1px solid var(--border); background: var(--surface);
+}
+.screen-top h2 { font-size: 1.15rem; }
+.screen-top .icon { font-size: 1.6rem; padding: .2rem .6rem; }
+.screen-body {
+  flex: 1; width: 100%; max-width: 32rem; margin: 0 auto; padding: 1.2rem 1rem;
+  display: flex; flex-direction: column; gap: .6rem; text-align: center;
+}
+.screen-body.pop { animation: tray-pop .18s ease-out; }
+.screen-body h3 { text-align: left; margin-top: .6rem; }
+.screen-actions {
+  position: sticky; bottom: 0; display: flex; gap: .5rem;
+  width: 100%; max-width: 32rem; margin: 0 auto; padding: .7rem 1rem calc(.9rem + env(safe-area-inset-bottom));
+  background: var(--bg); border-top: 1px solid var(--border);
+}
+.screen-actions button { flex: 1; padding: .9rem .4rem; font-size: 1.05rem; font-weight: 600; border-radius: 12px; }
+
+.big-total { font: 700 5rem/1 var(--serif); font-variant-numeric: tabular-nums; margin-top: 1rem; }
+.big-total small { font: 400 1.1rem var(--sans); color: var(--muted); }
+.big-total.damage { font-size: 4rem; }
+.big-total.crit { color: var(--ok); }
+.big-total.fumble { color: var(--danger); }
+.screen-body .roll-detail { font-size: 1rem; }
+.screen-body .roll-detail.muted { font-size: .88rem; color: var(--muted); word-break: break-word; }
+.dice-pair strong { margin-right: .35rem; }
+.dice-pair s { color: var(--muted); }
+.adv-line { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; margin: .4rem 0; }
+.adv-line > div { display: flex; flex-direction: column; padding: .5rem; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+.adv-line span { font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.adv-line strong { font: 600 1.6rem var(--serif); }
+.crit-note { color: var(--ok); font-weight: 600; margin: 0; }
+.fumble-note { color: var(--danger); font-weight: 600; margin: 0; }
+.reminder {
+  margin: .3rem 0 0; padding: .6rem .8rem; text-align: left; border-radius: 10px;
+  border: 1px solid var(--warn); color: var(--warn); background: color-mix(in srgb, var(--warn) 10%, var(--surface));
+}
+.reminder::before { content: "⚠ "; }
+
+.attack-summary { display: grid; grid-template-columns: auto 1fr; gap: .5rem; text-align: left; }
+.attack-summary > div { display: flex; flex-direction: column; padding: .55rem .8rem; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+.attack-summary span { font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; }
+.attack-summary strong { font: 600 1.3rem var(--serif); }
+.attack-summary > div:last-child strong { font: 600 1rem var(--sans); }
+.choice-row { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; }
+button.choice {
+  display: flex; flex-direction: column; align-items: flex-start; gap: .1rem; width: 100%;
+  padding: .7rem .9rem; text-align: left; white-space: normal; border-radius: 12px;
+  background: var(--surface); border: 2px solid var(--border);
+}
+button.choice.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--surface)); }
+button.choice.on .choice-name::after { content: " ✓"; color: var(--accent); }
+.choice-name { font-weight: 600; font-size: 1.02rem; }
+.choice-detail { font-size: .85rem; color: var(--muted); }
+.choice-note { font-size: .82rem; color: var(--warn); }
+
+/* the editor's attack options */
+.option { padding: .45rem 0; border-bottom: 1px dotted var(--border); display: flex; flex-direction: column; gap: .3rem; }
+.option-top { display: grid; grid-template-columns: 1fr auto auto; gap: .4rem; align-items: center; }
+.option-top select { width: auto; }
+.option .amount { width: 4.5rem !important; }
+.option-applies { display: flex; flex-direction: column; gap: .2rem; }
+.attack-summary small { color: var(--accent); font-weight: 600; }

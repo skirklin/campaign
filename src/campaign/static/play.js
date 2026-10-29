@@ -40,8 +40,8 @@ export class PlayView extends SheetView {
     this.head = h("div.play-head");
     this.panel = h("div.play-panel");
     this.tabbar = h("nav.play-tabs", { "aria-label": "Sheet sections" });
-    this.rollBox = h("div.roll", { hidden: true, onclick: () => (this.rollBox.hidden = true) });
-    const el = h("div.play", this.head, this.panel, this.rollBox, this.tabbar);
+    this.screenEl = h("div.roll-screen", { hidden: true, role: "dialog", "aria-modal": "true" });
+    const el = h("div.play", this.head, this.panel, this.screenEl, this.tabbar);
     this.el = el;
     this.rerender();
     keepAwake();
@@ -130,7 +130,7 @@ export class PlayView extends SheetView {
       .filter(([key]) => key !== "spells" || this.sheet.spells.length || this.slotResources().length)
       .map(([key, label, icon]) => h("button", {
         className: key === this.tab ? "active" : "", "aria-current": key === this.tab ? "page" : undefined,
-        onclick: () => { this.tab = key; this.rollBox.hidden = true; this.renderPanel(); this.renderTabs(); window.scrollTo({ top: 0 }); },
+        onclick: () => { this.tab = key; this.renderPanel(); this.renderTabs(); window.scrollTo({ top: 0 }); },
       }, h("span.tab-icon", { "aria-hidden": "true" }, icon), label)));
   }
 
@@ -158,7 +158,7 @@ export class PlayView extends SheetView {
         mini("Passive Perc.", n(d.passive_perception)),
         d.spell_save_dc !== undefined && mini("Spell DC", n(d.spell_save_dc)),
         d.spell_attack !== undefined && mini("Spell atk", sign(n(d.spell_attack)), () => this.roll("Spell attack", d.spell_attack))),
-      s.attacks.length > 0 && block("Attacks", s.attacks.map((a, i) => h("button.play-row.play-attack", { onclick: () => this.attack(a, d.attacks[i]) },
+      s.attacks.length > 0 && block("Attacks", s.attacks.map((a, i) => h("button.play-row.play-attack", { onclick: () => this.attack(i) },
         h("span.row-main", h("strong", a.name || "Attack"), a.notes && h("small.muted", a.notes)),
         h("span.badge-num", sign(n(d.attacks[i].to_hit))),
         d.attacks[i].text && h("span.row-side", d.attacks[i].text)))),
@@ -436,6 +436,32 @@ export class PlayView extends SheetView {
   }
 
   // -- dice -------------------------------------------------------------------
+  // Rolls take over the screen: a check shows its result at once; an attack
+  // first asks what's being chosen (advantage, Reckless Attack, Rage…), then
+  // rolls to hit, then on a hit rolls damage.
+
+  // Show the roll screen: a title, a body, and the buttons along the bottom.
+  screen(title, body, actions) {
+    this.screenEl.replaceChildren(
+      h("div.screen-top", h("h2", title),
+        h("button.icon", { "aria-label": "Close", onclick: () => this.closeScreen() }, "×")),
+      h("div.screen-body", ...[body].flat(Infinity).filter(Boolean)),
+      h("div.screen-actions", ...actions.filter(Boolean)));
+    if (this.screenEl.hidden) {
+      this.screenEl.hidden = false;
+      document.body.classList.add("screen-open");
+      this.onKey = (e) => { if (e.key === "Escape") this.closeScreen(); };
+      document.addEventListener("keydown", this.onKey);
+    }
+    this.screenEl.scrollTop = 0;
+    this.screenEl.querySelector(".screen-body").classList.add("pop");
+  }
+
+  closeScreen() {
+    this.screenEl.hidden = true;
+    document.body.classList.remove("screen-open");
+    document.removeEventListener("keydown", this.onKey);
+  }
 
   // A d20 roll. A second d20 is shown alongside for advantage or disadvantage.
   // `bonus` is a number, or {total, parts} from the server, whose parts are shown.
@@ -444,63 +470,176 @@ export class PlayView extends SheetView {
     const a = d(20), b = d(20);
     const flag = a === 20 ? "crit" : a === 1 ? "fumble" : "";
     const detail = `d20: ${a} ${fmtMod(mod)}`.trim();
-    this.showRoll(label, [
-      h("div.roll-total", { className: `roll-total${flag ? ` ${flag}` : ""}` }, a + mod),
-      h("div.roll-detail", detail),
-      h("div.roll-detail.muted", `2nd d20: ${b} → ${b + mod} · adv ${Math.max(a, b) + mod} · dis ${Math.min(a, b) + mod}`),
+    this.screen(label, [
+      h("div.big-total", { className: `big-total${flag ? ` ${flag}` : ""}` }, a + mod),
+      h("div.roll-detail", detail, flag === "crit" ? " · natural 20" : flag === "fumble" ? " · natural 1" : ""),
+      h("div.adv-line",
+        h("div", h("span", "Advantage"), h("strong", Math.max(a, b) + mod)),
+        h("div", h("span", "Disadvantage"), h("strong", Math.min(a, b) + mod))),
+      h("div.roll-detail.muted", `2nd d20: ${b}`),
       bonus?.parts?.length > 0 && h("div.roll-detail.muted", partsText(bonus)),
+    ], [
+      h("button", { onclick: () => this.roll(label, bonus) }, "Roll again"),
+      h("button.primary", { onclick: () => this.closeScreen() }, "Done"),
     ]);
     this.record({ label, summary: String(a + mod), detail: `${detail} · 2nd d20: ${b} → ${b + mod}`, flag });
   }
 
-  // To hit and the damage that always applies, from the server's numbers (`da`:
-  // derived.attacks[i]). Situational damage (Sneak Attack, "vs giants") is offered
-  // as buttons on the result: tapping one rolls it and adds it to this roll.
-  attack(a, da) {
-    const name = a.name || "Attack";
-    const toHit = n(da.to_hit);
-    const first = d(20), second = d(20);
-    const crit = first === 20;
-    const flag = crit ? "crit" : first === 1 ? "fumble" : "";
-    const rollPart = (part) => {
-      const expr = parseExpr(`${part.dice || "0"}${part.bonus.total ? sign(part.bonus.total) : ""}`);
+  // Statuses that change this attack's numbers (Rage): offered as toggles before rolling.
+  attackStatuses(i) {
+    const a = this.sheet.attacks[i];
+    const bonuses = [...this.sheet.bonuses, ...this.sheet.inventory.filter((it) => it.equipped).flatMap((it) => it.bonuses || [])];
+    const names = new Set(bonuses.filter((b) => b.during && /^(attack|damage)/.test(b.target)).map((b) => b.during.toLowerCase()));
+    return a ? this.sheet.statuses.filter((st) => names.has(st.name.toLowerCase())) : [];
+  }
+
+  // Step 1: what's chosen for this attack. Choices are kept per attack until the page is left,
+  // so a second swing (Extra Attack) starts from the first's.
+  attack(i) {
+    const a = this.sheet.attacks[i], da = this.derived.attacks[i];
+    if (!a || !da) return;
+    this.choices ||= new Map();
+    const c = this.choices.get(i) || { adv: "", options: new Set() };
+    this.choices.set(i, c);
+    const options = (da.options || []).map((k) => ({ k, o: this.sheet.attack_options[k], v: this.derived.attack_options[k] }));
+    const chosen = options.filter(({ k }) => c.options.has(k));
+    const toHit = n(da.to_hit) + chosen.reduce((t, x) => t + x.v.to_hit, 0);
+    const extraDamage = chosen.reduce((t, x) => t + x.v.damage, 0);
+    const toggle = (on, label, detail, onclick, note) => h("button.choice", {
+      className: `choice${on ? " on" : ""}`, "aria-pressed": String(on), onclick,
+    }, h("span.choice-name", label), detail && h("span.choice-detail", detail), note && h("span.choice-note", note));
+    const effect = (o, v) => [o.advantage, v.to_hit ? `${sign(v.to_hit)} to hit` : "", v.damage ? `${sign(v.damage)} damage` : ""]
+      .filter(Boolean).join(", ");
+    const statuses = this.attackStatuses(i);
+    this.screen(a.name || "Attack", [
+      h("div.attack-summary",
+        h("div", h("span.muted", "To hit"), h("strong", sign(toHit))),
+        h("div", h("span.muted", "Damage"), h("strong", da.text || "—"),
+          extraDamage !== 0 && h("small", `${sign(extraDamage)} from ${chosen.filter((x) => x.v.damage).map((x) => x.o.name).join(", ")}`))),
+      h("div.choice-row",
+        toggle(c.adv === "advantage", "Advantage", "", () => { c.adv = c.adv === "advantage" ? "" : "advantage"; this.attack(i); }),
+        toggle(c.adv === "disadvantage", "Disadvantage", "", () => { c.adv = c.adv === "disadvantage" ? "" : "disadvantage"; this.attack(i); })),
+      options.length > 0 && h("h3", "Options"),
+      options.map(({ k, o, v }) => toggle(c.options.has(k), o.name, effect(o, v), () => {
+        if (c.options.has(k)) c.options.delete(k); else c.options.add(k);
+        this.attack(i);
+      }, o.note)),
+      statuses.length > 0 && h("h3", "Statuses"),
+      statuses.map((st) => toggle(st.active, st.name, st.active ? "on" : `off${st.resource ? ` · starting it spends ${st.resource}` : ""}`,
+        async () => {
+          if (!this.canEdit) return;
+          this.toggleStatus(st);
+          await this.flush();  // the server works out what it adds
+          this.attack(i);
+        })),
+      a.notes && h("p.muted.small", a.notes),
+    ], [
+      h("button", { onclick: () => this.damage(i, false, "") }, "Damage only"),
+      h("button.primary", { onclick: () => this.rollToHit(i) }, "Roll to hit"),
+    ]);
+  }
+
+  // Step 2: the attack roll, with advantage or disadvantage from the choices (both cancel out).
+  rollToHit(i) {
+    const a = this.sheet.attacks[i], da = this.derived.attacks[i];
+    const c = this.choices.get(i);
+    const chosen = (da.options || []).filter((k) => c.options.has(k)).map((k) => ({ o: this.sheet.attack_options[k], v: this.derived.attack_options[k] }));
+    const sources = { advantage: [], disadvantage: [] };
+    if (c.adv) sources[c.adv].push("chosen");
+    for (const { o } of chosen) if (o.advantage) sources[o.advantage].push(o.name);
+    const mode = sources.advantage.length && !sources.disadvantage.length ? "advantage"
+      : sources.disadvantage.length && !sources.advantage.length ? "disadvantage" : "";
+    const toHit = n(da.to_hit) + chosen.reduce((t, x) => t + x.v.to_hit, 0);
+    const r1 = d(20), r2 = d(20);
+    const kept = mode === "advantage" ? Math.max(r1, r2) : mode === "disadvantage" ? Math.min(r1, r2) : r1;
+    const flag = kept === 20 ? "crit" : kept === 1 ? "fumble" : "";
+    const label = `${a.name || "Attack"}${chosen.length ? ` (${chosen.map((x) => x.o.name).join(", ")})` : ""}`;
+    const dice = mode ? h("span.dice-pair", h("strong", kept), h("s", kept === r1 ? r2 : r1)) : h("strong", r1);
+    const why = mode && `with ${mode}${sources[mode].filter((x) => x !== "chosen").length ? ` (${sources[mode].filter((x) => x !== "chosen").join(", ")})` : ""}`;
+    const notes = chosen.map((x) => x.o.note).filter(Boolean);
+    this.screen(label, [
+      h("div.big-total", { className: `big-total${flag ? ` ${flag}` : ""}` }, kept + toHit, h("small", " to hit")),
+      h("div.roll-detail", "d20: ", dice, ` ${fmtMod(toHit)}`, why ? ` · ${why}` : ""),
+      flag === "crit" && h("p.crit-note", "Natural 20: a critical hit."),
+      flag === "fumble" && h("p.fumble-note", "Natural 1: a miss."),
+      !mode && h("div.roll-detail.muted", `2nd d20: ${r2} → ${r2 + toHit}`),
+      sources.advantage.length > 0 && sources.disadvantage.length > 0 && h("p.muted.small", "Advantage and disadvantage cancel out."),
+      notes.map((t) => h("p.reminder", t)),
+    ], [
+      h("button", { onclick: () => this.closeScreen() }, flag === "fumble" ? "Done" : "Miss"),
+      flag !== "fumble" && h("button.primary", { onclick: () => this.damage(i, flag === "crit", label) }, flag === "crit" ? "Crit! Roll damage" : "Hit: roll damage"),
+    ]);
+    this.record({ label, summary: `to hit ${kept + toHit}`,
+      detail: `d20: ${mode ? `${r1}, ${r2} (${mode})` : r1} ${fmtMod(toHit)}`, flag });
+  }
+
+  // Step 3: damage that always applies, plus the options' damage on the main part.
+  // Situational damage (Sneak Attack, Charge, a smite) is offered as buttons, spending
+  // a resource where it says so. `label` is set when this follows a to-hit roll in the history.
+  damage(i, crit, label) {
+    const a = this.sheet.attacks[i], da = this.derived.attacks[i];
+    const c = this.choices.get(i);
+    const chosen = (da.options || []).filter((k) => c.options.has(k)).map((k) => ({ o: this.sheet.attack_options[k], v: this.derived.attack_options[k] }));
+    const rollPart = (part, extra = 0) => {
+      const bonus = part.bonus.total + extra;
+      const expr = parseExpr(`${part.dice || "0"}${bonus ? sign(bonus) : ""}`);
       const r = expr.dice.length ? rollExpr(expr, { crit }) : { total: expr.mod, detail: String(expr.mod) };
       return { total: Math.max(0, r.total), type: part.type || "damage", detail: r.detail, label: part.situational };
     };
-    const damage = da.damage.filter((p) => !p.situational).map(rollPart);
+    const regular = da.damage.filter((p) => !p.situational);
+    const optionDamage = chosen.reduce((t, x) => t + x.v.damage, 0);
+    const rolled = regular.map((p, j) => rollPart(p, j === 0 ? optionDamage : 0));
     const extras = da.damage.filter((p) => p.situational);
     const added = new Set();
-    const hitDetail = `d20: ${first} ${fmtMod(toHit)} · 2nd d20: ${second} → ${second + toHit}`;
-    const summarize = () => {
-      const each = damage.map((x) => `${x.total} ${x.type}${x.label ? ` (${x.label})` : ""}`).join(" + ");
-      const dice = damage.map((x) => x.detail).join(" · ") + (crit ? " (crit: dice doubled)" : "");
-      return { each, dice, total: damage.reduce((t, x) => t + x.total, 0) };
-    };
+    const fresh = !label;
+    label = label || `${a.name || "Attack"} damage`;
     const render = () => {
-      const { each, dice, total } = summarize();
-      this.showRoll(name, [
-        h("div.roll-total", { className: `roll-total${flag ? ` ${flag}` : ""}` }, first + toHit, h("small", " to hit")),
-        h("div.roll-detail", `d20: ${first} ${fmtMod(toHit)}${crit ? " · critical!" : ""}`),
-        h("div.roll-detail.muted", `2nd d20: ${second} → ${second + toHit}`),
-        damage.length > 0 && h("div.roll-total.damage", total, h("small", ` ${damage.length > 1 ? "damage" : damage[0].type}`)),
-        damage.length > 1 && h("div.roll-detail", each),
-        damage.length > 0 && h("div.roll-detail", dice),
-        extras.some((_, i) => !added.has(i)) && h("div.roll-extras", extras.map((p, i) => !added.has(i) && h("button.roll-extra", {
-          onclick: (e) => {
-            e.stopPropagation();  // the roll box closes on a tap
-            added.add(i);
-            damage.push(rollPart(p));
+      const total = rolled.reduce((t, x) => t + x.total, 0);
+      const each = rolled.map((x) => `${x.total} ${x.type}${x.label ? ` (${x.label})` : ""}`).join(" + ");
+      this.screen(a.name || "Attack", [
+        h("div.big-total.damage", total, h("small", ` damage${crit ? " · critical" : ""}`)),
+        rolled.length > 1 && h("div.roll-detail", each),
+        h("div.roll-detail.muted", rolled.map((x) => x.detail).join(" · ") + (crit ? " (dice doubled)" : "")),
+        optionDamage !== 0 && h("div.roll-detail.muted", chosen.filter((x) => x.v.damage).map((x) => `${x.o.name} ${sign(x.v.damage)}`).join(" · ")),
+        extras.some((_, k) => !added.has(k)) && h("h3", "If it applies"),
+        extras.map((p, k) => !added.has(k) && h("button.choice", {
+          onclick: () => {
+            if (p.spends && !this.spend(p.spends, p.situational)) return;
+            added.add(k);
+            rolled.push(rollPart(p));
             render();
-            const s2 = summarize();
-            this.amendRoll({ summary: `to hit ${first + toHit} · ${s2.each}`, detail: `${hitDetail} · ${s2.dice}` });
           },
-        }, `+ ${p.situational}`, h("small", ` ${p.dice}${p.bonus.total ? sign(p.bonus.total) : ""} ${p.type}`)))),
+        }, h("span.choice-name", `+ ${p.situational}`),
+          h("span.choice-detail", `${p.dice}${p.bonus.total ? sign(p.bonus.total) : ""} ${p.type}${p.spends ? ` · spends ${p.spends}` : ""}`))),
+      ], [
+        h("button", { onclick: () => this.attack(i) }, "Attack again"),
+        h("button.primary", { onclick: () => this.closeScreen() }, "Done"),
       ]);
+      const summary = `${total} damage${rolled.length > 1 ? ` (${each})` : ` ${rolled[0]?.type || ""}`.trimEnd()}`;
+      const detail = rolled.map((x) => x.detail).join(" · ") + (crit ? " (crit)" : "");
+      if (fresh && !this.damageRecorded) {
+        this.record({ label, summary, detail, flag: "" });
+        this.damageRecorded = true;
+      } else if (fresh) {
+        this.amendRoll({ summary, detail });
+      } else {
+        const hit = this.rolls?.[0];
+        this.amendRoll({ summary: `${hit?.summary.split(" · ")[0]} · ${summary}`, detail: `${hit?.detail.split(" · ")[0]} · ${detail}` });
+      }
     };
+    this.damageRecorded = false;
     render();
-    const s1 = summarize();
-    this.record({ label: name, summary: [`to hit ${first + toHit}`, s1.each].filter(Boolean).join(" · "),
-      detail: [hitDetail, damage.length && s1.dice].filter(Boolean).join(" · "), flag });
+  }
+
+  // Use up one of a resource by name; asks first when none are left. False if not spent.
+  spend(name, what) {
+    const r = this.sheet.resources.find((x) => x.name.toLowerCase() === name.toLowerCase());
+    if (!r) return true;
+    if (r.used >= r.max && !confirm(`No ${r.name} left. Add ${what} anyway?`)) return false;
+    r.used = Math.min(r.max, r.used + 1);
+    this.changed(`${what}: ${r.name} ${r.max - r.used}/${r.max}`);
+    this.renderPanel();
+    return true;
   }
 
   // -- roll history ---------------------------------------------------------------
@@ -624,15 +763,6 @@ export class PlayView extends SheetView {
       this.historyBox(8));
   }
 
-  showRoll(label, body) {
-    clearTimeout(this.rollTimer);
-    this.rollBox.replaceChildren(h("div.roll-label", label), ...body.filter(Boolean));
-    this.rollBox.hidden = false;
-    this.rollBox.classList.remove("pop");
-    void this.rollBox.offsetWidth;
-    this.rollBox.classList.add("pop");
-    this.rollTimer = setTimeout(() => (this.rollBox.hidden = true), 8000);
-  }
 }
 
 // -- helpers -----------------------------------------------------------------

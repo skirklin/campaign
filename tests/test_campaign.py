@@ -264,3 +264,39 @@ def test_nicknames_are_world_aliases(store):
     assert "Cid" in t["get_character"](name="Lycidus")
     from campaign.world import World
     assert World(store, camp).resolve("Lycidus")["name"] == "Cid"
+
+
+def test_attack_options_apply_to_the_attacks_they_name():
+    sheet = CharacterSheet(
+        name="Cid", classes=[{"name": "Barbarian", "level": 7}], abilities={"str": 20},
+        attacks=[
+            Attack(name="Greataxe", range="5 ft", properties=["heavy", "two-handed"],
+                   damage=[Damage(dice="1d12", type="slashing", add_ability=True)]),
+            Attack(name="Spear", range="20/60 ft", properties=["thrown 20/60", "versatile 1d10"],
+                   damage=[Damage(dice="1d8", type="piercing", add_ability=True)]),
+            Attack(name="Longbow", range="150/600 ft", properties=["heavy", "ammunition"],
+                   damage=[Damage(dice="1d8", type="piercing", add_ability=True),
+                           Damage(dice="2d8", type="thunder", situational="Thunderous Shot", spends="Thunderous Shot")]),
+            Attack(name="Fire bolt", ability="spell", range="120 ft"),
+        ],
+        attack_options=[
+            {"name": "Reckless Attack", "applies_to": ["str", "melee"], "advantage": "advantage",
+             "note": "Attacks against you have advantage until your next turn."},
+            {"name": "Great Weapon Master", "applies_to": ["heavy", "melee"], "to_hit": -5, "damage": 10},
+            {"name": "Sharpshooter", "applies_to": ["ranged", "weapon"], "to_hit": -5, "damage": "2*prof"},
+            {"name": "Bless", "applies_to": []},
+        ],
+    )
+    d = sheet.derived()
+    names = [[sheet.attack_options[i].name for i in a["options"]] for a in d["attacks"]]
+    assert names == [
+        ["Reckless Attack", "Great Weapon Master", "Bless"],  # heavy melee, STR
+        ["Reckless Attack", "Sharpshooter", "Bless"],  # thrown: melee and ranged
+        ["Sharpshooter", "Bless"],  # ammunition: ranged only
+        ["Bless"],  # a spell, not a weapon
+    ]
+    assert d["attack_options"][1] == {"to_hit": -5, "damage": 10}
+    assert d["attack_options"][2] == {"to_hit": -5, "damage": 6}  # 2 x proficiency, which follows the level
+    assert d["attacks"][2]["damage"][1]["spends"] == "Thunderous Shot"
+    with pytest.raises(ValueError):
+        CharacterSheet(name="X", attack_options=[{"name": "Odd", "advantage": "always"}])
