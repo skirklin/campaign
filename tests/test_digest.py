@@ -297,3 +297,18 @@ def test_pdf_outline_tree(tmp_path):
     assert by_node[0] == ["The village is grim."]
     assert by_node[1] == ["Donavich prays."]
     assert by_node[2] == ["The hags bake pies."]
+
+
+def test_fallback_only_for_models_that_support_it():
+    seen = []
+
+    def stream(**kw):
+        seen.append(kw)
+        return FakeStream(NS(stop_reason="end_turn", parsed_output=LeafOutput(summary="s", entities=[]),
+                             usage=NS(input_tokens=1, output_tokens=1)))
+
+    client = NS(beta=NS(messages=NS(stream=stream)))
+    digest._call(client, "sys", "user", LeafOutput, "claude-opus-5-5", "medium")
+    digest._call(client, "sys", "user", LeafOutput, "claude-haiku-5-5", "medium")
+    assert seen[0]["fallbacks"] == "default" and seen[0]["betas"] == [digest.FALLBACK_BETA]
+    assert "fallbacks" not in seen[1] and "betas" not in seen[1]
