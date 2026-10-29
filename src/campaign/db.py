@@ -331,12 +331,29 @@ CREATE TABLE oauth_grants (
 CREATE INDEX oauth_grants_user ON oauth_grants(user_id);
 """
 
+# v7: digesting is declarative. A source says which model it should be
+# digested with (digest_model; NULL = leave it); the digest cache is what has
+# actually been done; a reconciliation loop (digest.Reconciler) closes the gap.
+# digest_failures remembers sections that failed, by content key, so the loop
+# backs off instead of paying for the same failure over and over.
+V7_DIGEST_TARGET = """
+ALTER TABLE sources ADD COLUMN digest_model TEXT;
+ALTER TABLE sources ADD COLUMN digest_effort TEXT;
+CREATE TABLE digest_failures (
+    key       TEXT PRIMARY KEY,
+    attempts  INTEGER NOT NULL,
+    error     TEXT NOT NULL,
+    retry_at  INTEGER            -- epoch seconds; NULL = gave up until asked again
+);
+"""
+
 # Append only, for changes small enough to migrate. Each step runs in its
 # own transaction and then sets user_version to its number.
 MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (BASELINE, SCHEMA),
     (5, V5_CHARACTERS),
     (6, V6_OAUTH),
+    (7, V7_DIGEST_TARGET),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 
@@ -631,7 +648,7 @@ class Store:
     def sources(self, campaign: Campaign) -> list[dict[str, Any]]:
         rows = self.conn.execute(
             "SELECT s.id, s.title, s.kind, s.dm_only, s.filename, s.blob IS NOT NULL AS has_original,"
-            " s.chunker_version, count(c.id) AS chunks,"
+            " s.chunker_version, s.digest_model, count(c.id) AS chunks,"
             " min(c.page) AS first_page, max(c.page) AS last_page"
             " FROM sources s LEFT JOIN chunks c ON c.source_id = s.id"
             " WHERE s.campaign_id = ? GROUP BY s.id ORDER BY s.id",
@@ -751,6 +768,66 @@ class Store:
                 "UPDATE digest_nodes SET digest_key = coalesce(?, digest_key), error = ? WHERE id = ?",
                 (key, error, node_id),
             )
+
+    # -- digest targets (desired state) ------------------------------------------
+
+    def set_digest_target(self, source_id: int, model: str | None, effort: str | None = None) -> None:
+        """Ask for a source to be digested with `model` (None: stop asking)."""
+        with self.conn:
+            self.conn.execute(
+                "UPDATE sources SET digest_model = ?, digest_effort = ? WHERE id = ?",
+                (model, effort if model else None, source_id),
+            )
+
+    def digest_targets(self) -> list[dict[str, Any]]:
+        """Sources that should be digested: id, model, effort. Oldest first."""
+        rows = self.conn.execute(
+            "SELECT id, digest_model AS model, digest_effort AS effort FROM sources"
+            " WHERE digest_model IS NOT NULL ORDER BY id"
+        )
+        return [dict(r) for r in rows]
+
+    def source_signature(self, source_id: int) -> tuple[Any, ...]:
+        """Changes whenever a source's content is replaced (its chunks get new ids)."""
+        row = self.conn.execute(
+            "SELECT count(*), coalesce(max(id), 0), coalesce(sum(id), 0) FROM chunks WHERE source_id = ?", (source_id,)
+        ).fetchone()
+        return tuple(row)
+
+    def digest_failure(self, key: str) -> dict[str, Any] | None:
+        row = self.conn.execute("SELECT * FROM digest_failures WHERE key = ?", (key,)).fetchone()
+        return None if row is None else dict(row)
+
+    def record_digest_failure(self, key: str, error: str, at: int, max_attempts: int, base_delay: int) -> dict[str, Any]:
+        """Count a failure; retry after base_delay * 4^(attempts-1) seconds, or give up after max_attempts."""
+        prev = self.digest_failure(key)
+        attempts = (prev["attempts"] if prev else 0) + 1
+        retry_at = at + base_delay * 4 ** (attempts - 1) if attempts < max_attempts else None
+        with self.conn:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO digest_failures (key, attempts, error, retry_at) VALUES (?, ?, ?, ?)",
+                (key, attempts, error, retry_at),
+            )
+        return {"key": key, "attempts": attempts, "error": error, "retry_at": retry_at}
+
+    def clear_digest_failures(self, keys: Iterable[str]) -> None:
+        with self.conn:
+            self.conn.executemany("DELETE FROM digest_failures WHERE key = ?", [(k,) for k in keys])
+
+    def existing_digest_plan(self, source_id: int) -> list[dict[str, Any]]:
+        """The saved plan's rows in order, with each parent as an index into the list."""
+        rows = [dict(r) for r in self.conn.execute(
+            "SELECT id, parent_id, title, is_leaf, chars, digest_key, error FROM digest_nodes"
+            " WHERE source_id = ? ORDER BY seq", (source_id,))]
+        index = {r["id"]: i for i, r in enumerate(rows)}
+        for r in rows:
+            r["parent"] = index.get(r["parent_id"])
+        return rows
+
+    def update_digest_nodes(self, updates: list[tuple[str | None, str | None, int]]) -> None:
+        """(digest_key, error, id) for each row whose state changed."""
+        with self.conn:
+            self.conn.executemany("UPDATE digest_nodes SET digest_key = ?, error = ? WHERE id = ?", updates)
 
     def digest_status(self, source_id: int) -> dict[str, Any]:
         row = self.conn.execute(

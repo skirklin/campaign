@@ -2,6 +2,7 @@
 
 import json
 import re
+import time
 from types import SimpleNamespace as NS
 
 import pymupdf
@@ -161,7 +162,7 @@ def test_branch_version_bump_skips_leaves(env, monkeypatch):
     assert {k for k, _ in fake.calls} == {"branch"} and len(fake.calls) == 3
 
 
-def test_failure_is_isolated_and_resumable(env):
+def test_failure_is_isolated_and_resumable(env, monkeypatch):
     store, camp, db = env
     r = upload(store, camp)
     stats = digest.run(db, r["id"], client=FakeDigest(fail_on="Windmill"))
@@ -172,10 +173,47 @@ def test_failure_is_isolated_and_resumable(env):
     assert outline["Chapter 1"]["summary"] == "Branch summary of Chapter 1"
     assert World(store, camp).list() == []  # nothing applied until the root is done
 
+    # Running again right away doesn't pay for the same failure again: it backs off.
     fake = FakeDigest()
+    assert digest.run(db, r["id"], client=fake)["waiting"] == 1 and fake.calls == []
+    # Once the backoff has passed, the next run retries it and finishes the book.
+    later = time.time() + digest.RETRY_SECONDS + 1
+    monkeypatch.setattr(digest.time, "time", lambda: later)
     digest.run(db, r["id"], client=fake)
     assert fake.calls == [("leaf", "Windmill"), ("branch", "Chapter 2"), ("branch", "Book")]
     assert len(World(store, camp).list()) == 3
+
+
+def test_a_section_that_keeps_failing_waits_to_be_asked_again(env, monkeypatch):
+    store, camp, db = env
+    r = upload(store, camp)
+    clock = [time.time()]
+    monkeypatch.setattr(digest.time, "time", lambda: clock[0])
+    for _ in range(digest.MAX_ATTEMPTS):
+        assert digest.run(db, r["id"], client=FakeDigest(fail_on="Windmill"))["failed"] == 1
+        clock[0] += 3600
+    outline = {n["title"]: n for n in store.digest_outline(r["id"])}
+    assert outline["Windmill"]["error"].startswith("boom (gave up after 3 tries)")
+    # However long it waits, it doesn't try again on its own...
+    clock[0] += 10 * 86400
+    fake = FakeDigest()
+    assert digest.run(db, r["id"], client=fake)["waiting"] == 1 and fake.calls == []
+    # ...until someone asks.
+    digest.retry_failed(store, r["id"])
+    digest.run(db, r["id"], client=fake)
+    assert ("leaf", "Windmill") in fake.calls and store.digest_status(r["id"])["done"] == 8
+
+
+def test_replanning_keeps_row_ids(env):
+    store, camp, db = env
+    r = upload(store, camp)
+    before = [n["id"] for n in store.digest_outline(r["id"])]
+    digest.run(db, r["id"], client=FakeDigest())
+    digest.plan(store, r["id"])
+    assert [n["id"] for n in store.digest_outline(r["id"])] == before
+    # A content change re-plans from scratch.
+    upload(store, camp, church="Donavich prays. His son Doru is locked below.")
+    assert digest.plan(store, r["id"]) is not None
 
 
 def test_packing_small_siblings(tmp_path):
@@ -340,3 +378,56 @@ def test_cost_needs_a_known_model():
     assert digest.cost("some-new-model", 1, 1) is None
     assert digest.spent([{"model": "some-new-model", "input_tokens": 1, "output_tokens": 1}]) is None
     assert digest.spent([]) == 0
+
+
+def test_reconciler_converges_and_a_new_one_picks_up_where_the_old_one_died(env):
+    store, camp, db = env
+    r = upload(store, camp)
+    first = FakeDigest()
+    dying = digest.Reconciler(db, client_factory=lambda: first, workers=1)
+    # Nothing is asked for yet, so nothing happens.
+    assert dying.reconcile_once() is False and first.calls == []
+
+    store.set_digest_target(r["id"], digest.MODEL, "medium")
+    # The first loop dies after two calls (say, the pod was replaced mid-digest).
+    original = first.stream
+
+    def stream(**kw):
+        if len(first.calls) == 2:
+            dying._stop.set()
+        return original(**kw)
+
+    first.beta.messages.stream = stream
+    dying.reconcile_once()
+    done_before = {t for _, t in first.calls}
+    assert 0 < len(done_before) < 8 and store.digest_status(r["id"])["done"] < 8
+
+    # A fresh loop, knowing nothing, finishes the job without redoing anything.
+    second = FakeDigest()
+    fresh = digest.Reconciler(db, client_factory=lambda: second)
+    while fresh.reconcile_once():
+        pass
+    assert store.digest_status(r["id"])["done"] == 8
+    assert not done_before & {t for k, t in second.calls if k == "leaf"}
+    assert {e["name"] for e in store.source_catalog(r["id"])} == {"Ismark", "Donavich", "Morgantha"}
+    # Converged: further passes do nothing.
+    assert fresh.reconcile_once() is False
+
+
+def test_clearing_the_target_stops_the_loop(env):
+    store, camp, db = env
+    r = upload(store, camp)
+    store.set_digest_target(r["id"], digest.MODEL, "medium")
+    fake = FakeDigest()
+    loop = digest.Reconciler(db, client_factory=lambda: fake, workers=1)
+    original = fake.stream
+
+    def stream(**kw):
+        store.set_digest_target(r["id"], None)  # someone clicked Stop during the first call
+        return original(**kw)
+
+    fake.beta.messages.stream = stream
+    loop.reconcile_once()
+    assert len(fake.calls) == 1  # the call in flight finished and was kept; nothing more started
+    assert store.digest_status(r["id"])["done"] == 1
+    assert loop.reconcile_once() is False

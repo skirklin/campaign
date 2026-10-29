@@ -120,18 +120,31 @@ class AdminUpdate(BaseModel):
     is_admin: bool
 
 
-def create_app(db: Path | str, auth: AuthConfig | None = None, exchange: Callable | None = None) -> FastAPI:
-    """`exchange` replaces the call to Google's token endpoint (for tests)."""
+def create_app(
+    db: Path | str, auth: AuthConfig | None = None, exchange: Callable | None = None,
+    digest_client: Callable[[], Any] | None = None,
+) -> FastAPI:
+    """`exchange` replaces the call to Google's token endpoint, `digest_client` the Claude client (for tests)."""
+    # Migrate now, once, before anything else (the digest loop, the first
+    # requests) opens the database and races to create the schema.
+    Store(db).close()
     # With sign-in on, the remote MCP endpoint (and its OAuth) is served too.
     mcp = remote_server(db, auth) if auth is not None else None
+    # Digests run in the background for as long as the server does, toward
+    # whatever the sources' targets say (see digest.Reconciler).
+    reconciler = digest.Reconciler(db, **({"client_factory": digest_client} if digest_client else {}))
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        if mcp is None:
-            yield
-            return
-        async with mcp[0].session_manager.run():
-            yield
+        reconciler.start()
+        try:
+            if mcp is None:
+                yield
+            else:
+                async with mcp[0].session_manager.run():
+                    yield
+        finally:
+            reconciler.stop()
 
     # No interactive API docs: they'd be one more surface to protect.
     app = FastAPI(title="campaign", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
@@ -140,9 +153,8 @@ def create_app(db: Path | str, auth: AuthConfig | None = None, exchange: Callabl
         install_oauth(app, Provider(db, auth))
     local = auth is None
     jobs: dict[str, Job] = {}
-    digesting: dict[int, threading.Thread] = {}
     # Cost estimates for sources not yet fully digested. Planning re-reads the
-    # whole source, so it's done once, not on every poll; starting a digest
+    # whole source, so it's done once, not on every poll; asking for a digest
     # (or removing the source) forgets it.
     estimates: dict[int, dict[str, Any]] = {}
 
@@ -353,18 +365,15 @@ def create_app(db: Path | str, auth: AuthConfig | None = None, exchange: Callabl
 
     # -- reference material ------------------------------------------------------
 
-    def start_digest(source_id: int) -> bool:
-        """Digest a source in the background, unless it already is."""
-        thread = digesting.get(source_id)
-        if thread and thread.is_alive():
-            return False
+    def want_digest(s: Store, source_id: int) -> None:
+        """Set the source's target to the configured model, give failed sections another go, and nudge the loop.
+
+        Idempotent: asking twice is the same as asking once.
+        """
+        s.set_digest_target(source_id, digest.MODEL, digest.EFFORT)
+        digest.retry_failed(s, source_id)
         estimates.pop(source_id, None)
-        thread = threading.Thread(
-            target=lambda: digest.run(db, source_id), name=f"digest-{source_id}", daemon=True
-        )
-        digesting[source_id] = thread
-        thread.start()
-        return True
+        reconciler.wake()
 
     def visible_source(s: Store, c: Campaign, source_id: int, manage: bool = False) -> dict[str, Any]:
         """A source of this campaign. Players can't read DM-only ones, but their editors can still manage them."""
@@ -381,14 +390,18 @@ def create_app(db: Path | str, auth: AuthConfig | None = None, exchange: Callabl
             # Players see DM-only material listed (so editors can manage it) but never its contents.
             if c.spoiler_safe and src["dm_only"] and not at_least(c.access, "editor"):
                 continue
-            thread = digesting.get(src["id"])
-            running = bool(thread and thread.is_alive())
+            target = src["digest_model"]
+            status = s.digest_status(src["id"])
+            remaining = status["total"] - status["done"]
+            # Everything left has failed (or waits on something that has): nothing more will happen on its own.
+            stuck = bool(target) and remaining > 0 and status["failed"] >= remaining
+            running = bool(target) and (remaining > 0 or status["total"] == 0) and not stuck
             if src["kind"] != "transcript" and not running and src["id"] not in estimates:
-                # Re-plans against the current model, so the counts below match what a digest would do.
-                estimates[src["id"]] = digest.estimate(s, digest.plan(s, src["id"]))
-            status = s.digest_status(src["id"]) | {"running": running, "model": digest.MODEL,
-                                                    "spent_usd": digest.spent(s.digest_usage(src["id"]))}
-            if not running and status["done"] < status["total"] and src["id"] in estimates:
+                # Planned against the current model (without saving), so it shows what a digest would do.
+                estimates[src["id"]] = digest.estimate(s, digest.plan(s, src["id"], save=False))
+            status |= {"running": running, "stuck": stuck, "target": target, "model": target or digest.MODEL,
+                       "spent_usd": digest.spent(s.digest_usage(src["id"]))}
+            if not running and remaining > 0 and src["id"] in estimates:
                 status["estimate"] = estimates[src["id"]]
             out.append(src | {"digest": status})
         return out
@@ -414,15 +427,24 @@ def create_app(db: Path | str, auth: AuthConfig | None = None, exchange: Callabl
         except Exception as err:
             raise HTTPException(422, f"couldn't read {file.filename}: {err}")
         estimates[result["id"]] = result["estimate"]
-        result["digesting"] = bool(digest_now and result["pending"]) and start_digest(result["id"])
+        result["digesting"] = bool(digest_now and result["pending"])
+        if result["digesting"]:
+            want_digest(s, result["id"])
         return result
 
     @app.post("/api/campaigns/{slug}/sources/{source_id}/digest", status_code=202)
     def run_digest(source_id: int, c: Campaign = Depends(editor), s: Store = Depends(store)) -> dict[str, Any]:
+        """Ask for the source to be digested (and failed sections retried). Safe to repeat."""
         visible_source(s, c, source_id, manage=True)
-        if not start_digest(source_id):
-            raise HTTPException(409, "already digesting")
+        want_digest(s, source_id)
         return {"digesting": True}
+
+    @app.delete("/api/campaigns/{slug}/sources/{source_id}/digest", status_code=204)
+    def stop_digest(source_id: int, c: Campaign = Depends(editor), s: Store = Depends(store)) -> None:
+        """Stop asking: the loop finishes the calls in flight (they're kept) and starts no more."""
+        visible_source(s, c, source_id, manage=True)
+        s.set_digest_target(source_id, None)
+        estimates.pop(source_id, None)
 
     @app.get("/api/campaigns/{slug}/sources/{source_id}/outline")
     def source_outline(source_id: int, c: Campaign = Depends(reader), s: Store = Depends(store)) -> list[dict]:
