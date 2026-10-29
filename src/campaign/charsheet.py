@@ -149,7 +149,8 @@ class Attack(Model):
     hit_bonus: int = 0
     damage: list[Damage] = []
     range: str = ""  # "5 ft", "20/60 ft"
-    notes: str = ""
+    properties: list[str] = []  # "finesse", "versatile 1d10", "thrown 20/60", "reach"
+    notes: str = ""  # what it does beyond its numbers, in a few words
 
 
 class Resource(Model):
@@ -464,7 +465,8 @@ def render(sheet: CharacterSheet) -> str:
         lines.append("Conditions: " + ", ".join(sheet.conditions))
     if sheet.attacks:
         lines.append("Attacks: " + "; ".join(
-            f"{a.name} {sign(x['to_hit']['total'])} {x['text']}".strip() for a, x in zip(sheet.attacks, d["attacks"])))
+            f"{a.name} {sign(x['to_hit']['total'])} {x['text']}".strip()
+            + (f" ({', '.join(a.properties)})" if a.properties else "") for a, x in zip(sheet.attacks, d["attacks"])))
     if sheet.resources:
         lines.append(
             "Resources: "

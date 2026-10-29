@@ -44,10 +44,17 @@ says into the output fields.
 - Resources are anything with uses: spell slots by level ("Spell slots
   (1st)"), hit dice, ki, rage, channel divinity, charges.
 - Spells: name and level (cantrips are level 0); prepared if marked.
-- Features and traits: one entry each, keep the name and a short summary.
-- Put anything that doesn't fit a field (backstory, allies, notes in the
-  margins) in notes, and anything you couldn't read in unreadable, naming
-  the field (e.g. "Wisdom score", "third inventory line").
+- Features and traits: one entry each, "Name: what it does" in a few
+  words, e.g. "Rage: +2 melee damage, resist B/P/S, 3/long rest".
+- Put what the sheet says that has no field of its own (backstory, allies,
+  notes in the margins) in notes, and anything you couldn't read in
+  unreadable: the field and what's unclear, a few words ("Wisdom score
+  smudged", "third inventory line").
+
+Every text field describes the character as they are, in the terse words a
+player writes on a sheet. Never explain how you read the sheet, what you
+looked up, or why a field is filled the way it is: that reasoning belongs
+nowhere in the answer, not in notes, features, items or unreadable.
 
 The tools search this campaign's reference material: the books and notes
 the table plays from, which may include a setting's own subclasses,
@@ -60,9 +67,9 @@ stands for and write the full name: two letters beside a class are often
 the initials of a subclass from the setting's book, and a letter that
 reads one way may be another that matches a real option. When a magic
 item or a weapon with special properties is named but the sheet doesn't
-say what it does, look it up and put a short summary of its effect in
-that item's notes (and its attack's notes), with where it's from (source
-and page). Don't look up standard rules you already know, and don't
+say what it does, look it up and put what it does in that item's notes
+(and its attack's notes) in a few words, with a short citation such as
+"(Odyssey p. 112)". Don't look up standard rules you already know, and don't
 change anything the sheet says plainly. If a lookup finds nothing, keep
 what the sheet says and list it in unreadable.
 
@@ -73,6 +80,11 @@ prints into the printed_ fields, which are only used to check your parts:
   two, "spell" for the spellcasting ability, "none"), whether proficient,
   a magic weapon's +N as bonus, and damage as parts: the weapon's dice and
   type with add_ability true, then any extra dice (1d6 fire) as more parts.
+  A part's type is only the damage type ("slashing"), never dice, numbers
+  or words about when it applies. Weapon properties go in properties
+  ("finesse", "versatile 1d10", "thrown 20/60", "reach", "heavy"); damage
+  that only applies sometimes ("+1d8 vs undead") goes in the attack's
+  notes, a few words.
 - AC as a formula: base, the abilities that add to it and max_dex, e.g.
   chain mail is base 16 with no abilities; leather is 11 with dex; a
   barbarian's unarmored defense is 10 with dex and con. A shield or magic
@@ -230,6 +242,28 @@ def check_upload(data: bytes, filename: str) -> str:
     return media_type
 
 
+# Longest a short text field should be; longer means explanation crept in.
+SHORT = {"attack notes": 160, "item notes": 300, "feature": 200, "unreadable entry": 100}
+
+
+def _problems(scan: ScannedSheet) -> list[str]:
+    """What breaks the answer's rules though it fits the schema: prose in a damage type, notes that explain."""
+    out = []
+    for a in scan.attacks:
+        for d in a.damage:
+            if re.search(r"\d", d.type) or len(d.type.split()) > 2:
+                out.append(f"{a.name}: damage type {d.type!r} should be only the type; dice go in dice, "
+                           "extra damage in its own part, conditions in the attack's notes")
+        if len(a.notes) > SHORT["attack notes"]:
+            out.append(f"{a.name}: notes are too long; say what it does in a few words")
+    texts = [("item notes", i.name, i.notes) for i in scan.inventory] + \
+        [("feature", f[:30], f) for f in scan.features] + [("unreadable entry", u[:30], u) for u in scan.unreadable]
+    for kind, label, text in texts:
+        if len(text) > SHORT[kind]:
+            out.append(f"{kind} {label!r} is too long: describe what is, without explaining how you read it")
+    return out
+
+
 def _json_object(text: str) -> str:
     """The JSON object in a reply, without any fence or words around it."""
     start, end = text.find("{"), text.rfind("}")
@@ -284,9 +318,16 @@ def read_sheet(
         if agent.stop_reason == "max_tokens":
             raise ScanError("the sheet's answer ran too long to finish")
         try:
-            return to_sheet(ScannedSheet.model_validate_json(_json_object(text)))
+            scan = ScannedSheet.model_validate_json(_json_object(text))
         except ValidationError as err:
             if attempt:
                 raise ScanError(f"couldn't read a character sheet from this file ({err.error_count()} problems)") from err
             message = f"That doesn't match the schema:\n{err}\nReply again with only the corrected JSON object."
+            continue
+        problems = _problems(scan)
+        if problems and not attempt:  # one chance to tidy up; after that, take it as it is
+            message = ("That fits the schema, but fix these:\n- " + "\n- ".join(problems)
+                       + "\nReply again with only the corrected JSON object.")
+            continue
+        return to_sheet(scan)
     raise AssertionError("unreachable")

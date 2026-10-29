@@ -515,16 +515,17 @@ class SheetView {
           this.field(`attacks.${i}.damage.${j}.type`, { placeholder: "type", reason: "damage" }),
           remove(a.damage, j, "damage", "attacks"),
         )),
+        this.chips("attacks", `attacks.${i}.properties`, { placeholder: "Add property (finesse, reach…)" }),
         h("div.attack-bottom",
           h("button.add", { onclick: () => {
             a.damage.push({ dice: "", type: "", add_ability: a.damage.length === 0, bonus: 0 });
             this.changed("added damage"); this.refresh("attacks");
           } }, "+ damage"),
-          this.field(`attacks.${i}.notes`, { placeholder: "Notes (properties, effects)", reason: "attack notes" }),
+          this.field(`attacks.${i}.notes`, { placeholder: "Notes (what else it does)", reason: "attack notes" }),
         ),
       )),
       h("button.add", { onclick: () => {
-        items.push({ name: "", ability: "str", proficient: true, bonus: 0, hit_bonus: 0, range: "", notes: "",
+        items.push({ name: "", ability: "str", proficient: true, bonus: 0, hit_bonus: 0, range: "", properties: [], notes: "",
           damage: [{ dice: "", type: "", add_ability: true, bonus: 0 }] });
         this.refresh("attacks");
         this.sections.attacks.body.querySelector(".attack:last-of-type input")?.focus();
