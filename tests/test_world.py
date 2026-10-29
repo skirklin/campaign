@@ -353,3 +353,20 @@ def test_the_same_name_with_another_epithet_is_one_entity():
         "Estor Arkelander", "Mytros", "Mytros, the Goddess of Dawn", "Sydon, Lord of Storms",
         "Telamok Arkelander", "Versi the Oracle",
     ]
+
+
+def test_copies_an_older_apply_made_are_folded_into_one(monkeypatch):
+    import campaign.world as world_mod
+
+    store = Store(":memory:")
+    camp = store.create_campaign("Titans", "dm")
+    src = store.add_source(camp, "Book", "module", [{"heading": "", "text": "x", "page": 1}])
+    w = World(store, camp)
+    entries = [_entry("Sydon, Lord of Storms"), _entry("Sydon, The Lord of Storms")]
+    monkeypatch.setattr(world_mod, "_name_keys", lambda name: {name})  # the rules before epithets matched
+    w.apply_book(src, entries, key="v1")
+    assert len(w.list()) == 2
+    monkeypatch.undo()
+    monkeypatch.setattr(world_mod, "APPLY_VERSION", world_mod.APPLY_VERSION + 1)
+    w.apply_book(src, entries, key="v1")
+    assert [r["name"] for r in w.list()] == ["Sydon, Lord of Storms"]
