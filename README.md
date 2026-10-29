@@ -88,8 +88,11 @@ uv run campaign web            # http://127.0.0.1:8765
   type one (`8d6 fire`, `2d20kh1+5` for advantage, `4d6kh3` for a stat),
   with Adv/Dis toggles. Every roll is remembered on that device, per
   character (the latest 100): the tray shows the recent ones, the Notes
-  tab the rest. The screen stays on while it's open, and the app can be added to
-  the home screen.
+  tab the rest. The screen stays on while it's open. On a phone it can be installed as
+  an app (Chrome offers it, and the Characters page shows an Install
+  button when it can). Installed, it opens without the browser's bars; in
+  a browser tab, the sheet's full-screen button hides them. Either way the
+  site's top bar gives way to a ‹ back to the list.
 - **Campaigns**: create DM or player campaigns, then use the tabs:
   - **Ask**: chat with the campaign assistant. Answers stream in as
     they're written, with the lookups it makes shown along the way.

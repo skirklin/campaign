@@ -829,3 +829,20 @@ button.status-card { border-style: dashed; }
 .status-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .status-card.on .choice-name::before { content: "● "; color: var(--accent); }
 .status-card.on button { padding: .5rem .9rem; border-radius: 10px; }
+
+/* -- installing and full screen ---------------------------------------------------------- */
+.install-banner {
+  display: flex; align-items: center; gap: .6rem; flex-wrap: wrap;
+  padding: .7rem .9rem; border-radius: var(--radius);
+  border: 1px solid var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+}
+.install-banner[hidden] { display: none; }
+.install-banner > span { flex: 1 1 12rem; }
+.play-title .fullscreen { display: inline-flex; align-items: center; }
+/* Installed (standalone) or full screen, the page has the whole screen: no site bar on the sheet. */
+@media (display-mode: standalone), (display-mode: fullscreen) { body:has(.play) .topbar { display: none; } }
+@media (display-mode: standalone), (display-mode: fullscreen) { .play-back { display: inline-flex; } }
+:root:fullscreen body:has(.play) .topbar { display: none; }
+:root:fullscreen .play-back { display: inline-flex; }
+/* Back to the list, for when the site's bar is hidden. */
+.play-back { display: none; align-items: center; text-decoration: none; font-size: 1.6rem; padding: 0 .3rem 0 0; color: var(--muted); }

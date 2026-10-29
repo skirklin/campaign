@@ -20,6 +20,12 @@ def test_everything_but_sign_in_and_health_is_closed(site):
     assert r.status_code == 303 and r.headers["location"] == "/auth/login?next=/"
     assert b.get("/static/app.js").status_code == 303
     assert b.get("/healthz").json()["ok"] is True
+    # The manifest and icons are open, so a phone can offer to install the app before signing in.
+    manifest = b.get("/static/manifest.webmanifest")
+    assert manifest.status_code == 200 and manifest.json()["display"] == "standalone"
+    for icon in manifest.json()["icons"]:
+        assert b.get(icon["src"]).status_code == 200, icon["src"]
+    assert b.get("/static/icons/%2e%2e/app.js").status_code != 200  # no way out of the open folders
 
 
 def test_sign_in_is_invite_only(site):
