@@ -298,5 +298,19 @@ def test_attack_options_apply_to_the_attacks_they_name():
     assert d["attack_options"][1] == {"to_hit": -5, "damage": 10}
     assert d["attack_options"][2] == {"to_hit": -5, "damage": 6}  # 2 x proficiency, which follows the level
     assert d["attacks"][2]["damage"][1]["spends"] == "Thunderous Shot"
+    assert d["attacks"][0]["damage"][0]["once_per_turn"] is False
     with pytest.raises(ValueError):
         CharacterSheet(name="X", attack_options=[{"name": "Odd", "advantage": "always"}])
+
+
+def test_statuses_last_rounds_and_damage_can_be_once_a_turn():
+    sheet = CharacterSheet(
+        name="Cid", statuses=[{"name": "Rage", "resource": "Rage", "duration": 10}],
+        attacks=[Attack(name="Greataxe", damage=[Damage(dice="1d12", add_ability=True),
+                                                 Damage(dice="1d6", situational="Charge", once_per_turn=True)])],
+    )
+    assert sheet.statuses[0].duration == 10
+    assert sheet.derived()["attacks"][0]["damage"][1]["once_per_turn"] is True
+    assert CharacterSheet(name="X", statuses=[{"name": "Bless"}]).statuses[0].duration == 0  # until ended
+    with pytest.raises(ValueError):
+        CharacterSheet(name="X", statuses=[{"name": "Odd", "duration": -1}])
