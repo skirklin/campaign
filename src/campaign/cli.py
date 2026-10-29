@@ -408,7 +408,7 @@ def char_hp(
     apply_hp(sheet, delta)
     hp = sheet.hp
     s.update_character(character_id, sheet.model_dump(), reason=f"hp {delta:+d}")
-    typer.echo(f"{sheet.name}: {hp.current}/{hp.max}" + (f" (+{hp.temp} temp)" if hp.temp else ""))
+    typer.echo(f"{sheet.name}: {hp.current}/{sheet.hp_max}" + (f" (+{hp.temp} temp)" if hp.temp else ""))
 
 
 @char_app.command("rest")

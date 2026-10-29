@@ -12,12 +12,15 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Callable
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from .charsheet import ABILITIES, SKILLS, Attack, CharacterSheet, ClassLevel, HitPoints, Item, Resource, Spell
+from .charsheet import (
+    ABILITIES, SKILLS, ArmorClass, Attack, Bonus, CharacterSheet, ClassLevel, HitPoints, Item, Resource, Spell,
+)
 from .tools import ToolContext
 
 MODEL = os.environ.get("CAMPAIGN_SHEET_MODEL", os.environ.get("CAMPAIGN_MODEL", "claude-opus-5-5"))
@@ -62,6 +65,24 @@ that item's notes (and its attack's notes), with where it's from (source
 and page). Don't look up standard rules you already know, and don't
 change anything the sheet says plainly. If a lookup finds nothing, keep
 what the sheet says and list it in unreadable.
+
+Record numbers as their parts, which are summed when the sheet is shown
+(so they follow the character as it levels up); copy the totals the sheet
+prints into the printed_ fields, which are only used to check your parts:
+- Attacks: the ability used ("str", "dex", "finesse" for the better of the
+  two, "spell" for the spellcasting ability, "none"), whether proficient,
+  a magic weapon's +N as bonus, and damage as parts: the weapon's dice and
+  type with add_ability true, then any extra dice (1d6 fire) as more parts.
+- AC as a formula: base, the abilities that add to it and max_dex, e.g.
+  chain mail is base 16 with no abilities; leather is 11 with dex; a
+  barbarian's unarmored defense is 10 with dex and con. A shield or magic
+  armor is a bonus to "ac" on that item.
+- Anything else that adds to a number is a bonus: on the item that grants
+  it (counts while equipped; set requires_attunement for items that need
+  it), or in bonuses for features and effects (Rage's damage is a
+  "damage:str" bonus, with active false since it only applies while
+  raging). Amounts can reference the sheet: "prof", "level", "2*level", "cha".
+- hp.max is the printed maximum; the hit-dice part is worked out from it.
 """
 
 
@@ -86,6 +107,17 @@ class Coins(Model):
     pp: int = 0
 
 
+class ScannedHitPoints(Model):
+    max: int
+    current: int
+    temp: int
+
+
+class ScannedAttack(Attack):
+    printed_to_hit: str  # as the sheet shows it, e.g. "+7"; "" if it doesn't
+    printed_damage: str  # e.g. "1d12+4 slashing"
+
+
 class ScannedSheet(Model):
     name: str
     player: str
@@ -98,10 +130,12 @@ class ScannedSheet(Model):
     save_proficiencies: list[str]  # ability names or abbreviations
     skill_proficiencies: list[str]
     skill_expertise: list[str]
-    ac: int
+    ac: ArmorClass
+    printed_ac: int  # 0 if the sheet doesn't show one
     speed: int
-    hp: HitPoints
-    attacks: list[Attack]
+    hp: ScannedHitPoints
+    attacks: list[ScannedAttack]
+    bonuses: list[Bonus]
     resources: list[Resource]
     spellcasting_ability: str
     spells: list[Spell]
@@ -130,8 +164,13 @@ def _ability(name: str) -> str | None:
     return n if n in ABILITIES else ABILITY_NAMES.get(n)
 
 
+def _dice(text: str) -> list[str]:
+    """The dice and modifiers in a damage string, to compare two: "1d12 + 4 slashing" -> ["1d12+4"]."""
+    return re.findall(r"\d+d\d+(?:[+-]\d+)?", text.replace(" ", "").lower())
+
+
 def to_sheet(scan: ScannedSheet) -> tuple[CharacterSheet, list[str]]:
-    """The sheet, plus what couldn't be read or placed."""
+    """The sheet, plus what couldn't be read or placed, or doesn't add up to what the sheet prints."""
     leftover = list(scan.unreadable)
 
     def known(names: list[str], valid: set[str], what: str) -> list[str]:
@@ -146,6 +185,7 @@ def to_sheet(scan: ScannedSheet) -> tuple[CharacterSheet, list[str]]:
 
     saves = [a for a in (_ability(n) for n in scan.save_proficiencies) if a]
     abilities = {ABILITY_NAMES[k]: v for k, v in scan.abilities.model_dump().items()}
+    attacks = [Attack.model_validate(a.model_dump(exclude={"printed_to_hit", "printed_damage"})) for a in scan.attacks]
     sheet = CharacterSheet(
         name=scan.name.strip() or "Unnamed character",
         player=scan.player, species=scan.species, background=scan.background, alignment=scan.alignment,
@@ -153,13 +193,26 @@ def to_sheet(scan: ScannedSheet) -> tuple[CharacterSheet, list[str]]:
         save_proficiencies=saves,
         skill_proficiencies=known(scan.skill_proficiencies, set(SKILLS), "skill"),
         skill_expertise=known(scan.skill_expertise, set(SKILLS), "expertise"),
-        ac=scan.ac, speed=scan.speed, hp=scan.hp,
-        attacks=scan.attacks, resources=scan.resources,
+        ac=scan.ac, speed=scan.speed, hp=HitPoints(current=scan.hp.current, temp=scan.hp.temp),
+        attacks=attacks, bonuses=scan.bonuses, resources=scan.resources,
         spellcasting_ability=_ability(scan.spellcasting_ability) or "",
         spells=scan.spells, inventory=scan.inventory, currency=scan.currency.model_dump(),
         features=scan.features, proficiencies=scan.proficiencies,
         personality=scan.personality, notes=scan.notes,
     )
+    # The hit-dice part is what's left of the printed maximum once CON and bonuses are taken off.
+    sheet.hp = sheet.hp.model_copy(update={"base": scan.hp.max - sum(v for _, v in sheet.hp_max_parts())})
+
+    # Check the parts against the totals the sheet prints.
+    d = sheet.derived()
+    if scan.printed_ac and scan.printed_ac != d["ac"]["total"]:
+        leftover.append(f"AC: the sheet says {scan.printed_ac}, its parts add up to {d['ac']['total']}")
+    for a, x in zip(scan.attacks, d["attacks"]):
+        hit = x["to_hit"]["total"]
+        if re.fullmatch(r"[+-]?\d+", a.printed_to_hit.replace(" ", "")) and int(a.printed_to_hit.replace(" ", "")) != hit:
+            leftover.append(f"{a.name}: the sheet says {a.printed_to_hit} to hit, its parts add up to {hit:+d}")
+        if _dice(a.printed_damage) and _dice(a.printed_damage) != _dice(x["text"]):
+            leftover.append(f"{a.name}: the sheet says {a.printed_damage} damage, its parts add up to {x['text']}")
     return sheet, leftover
 
 

@@ -103,11 +103,23 @@ localhost without it, unless you pass `--no-auth`. With sign-in on:
   with **Copy to campaign…**: the copy changes on its own and links back
   to the original. The top-level **Characters** page lists yours across
   campaigns.
+- **Sheet numbers are worked out from their parts**, so they follow the
+  character: raise Strength and every Strength attack, check and save
+  goes up; level up and everything proficient does. An attack is its
+  ability, proficiency, magic bonus and damage dice; AC is a formula
+  (base plus ability modifiers, with a Dexterity cap for medium armor);
+  max HP is the hit-dice total plus Constitution per level. Anything
+  else is a bonus with a source: on the item that grants it (it counts
+  while equipped, and attuned if it needs to be), or on the sheet for
+  features and effects, which can be switched off (Rage, between fights).
+  Click any number to see what it adds up from. Sheets saved before this
+  keep their numbers as flat amounts until edited.
 - **Paper sheets can be scanned in.** On the Party tab, **From a scan or
   PDF…** takes a photo or PDF of a filled-in sheet; Claude reads it into a
   new character (`CAMPAIGN_SHEET_MODEL`, default `CAMPAIGN_MODEL`) and lists
   anything it couldn't make out in the sheet's notes, so you can correct
-  those by hand. While reading, it can search the campaign's reference
+  those by hand. It records numbers as parts, and lists anywhere the
+  parts don't add up to what the sheet prints. While reading, it can search the campaign's reference
   material (as the uploader sees it, so a player's scan doesn't see
   DM-only books): it looks up abbreviated or unfamiliar classes,
   subclasses, species, features and spells, such as a setting's own

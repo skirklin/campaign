@@ -46,7 +46,7 @@ def test_character_lifecycle(client):
     sheet["resources"][0]["used"] = 3
     sheet["abilities"]["wis"] = 18
     r = client.put(f"/api/characters/{cid}", json={"sheet": sheet, "reason": "level up"})
-    assert r.json()["derived"]["spell_save_dc"] == 14
+    assert r.json()["derived"]["spell_save_dc"]["total"] == 14
     assert r.json()["log"][0]["reason"] == "level up"
 
     r = client.post(f"/api/characters/{cid}/rest", json={"long": True})
@@ -222,7 +222,7 @@ def test_character_from_a_scan(client, monkeypatch):
     job = wait_for(client, r.json()["job"])
     assert job["state"] == "done" and job["kind"] == "scan", job
     body = client.get(f"/api/characters/{job['result']['character']}").json()
-    assert body["sheet"]["name"] == "Ireth" and body["derived"]["spell_save_dc"] == 8 + 3 + 2 and body["entity_id"]
+    assert body["sheet"]["name"] == "Ireth" and body["derived"]["spell_save_dc"]["total"] == 8 + 3 + 2 and body["entity_id"]
     assert body["log"][0]["reason"] == f"read from ireth.pdf (job {job['id']})"
     assert [j["id"] for j in client.get("/api/campaigns/strahd/jobs?kind=scan").json()] == [job["id"]]
 

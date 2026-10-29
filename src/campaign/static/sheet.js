@@ -2,9 +2,10 @@
 //
 // The sheet is built once and edited in place: every input writes into
 // `this.sheet` and schedules a debounced save. The server validates and
-// returns the derived numbers (modifiers, skills, DCs), which are patched
-// into elements marked `data-d` so typing never loses focus. Only list
-// sections re-render, when rows are added or removed.
+// returns the derived numbers (modifiers, skills, AC, attacks, DCs), each
+// with the parts it adds up from, which are patched into elements marked
+// `data-d` so typing never loses focus; clicking one shows its parts. Only
+// list sections re-render, when rows are added or removed.
 
 import { api, h, toast, sign, getPath, setPath, debounce } from "./util.js";
 
@@ -21,6 +22,17 @@ const CONDITIONS = [
   "paralyzed", "petrified", "poisoned", "prone", "restrained", "stunned", "unconscious", "concentrating",
 ];
 const RECHARGE = ["", "short rest", "long rest", "dawn"];
+const ATTACK_ABILITIES = { str: "STR", dex: "DEX", finesse: "Finesse", spell: "Spell", con: "CON", int: "INT", wis: "WIS", cha: "CHA", none: "None" };
+// Where a bonus can apply, grouped for the picker (the server's BONUS_TARGETS).
+const BONUS_TARGETS = [
+  ["Defense & movement", [["ac", "AC"], ["hp_max", "Max HP"], ["speed", "Speed"], ["initiative", "Initiative"]]],
+  ["Attacks", [["attack", "All attack rolls"], ...ABILITIES.map((a) => [`attack:${a}`, `${a.toUpperCase()} attack rolls`]),
+    ["damage", "All damage"], ...ABILITIES.map((a) => [`damage:${a}`, `${a.toUpperCase()} attack damage`])]],
+  ["Saves", [["save", "All saves"], ...ABILITIES.map((a) => [`save:${a}`, `${ABILITY_NAMES[a]} save`])]],
+  ["Checks", [["skill", "All skills"], ...ABILITIES.map((a) => [`check:${a}`, `${ABILITY_NAMES[a]} checks`]),
+    ...Object.keys(SKILLS).map((k) => [`skill:${k}`, k[0].toUpperCase() + k.slice(1)]), ["passive_perception", "Passive Perception"]]],
+  ["Spells", [["spell_dc", "Spell save DC"], ["spell_attack", "Spell attack"]]],
+];
 const COINS = ["cp", "sp", "ep", "gp", "pp"];
 
 // A character lives in exactly one campaign. This page is a view across them:
@@ -227,9 +239,15 @@ class SheetView {
   updateDerived() {
     for (const el of this.el.querySelectorAll("[data-d]")) {
       const v = getPath(this.derived, el.dataset.d);
-      el.textContent = v === undefined ? "—" : el.dataset.fmt === "sign" ? sign(v) : v;
+      // A computed number comes as {total, parts}: show the total, explain it on hover and click.
+      const n = v && typeof v === "object" ? v.total : v;
+      el.textContent = n === undefined ? "—" : el.dataset.fmt === "sign" ? sign(n) : n;
+      el.title = v?.parts ? explain(v) : "";
+      el.classList.toggle("explained", !!v?.parts);
     }
     this.el.classList.toggle("no-spellcasting", this.derived.spell_save_dc === undefined);
+    const bar = this.sections.hpbar;  // max HP is derived (CON, level), so the bar follows it
+    bar?.body.replaceChildren(...[bar.build()].flat());
   }
 
   // -- building blocks -------------------------------------------------------
@@ -252,7 +270,10 @@ class SheetView {
   }
 
   derivedSpan(path, fmt = "sign", cls = "") {
-    return h(`span.derived${cls ? "." + cls : ""}`, { dataset: { d: path, fmt } });
+    return h(`span.derived${cls ? "." + cls : ""}`, {
+      dataset: { d: path, fmt },
+      onclick: (e) => showParts(e.currentTarget, getPath(this.derived, path)),
+    });
   }
 
   section(key, title, build, cls = "") {
@@ -359,23 +380,25 @@ class SheetView {
       this.vitals(),
       h("div.sheet-grid",
         h("div.col",
+          this.section("defense", "Defense & hit points", () => this.defense()),
           this.section("abilities", "Abilities", () => this.abilities()),
           this.section("saves", "Saving throws", () => this.saves()),
           this.section("skills", "Skills", () => this.skills()),
         ),
         h("div.col",
           this.section("resources", "Resources", () => this.resources()),
-          this.section("attacks", "Attacks", () => this.rows("attacks", "attacks",
-            [{ key: "name", label: "Attack" }, { key: "to_hit", label: "Hit", w: "4rem" }, { key: "damage", label: "Damage" }],
-            { name: "", to_hit: "", damage: "", notes: "" }, "attack")),
+          this.section("attacks", "Attacks", () => this.attacks()),
+          this.section("bonuses", "Bonuses & effects", () => [
+            h("p.muted.small", "Features and effects that add to a number. Switch off what only applies sometimes, like Rage. "
+              + "Items' bonuses are on the items."),
+            this.bonuses("bonuses", "bonuses"),
+          ]),
           this.section("spells", "Spells", () => this.spells(), "spells-card"),
         ),
         h("div.col",
           this.section("inventory", "Inventory", () => [
             h("div.coins", COINS.map((c) => this.field(`currency.${c}`, { type: "number", label: c.toUpperCase(), min: 0, reason: "coin" }))),
-            this.rows("inventory", "inventory",
-              [{ key: "name", label: "Item" }, { key: "qty", label: "Qty", type: "number", w: "4rem" }, { key: "equipped", label: "Equipped", type: "checkbox", w: "auto" }],
-              { name: "", qty: 1, equipped: false, attuned: false, notes: "" }, "item"),
+            this.inventory(),
           ]),
           this.section("features", "Features & traits", () => this.rows("features", "features",
             [{ key: null, label: "Feature or trait" }], "", "feature")),
@@ -405,18 +428,18 @@ class SheetView {
         h("div.hp-numbers",
           this.field("hp.current", { type: "number", cls: "hp-current", label: "HP", reason: "hp", after: () => this.refresh("hpbar") }),
           h("span.slash", "/"),
-          this.field("hp.max", { type: "number", min: 0, label: "Max", reason: "max hp", after: () => this.refresh("hpbar") }),
+          h("label.field", h("span", "Max"), this.derivedSpan("hp_max", "plain", "hp-max")),
           this.field("hp.temp", { type: "number", min: 0, label: "Temp", reason: "temp hp" }),
         ),
-        this.section("hpbar", null, () => hpBar(hp), "bare"),
+        this.section("hpbar", null, () => hpBar({ ...hp, max: this.derived.hp_max?.total ?? 0 }), "bare"),
         h("div.hp-controls", amount,
           h("button.danger", { onclick: () => apply(-1) }, "Damage"),
           h("button.ok", { onclick: () => apply(1) }, "Heal"),
         ),
       ),
       h("div.stats",
-        stat("AC", this.field("ac", { type: "number", cls: "stat-input", label: undefined })),
-        stat("Speed", this.field("speed", { type: "number", cls: "stat-input" })),
+        stat("AC", this.derivedSpan("ac", "plain")),
+        stat("Speed", this.derivedSpan("speed", "plain")),
         stat("Initiative", this.derivedSpan("initiative")),
         stat("Prof.", this.derivedSpan("proficiency_bonus")),
         stat("Passive Perc.", this.derivedSpan("passive_perception", "plain")),
@@ -432,6 +455,154 @@ class SheetView {
       ),
       h("div.conditions", h("span.label", "Conditions"),
         this.section("conditions", null, () => this.chips("conditions", "conditions", { suggestions: CONDITIONS, placeholder: "Add condition…" }), "bare")),
+    );
+  }
+
+  // AC's formula, base speed, and the hit-dice part of max HP.
+  defense() {
+    const ac = this.sheet.ac;
+    const maxDex = h("input", {
+      type: "number", min: 0, value: ac.max_dex ?? "", placeholder: "none", "aria-label": "Highest DEX bonus",
+      onchange: () => { ac.max_dex = maxDex.value === "" ? null : Math.trunc(Number(maxDex.value)); this.changed("AC"); },
+    });
+    return [
+      h("div.identity.compact",
+        this.field("ac.label", { label: "Armor", placeholder: "Unarmored", reason: "AC" }),
+        this.field("ac.base", { type: "number", label: "Base AC", reason: "AC" }),
+        h("label.field", h("span", "Max DEX"), maxDex),
+      ),
+      h("div.ac-abilities", h("span.muted.small", "Adds"),
+        ABILITIES.map((a) => h("label.mini",
+          h("input", { type: "checkbox", checked: ac.abilities.includes(a),
+            onchange: (e) => this.toggleIn("ac.abilities", a, e.target.checked, "AC") }),
+          a.toUpperCase()))),
+      h("p.parts-line", "AC ", this.derivedSpan("ac", "plain"), " · ", h("span.muted.small", "shields and magic armor are item bonuses")),
+      h("div.identity.compact",
+        this.field("speed", { type: "number", label: "Base speed", reason: "speed" }),
+        this.field("hp.base", { type: "number", label: "HP from hit dice", reason: "max hp" }),
+      ),
+      h("p.parts-line", "Max HP ", this.derivedSpan("hp_max", "plain"), h("span.muted.small", " · Constitution is added per level")),
+    ];
+  }
+
+  attacks() {
+    const items = this.sheet.attacks;
+    const remove = (list, i, noun, key) => h("button.icon", { title: `Remove ${noun}`, "aria-label": `Remove ${noun}`,
+      onclick: () => { list.splice(i, 1); this.changed(`removed ${noun}`); this.refresh(key); } }, "×");
+    return h("div.rows",
+      items.length === 0 && h("p.empty", "No attacks."),
+      items.map((a, i) => h("div.attack",
+        h("div.attack-top",
+          this.field(`attacks.${i}.name`, { placeholder: "Attack", reason: "attack" }),
+          h("span.attack-total", this.derivedSpan(`attacks.${i}.to_hit`), " · ", this.derivedSpan(`attacks.${i}.text`, "plain")),
+          remove(items, i, "attack", "attacks"),
+        ),
+        h("div.attack-parts",
+          h("select", { "aria-label": "Ability", value: a.ability,
+            onchange: (e) => { a.ability = e.target.value; this.changed("attack ability"); } },
+            Object.entries(ATTACK_ABILITIES).map(([v, l]) => h("option", { value: v }, l))),
+          h("label.mini", h("input", { type: "checkbox", checked: a.proficient,
+            onchange: (e) => { a.proficient = e.target.checked; this.changed("attack proficiency"); } }), "Prof"),
+          h("label.mini", "Magic +", this.field(`attacks.${i}.bonus`, { type: "number", reason: "attack bonus" })),
+          h("label.mini", "Hit +", this.field(`attacks.${i}.hit_bonus`, { type: "number", reason: "attack bonus" })),
+          this.field(`attacks.${i}.range`, { placeholder: "Range", reason: "attack range" }),
+        ),
+        a.damage.map((d, j) => h("div.damage-part",
+          this.field(`attacks.${i}.damage.${j}.dice`, { placeholder: "1d8", reason: "damage" }),
+          h("label.mini", h("input", { type: "checkbox", checked: d.add_ability, title: "Adds the attack's ability modifier",
+            onchange: (e) => { d.add_ability = e.target.checked; this.changed("damage"); } }), "+mod"),
+          h("label.mini", "+", this.field(`attacks.${i}.damage.${j}.bonus`, { type: "number", reason: "damage" })),
+          this.field(`attacks.${i}.damage.${j}.type`, { placeholder: "type", reason: "damage" }),
+          remove(a.damage, j, "damage", "attacks"),
+        )),
+        h("div.attack-bottom",
+          h("button.add", { onclick: () => {
+            a.damage.push({ dice: "", type: "", add_ability: a.damage.length === 0, bonus: 0 });
+            this.changed("added damage"); this.refresh("attacks");
+          } }, "+ damage"),
+          this.field(`attacks.${i}.notes`, { placeholder: "Notes (properties, effects)", reason: "attack notes" }),
+        ),
+      )),
+      h("button.add", { onclick: () => {
+        items.push({ name: "", ability: "str", proficient: true, bonus: 0, hit_bonus: 0, range: "", notes: "",
+          damage: [{ dice: "", type: "", add_ability: true, bonus: 0 }] });
+        this.refresh("attacks");
+        this.sections.attacks.body.querySelector(".attack:last-of-type input")?.focus();
+        this.changed("added attack");
+      } }, "+ Add attack"),
+    );
+  }
+
+  // Each item opens to show attunement, notes and the bonuses it gives while equipped.
+  inventory() {
+    const items = this.sheet.inventory;
+    this.openItems ??= new Set();
+    return h("div.rows",
+      items.length === 0 && h("p.empty", "No items."),
+      items.map((it, i) => {
+        const open = this.openItems.has(i);
+        const tags = [it.bonuses?.length ? `${it.bonuses.length} bonus${it.bonuses.length > 1 ? "es" : ""}` : "",
+          it.requires_attunement ? (it.attuned ? "attuned" : "needs attunement") : ""].filter(Boolean).join(" · ");
+        return h("div.item",
+          h("div.row", { style: "grid-template-columns:1fr 4rem auto auto auto" },
+            this.field(`inventory.${i}.name`, { placeholder: "Item", reason: "item" }),
+            this.field(`inventory.${i}.qty`, { type: "number", placeholder: "Qty", reason: "item" }),
+            h("label.mini", { title: "Equipped" }, h("input", { type: "checkbox", checked: it.equipped,
+              onchange: (e) => { it.equipped = e.target.checked; this.changed(`${it.name || "item"} ${it.equipped ? "equipped" : "unequipped"}`); } }), "E"),
+            h("button.icon", { title: open ? "Less" : "Attunement, notes and bonuses", "aria-label": `Details of ${it.name}`, "aria-expanded": String(open),
+              onclick: () => { open ? this.openItems.delete(i) : this.openItems.add(i); this.refresh("inventory"); } }, open ? "▾" : "▸"),
+            h("button.icon", { title: "Remove item", "aria-label": "Remove item",
+              onclick: () => { items.splice(i, 1); this.openItems.clear(); this.changed("removed item"); this.refresh("inventory"); } }, "×"),
+          ),
+          !open && tags && h("p.muted.small.item-tags", tags),
+          open && h("div.item-details",
+            h("div.item-flags",
+              h("label.mini", h("input", { type: "checkbox", checked: it.requires_attunement,
+                onchange: (e) => { it.requires_attunement = e.target.checked; this.changed("attunement"); } }), "Needs attunement"),
+              h("label.mini", h("input", { type: "checkbox", checked: it.attuned,
+                onchange: (e) => { it.attuned = e.target.checked; this.changed(`${it.name || "item"} ${it.attuned ? "attuned" : "unattuned"}`); } }), "Attuned"),
+            ),
+            this.field(`inventory.${i}.notes`, { type: "textarea", rows: 2, placeholder: "What it does", reason: "item notes" }),
+            h("span.muted.small", "Bonuses while equipped"),
+            this.bonuses("inventory", `inventory.${i}.bonuses`),
+          ),
+        );
+      }),
+      h("button.add", { onclick: () => {
+        items.push({ name: "", qty: 1, equipped: false, attuned: false, requires_attunement: false, bonuses: [], notes: "" });
+        this.refresh("inventory");
+        this.sections.inventory.body.querySelector(".item:last-of-type input")?.focus();
+        this.changed("added item");
+      } }, "+ Add item"),
+    );
+  }
+
+  // Bonuses at `path` (the sheet's, or an item's), shown in section `key`.
+  bonuses(key, path) {
+    const list = getPath(this.sheet, path);
+    return h("div.rows.bonuses",
+      list.map((b, i) => h("div.row.bonus", { style: "grid-template-columns:auto 1fr 1fr 5rem auto" },
+        h("input", { type: "checkbox", checked: b.active, title: "On", "aria-label": `${b.source || "bonus"} on`,
+          onchange: (e) => { b.active = e.target.checked; this.changed(`${b.source || "bonus"} ${b.active ? "on" : "off"}`); } }),
+        this.field(`${path}.${i}.source`, { placeholder: "Source", reason: "bonus" }),
+        h("select", { "aria-label": "Applies to", value: b.target,
+          onchange: (e) => { b.target = e.target.value; this.changed("bonus"); } },
+          BONUS_TARGETS.map(([group, opts]) => h("optgroup", { label: group },
+            opts.map(([v, l]) => h("option", { value: v }, l))))),
+        h("input", { value: b.amount, placeholder: "+1, prof, level…", "aria-label": "Amount",
+          title: "A number, or prof, half_prof, level, an ability (cha), or e.g. 2*level",
+          onchange: (e) => {
+            const v = e.target.value.trim();
+            b.amount = /^[+-]?\d+$/.test(v) ? Number(v) : v;
+            this.changed("bonus");
+          } }),
+        h("button.icon", { title: "Remove bonus", "aria-label": "Remove bonus",
+          onclick: () => { list.splice(i, 1); this.changed("removed bonus"); this.refresh(key); } }, "×"),
+      )),
+      h("button.add", { onclick: () => {
+        list.push({ target: "ac", amount: 1, source: "", active: true });
+        this.changed("added bonus"); this.refresh(key);
+      } }, "+ Add bonus"),
     );
   }
 
@@ -583,6 +754,25 @@ class SheetView {
     await api("DELETE", `/api/characters/${this.id}`);
     location.hash = `#/campaigns/${this.campaign.slug}/party`;
   }
+}
+
+// "STR +4 · Proficiency +3" for a {total, parts} number.
+function explain(v) {
+  return v.parts.map((p) => `${p.label} ${p.label === "Base" || p.label === "Hit dice" ? p.value : sign(p.value)}`).join(" · ");
+}
+
+// A small popover with a number's parts, by the element clicked.
+function showParts(el, v) {
+  document.querySelector(".parts-pop")?.remove();
+  if (!v?.parts) return;
+  const pop = h("div.parts-pop", { role: "tooltip" },
+    v.parts.map((p) => h("div", h("span", p.label), h("b", p.label === "Base" || p.label === "Hit dice" ? p.value : sign(p.value)))),
+    h("div.parts-total", h("span", "Total"), h("b", el.textContent)));
+  document.body.append(pop);
+  const r = el.getBoundingClientRect();
+  pop.style.left = `${Math.max(8, Math.min(window.scrollX + r.left, window.scrollX + innerWidth - pop.offsetWidth - 8))}px`;
+  pop.style.top = `${window.scrollY + r.bottom + 4}px`;
+  setTimeout(() => document.addEventListener("click", () => pop.remove(), { once: true }));
 }
 
 function stat(label, valueEl, cls = "") {
