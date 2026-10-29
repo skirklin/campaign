@@ -48,8 +48,15 @@ BRANCH_VERSION = 1
 MODEL = os.environ.get("CAMPAIGN_DIGEST_MODEL", os.environ.get("CAMPAIGN_MODEL", "claude-opus-5-5"))
 EFFORT = os.environ.get("CAMPAIGN_DIGEST_EFFORT", "medium")
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
-# Haiku has no server-side refusal fallback; a refused section just fails.
+# Haiku has no server-side refusal fallback; a refused request just fails.
 NO_FALLBACK_PREFIXES = ("claude-haiku-",)
+
+
+def fallback_params(model: str) -> dict[str, Any]:
+    """Request parameters that re-run a refused request on a fallback model, where the model supports it."""
+    if model.startswith(NO_FALLBACK_PREFIXES):
+        return {}
+    return {"betas": [FALLBACK_BETA], "fallbacks": "default"}
 
 MAX_LEAF_CHARS = 40_000  # ~10k tokens; longer sections are split into parts
 MIN_LEAF_CHARS = 6_000  # shorter sibling sections are packed into one call
@@ -385,9 +392,6 @@ class DigestError(Exception):
 
 
 def _call(client: Any, system: str, user: str, fmt: type[BaseModel], model: str, effort: str) -> tuple[Any, int, int]:
-    fallback: dict[str, Any] = {}
-    if not model.startswith(NO_FALLBACK_PREFIXES):
-        fallback = {"betas": [FALLBACK_BETA], "fallbacks": "default"}
     with client.beta.messages.stream(
         model=model,
         max_tokens=64000,
@@ -396,7 +400,7 @@ def _call(client: Any, system: str, user: str, fmt: type[BaseModel], model: str,
         output_format=fmt,
         thinking={"type": "adaptive"},
         output_config={"effort": effort},
-        **fallback,
+        **fallback_params(model),
     ) as stream:
         msg = stream.get_final_message()
     if msg.stop_reason == "refusal":

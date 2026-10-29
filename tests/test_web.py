@@ -192,3 +192,54 @@ def test_digest_endpoints_and_original_kept(client, monkeypatch):
 
     info = client.get("/api/info").json()
     assert info["schema_version"] >= 2 and info["originals"]["files"] == 1
+
+
+def test_character_from_a_scan(client, monkeypatch):
+    from campaign import sheetscan
+    from campaign.charsheet import ClassLevel, HitPoints
+
+    scan = sheetscan.ScannedSheet(
+        name="Ireth", player="Sam", species="Elf", background="Sage", alignment="NG",
+        classes=[ClassLevel(name="Wizard", level=3)], xp=900,
+        abilities=sheetscan.Abilities(strength=8, dexterity=14, constitution=12, intelligence=17, wisdom=12, charisma=10),
+        save_proficiencies=["Intelligence", "wis"], skill_proficiencies=["Arcana", "History", "Basket weaving"],
+        skill_expertise=[], ac=12, speed=30, hp=HitPoints(max=17, current=17), attacks=[], resources=[],
+        spellcasting_ability="Intelligence", spells=[], inventory=[], currency=sheetscan.Coins(gp=12),
+        features=["Arcane Recovery"], proficiencies=["Daggers"], personality="", notes="", unreadable=["Wisdom score"],
+    )
+    seen = {}
+
+    class Stream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get_final_message(self):
+            return type("M", (), {"stop_reason": "end_turn", "parsed_output": scan})()
+
+    class Client:
+        class beta:
+            class messages:
+                @staticmethod
+                def stream(**kw):
+                    seen.update(kw)
+                    return Stream()
+
+    monkeypatch.setattr(sheetscan.anthropic, "Anthropic", lambda: Client())
+    client.post("/api/campaigns", json={"name": "Strahd"})
+    r = client.post("/api/campaigns/strahd/characters/from-scan", files={"file": ("ireth.pdf", b"%PDF-1.7 fake")})
+    assert r.status_code == 201
+    body = r.json()
+    sheet = body["sheet"]
+    assert sheet["name"] == "Ireth" and sheet["abilities"]["int"] == 17 and sheet["save_proficiencies"] == ["int", "wis"]
+    assert sheet["skill_proficiencies"] == ["arcana", "history"] and sheet["currency"]["gp"] == 12
+    assert body["derived"]["spell_save_dc"] == 8 + 3 + 2
+    assert body["unreadable"] == ["Wisdom score", "skill: Basket weaving"]
+    assert body["log"][0]["reason"] == "read from ireth.pdf" and body["entity_id"]
+    assert seen["messages"][0]["content"][0]["type"] == "document"
+    assert client.post("/api/campaigns/strahd/characters/from-scan",
+                       files={"file": ("notes.txt", b"hi")}).status_code == 422
+    assert client.post("/api/campaigns/strahd/characters/from-scan",
+                       files={"file": ("ireth.png", b"png")}).status_code == 409  # same name again
