@@ -40,7 +40,7 @@ ATTRIBUTES = ("status", "location", "holder", "disposition", "leader", "allegian
 SUMMARY_VERSION = 1
 # How a book's catalog is matched onto the world. Bump it when that changes,
 # and every digested book is applied again (from the cache: no API calls).
-APPLY_VERSION = 4
+APPLY_VERSION = 5
 
 # Aliases that describe rather than name ("the Titan", "her father") or are a
 # map's keys ("M1"): kept for finding things, never used to decide that two
@@ -567,21 +567,21 @@ class World:
         """
         family = _family(item["kind"])
         names = [item["name"], *(a for a in item.get("aliases", []) if _naming(a))]
-        for name in names:
-            for r in self.conn.execute(
-                "SELECT id, kind FROM entities WHERE campaign_id = ? AND name = ? COLLATE NOCASE ORDER BY id",
-                (self.campaign.id, name.strip()),
-            ):
-                if _family(r["kind"]) == family:
-                    return self.entity(r["id"])
+        found = [r["id"] for name in names for r in self.conn.execute(
+            "SELECT id, kind FROM entities WHERE campaign_id = ? AND name = ? COLLATE NOCASE",
+            (self.campaign.id, name.strip()),
+        ) if _family(r["kind"]) == family]
+        # The same name with another epithet, or other punctuation.
         keys = _name_keys(item["name"])
         prefix = min(keys, key=len).split()[0] if keys else ""
-        same = [r for r in self.conn.execute(
-            "SELECT id, kind, name FROM entities WHERE campaign_id = ? AND name LIKE ? ORDER BY id",
+        found += [r["id"] for r in self.conn.execute(
+            "SELECT id, kind, name FROM entities WHERE campaign_id = ? AND name LIKE ?",
             (self.campaign.id, f"{prefix}%"),
         ) if _family(r["kind"]) == family and _name_keys(r["name"]) & keys] if prefix else []
-        if same:  # the same name with another epithet, or other punctuation
-            return self.entity(same[0]["id"])
+        if found:
+            # The oldest, so that copies an earlier apply made under other rules are left
+            # without book facts, and go (unless the table has said something about them).
+            return self.entity(min(found))
         if _naming(item["name"]):
             rows = [r for r in self.conn.execute(
                 "SELECT DISTINCT e.id, e.kind FROM entities e JOIN aliases a ON a.entity_id = e.id"
