@@ -31,7 +31,7 @@ spec:
             - {name: CAMPAIGN_AUTH, value: google}
             - {name: CAMPAIGN_PUBLIC_URL, value: "https://campaign.kirkl.in"}
             # From the Google Cloud OAuth client (docs/deploy.md, step 1).
-            - {name: GOOGLE_CLIENT_ID, value: "REPLACE_ME.apps.googleusercontent.com"}
+            - {name: GOOGLE_CLIENT_ID, value: "779965064363-4ce52upmf3rktf48fn8lqk96qlfnd1ff.apps.googleusercontent.com"}
             # Credentials: the campaign-secrets Secret, created by hand (docs/deploy.md, step 2).
             - name: ANTHROPIC_API_KEY
               valueFrom: {secretKeyRef: {name: campaign-secrets, key: ANTHROPIC_API_KEY}}
