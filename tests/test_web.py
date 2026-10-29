@@ -232,6 +232,22 @@ def test_character_from_a_scan(client, monkeypatch):
     assert again["state"] == "failed" and "already has a character called Ireth" in again["error"]
     assert client.post(f"/api/campaigns/strahd/jobs/{again['id']}/retry").status_code == 202
 
+    # The scan is kept with the character it made, to check the sheet against.
+    cid = job["result"]["character"]
+    files = client.get(f"/api/characters/{cid}").json()["files"]
+    assert [f["name"] for f in files] == ["ireth.pdf"]
+    r = client.get(files[0]["url"])
+    assert r.content == b"%PDF-1.7 fake" and r.headers["content-type"] == "application/pdf"
+    assert r.headers["content-disposition"].startswith("inline")
+    # Another can be attached, and removed; a copy takes them along.
+    assert client.post(f"/api/characters/{cid}/files", files={"file": ("notes.txt", b"x")}).status_code == 422
+    after = client.post(f"/api/characters/{cid}/files", files={"file": ("back.jpg", b"jpg")}).json()["files"]
+    assert [f["name"] for f in after] == ["ireth.pdf", "back.jpg"]
+    assert client.delete(after[1]["url"]).status_code == 204
+    client.post("/api/campaigns", json={"name": "Avernus"})
+    copy = client.post(f"/api/characters/{cid}/copy", json={"campaign": "avernus"}).json()
+    assert [f["name"] for f in copy["files"]] == ["ireth.pdf"]
+
 
 def test_party_stash(client):
     client.post("/api/campaigns", json={"name": "Strahd"})

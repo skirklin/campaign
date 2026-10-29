@@ -475,6 +475,24 @@ CREATE TABLE party_stash_log (
 CREATE INDEX party_stash_log_campaign ON party_stash_log(campaign_id, id);
 """
 
+# v13: files kept with a character, such as the scan its sheet was read
+# from, so its owner can check the sheet against it. Scans already read
+# into characters are attached from their jobs.
+V13_CHARACTER_FILES = """
+CREATE TABLE character_files (
+    id            INTEGER PRIMARY KEY,
+    character_id  INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+    blob          TEXT NOT NULL,     -- in the blob store
+    name          TEXT NOT NULL,
+    created_at    TEXT NOT NULL
+);
+CREATE INDEX character_files_character ON character_files(character_id, id);
+INSERT INTO character_files (character_id, blob, name, created_at)
+SELECT json_extract(result, '$.character'), json_extract(input, '$.blob'), json_extract(input, '$.name'), updated_at
+FROM jobs
+WHERE kind = 'scan' AND state = 'done' AND json_extract(result, '$.character') IN (SELECT id FROM characters);
+"""
+
 # Append only, for changes small enough to migrate.
 #
 # Deploys are rolling: the new server starts, and runs these, while the old
@@ -494,6 +512,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (10, V10_CONVERSATIONS),
     (11, V11_JOBS),
     (12, V12_PARTY_STASH),
+    (13, V13_CHARACTER_FILES),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 
@@ -1414,6 +1433,40 @@ class Store:
         with self.conn:
             self.conn.execute("UPDATE characters SET entity_id = ? WHERE id = ?", (entity_id, character_id))
         return entity_id
+
+    # -- files kept with a character (the scan it was read from) -----------------
+
+    def add_character_file(self, character_id: int, blob: str, name: str) -> int:
+        """Keep a file with a character; the same file twice is kept once."""
+        row = self.conn.execute(
+            "SELECT id FROM character_files WHERE character_id = ? AND blob = ?", (character_id, blob)
+        ).fetchone()
+        if row:
+            return row["id"]
+        with self.conn:
+            return self.conn.execute(
+                "INSERT INTO character_files (character_id, blob, name, created_at) VALUES (?, ?, ?, ?)",
+                (character_id, blob, name, now()),
+            ).lastrowid
+
+    def character_files(self, character_id: int) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT id, blob, name, created_at FROM character_files WHERE character_id = ? ORDER BY id", (character_id,)
+        )
+        return [dict(r) for r in rows]
+
+    def character_file(self, character_id: int, file_id: int) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT id, blob, name, created_at FROM character_files WHERE character_id = ? AND id = ?",
+            (character_id, file_id),
+        ).fetchone()
+        return None if row is None else dict(row)
+
+    def delete_character_file(self, character_id: int, file_id: int) -> bool:
+        with self.conn:
+            return self.conn.execute(
+                "DELETE FROM character_files WHERE character_id = ? AND id = ?", (character_id, file_id)
+            ).rowcount > 0
 
     def character_for_entity(self, entity_id: int) -> dict[str, Any] | None:
         row = self.conn.execute("SELECT id, name FROM characters WHERE entity_id = ?", (entity_id,)).fetchone()

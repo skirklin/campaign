@@ -710,3 +710,4 @@ li.roll-fumble .roll-line strong { color: var(--danger); }
 .roll-extra { background: transparent; color: inherit; border: 1px solid currentColor; }
 .attack-top { grid-template-columns: minmax(8rem, 1fr) minmax(0, 1.3fr) auto; }
 .attack-total { white-space: normal; font-size: .9rem; }
+.files-line { margin: -.2rem 0 .6rem; } .files-line button.icon.link { padding: 0 .2rem; }
