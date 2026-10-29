@@ -1372,7 +1372,7 @@ class Store:
                 (campaign_id, owner_id, sheet["name"], json.dumps(sheet), copied_from, now()),
             ).lastrowid
             self._log_character(character_id, sheet, reason)
-        self.link_character(character_id)
+        self._nicknames(character_id, sheet)
         return character_id
 
     def update_character(self, character_id: int, sheet: dict[str, Any], reason: str = "") -> None:
@@ -1386,6 +1386,18 @@ class Store:
         entity_id = self.link_character(character_id)
         if before and before["name"] != sheet["name"]:
             self._world(before["campaign_id"]).rename_character(entity_id, sheet["name"])
+        self._nicknames(character_id, sheet)
+
+    def _nicknames(self, character_id: int, sheet: dict[str, Any]) -> None:
+        """The sheet's nicknames become aliases of its world entry, so the world knows them by either."""
+        entity_id = self.link_character(character_id)
+        world = self._world(self.character(character_id)["campaign_id"])
+        known = {a.lower() for a in world.entity(entity_id)["aliases"]}
+        new = [n for n in sheet.get("nicknames", []) if n.strip() and n.strip().lower() not in known]
+        if new:
+            run = world.start_run("manual", label=f"nicknames of {sheet['name']}")
+            for n in new:
+                world.add_alias(entity_id, n, run)
 
     def _world(self, campaign_id: int) -> Any:
         from .world import World  # world -> db

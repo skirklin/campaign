@@ -19,7 +19,7 @@ from typing import Any, Callable
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from .charsheet import (
-    ABILITIES, SKILLS, ArmorClass, Attack, Bonus, CharacterSheet, ClassLevel, HitPoints, Item, Resource, Spell,
+    ABILITIES, SKILLS, ArmorClass, Attack, Bonus, CharacterSheet, ClassLevel, HitPoints, Item, Resource, Spell, Status,
 )
 from .tools import ToolContext
 
@@ -37,6 +37,8 @@ says into the output fields.
 - Record what's written. Don't compute values the sheet doesn't show, and
   don't invent anything. A blank field stays empty (0 for numbers that are
   blank, except ability scores: use 10 when an ability is unreadable).
+- name is the character's name only; a nickname or "aka" goes in
+  nicknames.
 - Ability scores are the scores (e.g. 16), not the modifiers (+3).
 - Proficiencies: list saving throws and skills marked as proficient. A
   doubled mark or "expertise" goes in skill_expertise as well.
@@ -46,6 +48,8 @@ says into the output fields.
 - Spells: name and level (cantrips are level 0); prepared if marked.
 - Features and traits: one entry each, "Name: what it does" in a few
   words, e.g. "Rage: +2 melee damage, resist B/P/S, 3/long rest".
+- Only real things become entries: a checkbox, a tally mark or a scribble
+  isn't an item, a proficiency or a resource.
 - Put what the sheet says that has no field of its own (backstory, allies,
   notes in the margins) in notes, and anything you couldn't read in
   unreadable: the field and what's unclear, a few words ("Wisdom score
@@ -82,18 +86,26 @@ prints into the printed_ fields, which are only used to check your parts:
   type with add_ability true, then any extra dice (1d6 fire) as more parts.
   A part's type is only the damage type ("slashing"), never dice, numbers
   or words about when it applies. Weapon properties go in properties
-  ("finesse", "versatile 1d10", "thrown 20/60", "reach", "heavy"); damage
-  that only applies sometimes ("+1d8 vs undead") goes in the attack's
-  notes, a few words.
+  ("finesse", "versatile 1d10", "thrown 20/60", "reach", "heavy"). Extra
+  damage that only applies sometimes is its own part with situational
+  saying when, in a few words: a weapon's "+3d6 force vs giants", Sneak
+  Attack (dice "(half_level:rogue)d6", situational "Sneak Attack"), a
+  centaur's Charge. Dice that grow with level are written that way.
 - AC as a formula: base, the abilities that add to it and max_dex, e.g.
   chain mail is base 16 with no abilities; leather is 11 with dex; a
   barbarian's unarmored defense is 10 with dex and con. A shield or magic
   armor is a bonus to "ac" on that item.
 - Anything else that adds to a number is a bonus: on the item that grants
   it (counts while equipped; set requires_attunement for items that need
-  it), or in bonuses for features and effects (Rage's damage is a
-  "damage:str" bonus, with active false since it only applies while
-  raging). Amounts can reference the sheet: "prof", "level", "2*level", "cha".
+  it), or in bonuses for features and effects. An item that raises an
+  ability score is a "score:cha" bonus (or "score_set:str" for one that
+  sets it, like Gauntlets of Ogre Power at 19). Amounts can reference the
+  sheet: "prof", "level", "2*level", "cha".
+- Statuses are what the character switches on in play: Rage for a
+  barbarian (resource "Rage", spent when it starts), and Concentration
+  for anyone who casts concentration spells. A bonus that only counts
+  during one names it in during: Rage's damage is a "damage:str" bonus
+  during "Rage".
 - hp.max is the printed maximum; the hit-dice part is worked out from it.
 """
 
@@ -132,6 +144,7 @@ class ScannedAttack(Attack):
 
 class ScannedSheet(Model):
     name: str
+    nicknames: list[str]
     player: str
     species: str
     background: str
@@ -148,6 +161,7 @@ class ScannedSheet(Model):
     hp: ScannedHitPoints
     attacks: list[ScannedAttack]
     bonuses: list[Bonus]
+    statuses: list[Status]
     resources: list[Resource]
     spellcasting_ability: str
     spells: list[Spell]
@@ -206,7 +220,8 @@ def to_sheet(scan: ScannedSheet) -> tuple[CharacterSheet, list[str]]:
         skill_proficiencies=known(scan.skill_proficiencies, set(SKILLS), "skill"),
         skill_expertise=known(scan.skill_expertise, set(SKILLS), "expertise"),
         ac=scan.ac, speed=scan.speed, hp=HitPoints(current=scan.hp.current, temp=scan.hp.temp),
-        attacks=attacks, bonuses=scan.bonuses, resources=scan.resources,
+        nicknames=scan.nicknames, attacks=attacks, bonuses=scan.bonuses, statuses=scan.statuses,
+        resources=scan.resources,
         spellcasting_ability=_ability(scan.spellcasting_ability) or "",
         spells=scan.spells, inventory=scan.inventory, currency=scan.currency.model_dump(),
         features=scan.features, proficiencies=scan.proficiencies,

@@ -52,18 +52,21 @@ class ClassLevel(Model):
 # number, or a reference to something on the sheet ("str".."cha" for that
 # ability's modifier, "prof", "half_prof", "level"), optionally times a whole
 # number ("2*level") or negated ("-dex").
-REFS = (*ABILITIES, "prof", "half_prof", "level")
-_AMOUNT = re.compile(r"^(?:(-?\d+)\*)?(-?)([a-z_]+)$")
+# "level:rogue" and "half_level:rogue" count one class's levels (half rounds up,
+# as Sneak Attack's dice do); without a class, the character's whole level.
+REFS = (*ABILITIES, "prof", "half_prof", "level", "half_level")
+_AMOUNT = re.compile(r"^(?:(-?\d+)\*)?(-?)([a-z_]+)(?::([a-z][a-z' -]*))?$")
 
 
 def _check_amount(v: int | str) -> int | str:
     if isinstance(v, str):
         m = _AMOUNT.match(v.strip().lower())
-        if not m or m.group(3) not in REFS:
+        if not m or m.group(3) not in REFS or (m.group(4) and m.group(3) not in ("level", "half_level")):
             try:
                 return int(v)
             except ValueError:
-                raise ValueError(f"{v!r} isn't a number or one of {', '.join(REFS)} (like 2*level or -dex)") from None
+                raise ValueError(f"{v!r} isn't a number or one of {', '.join(REFS)} "
+                                 "(like 2*level, -dex or half_level:rogue)") from None
         return v.strip().lower()
     return v
 
@@ -77,6 +80,9 @@ BONUS_TARGETS = (
     "damage", *(f"damage:{a}" for a in ABILITIES), "save", *(f"save:{a}" for a in ABILITIES),
     "skill", *(f"skill:{k}" for k in SKILLS), *(f"check:{a}" for a in ABILITIES),
     "passive_perception", "spell_dc", "spell_attack",
+    # Ability scores themselves: score: adds to it (+1 CHA), score_set: raises it to at least the amount
+    # (Gauntlets of Ogre Power, STR 19). Everything built on the score follows.
+    *(f"score:{a}" for a in ABILITIES), *(f"score_set:{a}" for a in ABILITIES),
 )
 
 
@@ -86,7 +92,21 @@ class Bonus(Model):
     target: Literal[BONUS_TARGETS]  # type: ignore[valid-type]
     amount: Amount = 0
     source: str = ""  # shown in breakdowns: "Ring of protection", "Rage"
-    active: bool = True  # switch off what only applies sometimes (Rage, while raging)
+    active: bool = True  # switched off by hand
+    during: str = ""  # a status's name: counts only while it's on ("Rage" for Rage's damage)
+
+
+class Status(Model):
+    """Something the character switches on and off in play: Rage, Concentration, Bless, Dodge.
+
+    Bonuses that name it in `during` count only while it's on. Switching it on
+    spends a use of `resource` (Rage spends a Rage). A rest ends it.
+    """
+
+    name: str
+    active: bool = False
+    note: str = ""  # what it's on: the spell being concentrated on
+    resource: str = ""  # a resource's name, spent when switched on
 
 
 class HitPoints(Model):
@@ -123,11 +143,27 @@ class Item(Model):
         return self.equipped and (self.attuned or not self.requires_attunement)
 
 
+_DICE = re.compile(r"^\s*(?:(\d+)|\((.+)\))\s*d\s*(\d+)\s*$")
+
+
+def _check_dice(v: str) -> str:
+    m = _DICE.match(v)
+    if v.strip() and not m:
+        raise ValueError(f"{v!r} isn't dice like 1d8, or (half_level:rogue)d6")
+    if m and m.group(2):
+        _check_amount(m.group(2))
+    return v.strip()
+
+
 class Damage(Model):
-    dice: str = ""  # "1d12", "2d6"; empty for a flat amount
+    # "1d12", or dice whose count follows the sheet: "(half_level:rogue)d6"; empty for a flat amount
+    dice: Annotated[str, AfterValidator(_check_dice)] = ""
     type: str = ""  # "slashing", "fire"
     add_ability: bool = False  # a weapon's main damage adds the attack's ability modifier
     bonus: int = 0
+    # Extra damage that only applies sometimes ("Sneak Attack", "vs giants & titans", "Charge"):
+    # left out of the attack's damage, and added when rolling if it applies.
+    situational: str = ""
 
 
 ATTACK_ABILITIES = (*ABILITIES, "finesse", "spell", "none")
@@ -231,8 +267,10 @@ class CharacterSheet(Model):
     hp: HitPoints = HitPoints()
     conditions: list[str] = []
     death_saves: dict[str, int] = Field(default_factory=lambda: {"successes": 0, "failures": 0})
+    nicknames: list[str] = []  # other names the table uses; the world entry knows them as aliases
     attacks: list[Attack] = []
     bonuses: list[Bonus] = []  # from features and effects; items carry their own
+    statuses: list[Status] = []  # switched on and off in play: Rage, Concentration…
     resources: list[Resource] = []
     spellcasting_ability: str = ""
     spells: list[Spell] = []
@@ -259,26 +297,65 @@ class CharacterSheet(Model):
     def proficiency_bonus(self) -> int:
         return 2 + (max(self.level, 1) - 1) // 4
 
-    def mod(self, ability: str) -> int:
-        return (self.abilities.get(ability, 10) - 10) // 2
+    def class_level(self, name: str) -> int:
+        return sum(c.level for c in self.classes if c.name.strip().lower() == name.strip().lower())
 
-    def amount(self, amount: int | str) -> int:
+    def score_parts(self, ability: str) -> list[tuple[str, int]]:
+        """An ability score: the sheet's, plus bonuses to it, or raised to what an item sets it to."""
+        raw = self.abilities.get(ability, 10)
+        parts = [("Base", raw)]
+        # Amounts here use the unmodified scores, so a score's bonus can't depend on itself.
+        for b in self.active_bonuses():
+            if b.target == f"score:{ability}":
+                parts.append((b.source or b.target, self.amount(b.amount, raw=True)))
+        total = sum(v for _, v in parts)
+        for b in self.active_bonuses():
+            if b.target == f"score_set:{ability}" and self.amount(b.amount, raw=True) > total:
+                parts = [(b.source or b.target, self.amount(b.amount, raw=True))]
+                total = parts[0][1]
+        return parts
+
+    def score(self, ability: str) -> int:
+        return sum(v for _, v in self.score_parts(ability))
+
+    def mod(self, ability: str, raw: bool = False) -> int:
+        return ((self.abilities.get(ability, 10) if raw else self.score(ability)) - 10) // 2
+
+    def amount(self, amount: int | str, raw: bool = False) -> int:
         """What an amount comes to on this sheet now."""
         if isinstance(amount, int):
             return amount
         m = _AMOUNT.match(amount)
-        times, negate, ref = int(m.group(1) or 1), m.group(2), m.group(3)
+        times, negate, ref, of_class = int(m.group(1) or 1), m.group(2), m.group(3), m.group(4)
         pb = self.proficiency_bonus
-        value = {"prof": pb, "half_prof": pb // 2, "level": self.level}.get(ref)
-        value = self.mod(ref) if value is None else value
+        level = self.class_level(of_class) if of_class else self.level
+        value = {"prof": pb, "half_prof": pb // 2, "level": level, "half_level": (level + 1) // 2}.get(ref)
+        value = self.mod(ref, raw) if value is None else value
         return -times * value if negate else times * value
 
+    def dice(self, dice: str) -> str:
+        """Dice with their count worked out: "(half_level:rogue)d6" at rogue 7 is "4d6"."""
+        m = _DICE.match(dice)
+        if not m or not m.group(2):
+            return dice.replace(" ", "")
+        return f"{max(0, self.amount(m.group(2).strip().lower()))}d{m.group(3)}"
+
+    @property
+    def active_statuses(self) -> set[str]:
+        return {st.name.strip().lower() for st in self.statuses if st.active}
+
     def active_bonuses(self) -> list[Bonus]:
-        """The sheet's switched-on bonuses, and those of items equipped (and attuned, where needed)."""
-        out = [b for b in self.bonuses if b.active]
+        """Bonuses that count now: switched on, their status (if any) on, and from the sheet
+        or from an item that's equipped (and attuned, where it needs to be)."""
+        statuses = self.active_statuses
+
+        def on(b: Bonus) -> bool:
+            return b.active and (not b.during or b.during.strip().lower() in statuses)
+
+        out = [b for b in self.bonuses if on(b)]
         for item in self.inventory:
             if item.active:
-                out += [b.model_copy(update={"source": b.source or item.name}) for b in item.bonuses if b.active]
+                out += [b.model_copy(update={"source": b.source or item.name}) for b in item.bonuses if on(b)]
         return out
 
     def _bonuses(self, *targets: str) -> list[tuple[str, int]]:
@@ -343,8 +420,10 @@ class CharacterSheet(Model):
             hit.append(("Bonus", attack.hit_bonus))
         hit += self._bonuses("attack", *([f"attack:{ability}"] if ability else []))
         damage = []
-        # Ability, magic and damage bonuses go on the main part: the one adding the ability, else the first.
-        main = next((i for i, d in enumerate(attack.damage) if d.add_ability), 0)
+        # Ability, magic and damage bonuses go on the main part: the one adding the ability, else the
+        # first that always applies.
+        main = next((i for i, d in enumerate(attack.damage) if d.add_ability),
+                    next((i for i, d in enumerate(attack.damage) if not d.situational), 0))
         for i, d in enumerate(attack.damage):
             parts = [("Bonus", d.bonus)] if d.bonus else []
             if i == main:
@@ -353,7 +432,8 @@ class CharacterSheet(Model):
                 if attack.bonus:
                     parts.append(("Magic", attack.bonus))
                 parts += self._bonuses("damage", *([f"damage:{ability}"] if ability else []))
-            damage.append({"dice": d.dice, "type": d.type, "bonus": _total(parts)})
+            damage.append({"dice": self.dice(d.dice), "type": d.type, "bonus": _total(parts),
+                           "situational": d.situational})
         return {"to_hit": _total(hit), "damage": damage, "text": _damage_text(damage)}
 
     def derived(self) -> dict[str, Any]:
@@ -362,6 +442,7 @@ class CharacterSheet(Model):
         out: dict[str, Any] = {
             "level": self.level,
             "proficiency_bonus": self.proficiency_bonus,
+            "scores": {a: _total(self.score_parts(a)) for a in ABILITIES},
             "modifiers": {a: self.mod(a) for a in ABILITIES},
             "saves": {a: _total(self.save_parts(a)) for a in ABILITIES},
             "skills": {k: _total(self.skill_parts(k)) for k in SKILLS},
@@ -386,12 +467,16 @@ def _total(parts: list[tuple[str, int]]) -> dict[str, Any]:
 
 
 def _damage_text(damage: list[dict[str, Any]]) -> str:
-    out = []
-    for d in damage:
+    """ "1d12+6 slashing (vs giants & titans +3d6 force)": what always applies, then what sometimes does."""
+
+    def one(d: dict[str, Any]) -> str:
         n = d["bonus"]["total"]
         amount = (d["dice"] + (f"{n:+d}" if n else "")) if d["dice"] else str(n)
-        out.append(f"{amount} {d['type']}".strip())
-    return " + ".join(out)
+        return f"{amount} {d['type']}".strip()
+
+    text = " + ".join(one(d) for d in damage if not d.get("situational"))
+    extra = [f"{d['situational']} +{one(d)}" for d in damage if d.get("situational")]
+    return " ".join([text, *(f"({e})" for e in extra)]).strip()
 
 
 class PartyStash(Model):
@@ -475,11 +560,12 @@ def apply_hp(sheet: CharacterSheet, delta: int) -> None:
 
 
 def rest(sheet: CharacterSheet, long: bool) -> None:
-    """Reset resources that recharge on this rest; a long rest also restores HP."""
+    """Reset resources that recharge on this rest and end statuses; a long rest also restores HP."""
     kinds = {"short rest"} | ({"long rest", "dawn"} if long else set())
     sheet.resources = [
         r.model_copy(update={"used": 0}) if r.recharge in kinds else r for r in sheet.resources
     ]
+    sheet.statuses = [st.model_copy(update={"active": False}) for st in sheet.statuses]  # an hour or more: all over
     if long:
         sheet.hp = sheet.hp.model_copy(update={"current": sheet.hp_max, "temp": 0})
         sheet.death_saves = {"successes": 0, "failures": 0}

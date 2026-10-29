@@ -114,6 +114,12 @@ export class PlayView extends SheetView {
         vital("Init", sign(n(d.initiative)), () => this.roll("Initiative", d.initiative)),
         vital("Speed", n(d.speed)),
       ),
+      s.statuses.length > 0 && h("div.play-statuses",
+        s.statuses.map((st) => h("button.chip.status", {
+          className: `chip status${st.active ? " on" : ""}`, "aria-pressed": String(st.active), disabled: !this.canEdit,
+          title: st.active ? `End ${st.name}` : `Start ${st.name}${st.resource ? ` (spends a use of ${st.resource})` : ""}`,
+          onclick: () => this.toggleStatus(st),
+        }, st.name, st.active && st.note ? h("small", ` ${st.note}`) : ""))),
       s.conditions.length > 0 && h("div.play-conditions",
         s.conditions.map((c) => h("button.chip.condition", { onclick: () => this.conditionSheet(), disabled: !this.canEdit }, c))),
     ].filter(Boolean));
@@ -146,7 +152,7 @@ export class PlayView extends SheetView {
       },
         h("span.ab-name", a.toUpperCase()),
         h("span.ab-mod", sign(d.modifiers[a])),
-        h("span.ab-score", s.abilities[a] ?? 10)))),
+        h("span.ab-score", n(d.scores?.[a]) || s.abilities[a] || 10)))),
       h("div.play-strip",
         mini("Prof", sign(d.proficiency_bonus)),
         mini("Passive Perc.", n(d.passive_perception)),
@@ -385,6 +391,27 @@ export class PlayView extends SheetView {
         h("button", { onclick: () => { if (!amount) return; dialog.close(); this.stash().move("stash", {}, { [coin]: amount }); } }, "To stash")));
   }
 
+  // Start or end a status. Starting one spends a use of its resource (Rage), and
+  // Concentration asks what it's on. Bonuses during it count once the save comes back.
+  toggleStatus(st) {
+    if (!st.active) {
+      if (/concentrat/i.test(st.name)) {
+        const on = prompt("Concentrating on?", st.note || "");
+        if (on === null) return;
+        st.note = on.trim();
+      }
+      const r = st.resource && this.sheet.resources.find((x) => x.name.toLowerCase() === st.resource.toLowerCase());
+      if (r) {
+        if (r.used >= r.max && !confirm(`No ${r.name} left. Start ${st.name} anyway?`)) return;
+        r.used = Math.min(r.max, r.used + 1);
+      }
+    }
+    st.active = !st.active;
+    this.changed(`${st.name} ${st.active ? "on" : "off"}`);
+    this.renderHead();
+    this.renderPanel();
+  }
+
   conditionSheet() {
     const list = this.sheet.conditions;
     const all = [...CONDITIONS, ...list.filter((c) => !CONDITIONS.includes(c))];
@@ -426,35 +453,54 @@ export class PlayView extends SheetView {
     this.record({ label, summary: String(a + mod), detail: `${detail} · 2nd d20: ${b} → ${b + mod}`, flag });
   }
 
-  // To hit and every damage part, from the server's numbers (`da`: derived.attacks[i]).
+  // To hit and the damage that always applies, from the server's numbers (`da`:
+  // derived.attacks[i]). Situational damage (Sneak Attack, "vs giants") is offered
+  // as buttons on the result: tapping one rolls it and adds it to this roll.
   attack(a, da) {
+    const name = a.name || "Attack";
     const toHit = n(da.to_hit);
     const first = d(20), second = d(20);
     const crit = first === 20;
     const flag = crit ? "crit" : first === 1 ? "fumble" : "";
-    const parts = [
-      h("div.roll-total", { className: `roll-total${flag ? ` ${flag}` : ""}` }, first + toHit, h("small", " to hit")),
-      h("div.roll-detail", `d20: ${first} ${fmtMod(toHit)}${crit ? " · critical!" : ""}`),
-      h("div.roll-detail.muted", `2nd d20: ${second} → ${second + toHit}`),
-    ];
-    const summary = [`to hit ${first + toHit}`];
-    const detail = [`d20: ${first} ${fmtMod(toHit)} · 2nd d20: ${second} → ${second + toHit}`];
-    const damage = da.damage.map((part) => {
+    const rollPart = (part) => {
       const expr = parseExpr(`${part.dice || "0"}${part.bonus.total ? sign(part.bonus.total) : ""}`);
       const r = expr.dice.length ? rollExpr(expr, { crit }) : { total: expr.mod, detail: String(expr.mod) };
-      return { total: Math.max(0, r.total), type: part.type || "damage", detail: r.detail };
-    });
-    if (damage.length) {
-      const total = damage.reduce((t, x) => t + x.total, 0);
-      const each = damage.map((x) => `${x.total} ${x.type}`).join(" + ");
-      parts.push(h("div.roll-total.damage", total, h("small", ` ${damage.length > 1 ? "damage" : damage[0].type}`)),
+      return { total: Math.max(0, r.total), type: part.type || "damage", detail: r.detail, label: part.situational };
+    };
+    const damage = da.damage.filter((p) => !p.situational).map(rollPart);
+    const extras = da.damage.filter((p) => p.situational);
+    const added = new Set();
+    const hitDetail = `d20: ${first} ${fmtMod(toHit)} · 2nd d20: ${second} → ${second + toHit}`;
+    const summarize = () => {
+      const each = damage.map((x) => `${x.total} ${x.type}${x.label ? ` (${x.label})` : ""}`).join(" + ");
+      const dice = damage.map((x) => x.detail).join(" · ") + (crit ? " (crit: dice doubled)" : "");
+      return { each, dice, total: damage.reduce((t, x) => t + x.total, 0) };
+    };
+    const render = () => {
+      const { each, dice, total } = summarize();
+      this.showRoll(name, [
+        h("div.roll-total", { className: `roll-total${flag ? ` ${flag}` : ""}` }, first + toHit, h("small", " to hit")),
+        h("div.roll-detail", `d20: ${first} ${fmtMod(toHit)}${crit ? " · critical!" : ""}`),
+        h("div.roll-detail.muted", `2nd d20: ${second} → ${second + toHit}`),
+        damage.length > 0 && h("div.roll-total.damage", total, h("small", ` ${damage.length > 1 ? "damage" : damage[0].type}`)),
         damage.length > 1 && h("div.roll-detail", each),
-        h("div.roll-detail", damage.map((x) => x.detail).join(" · ") + (crit ? " (crit: dice doubled)" : "")));
-      summary.push(each);
-      detail.push(damage.map((x) => x.detail).join(" · ") + (crit ? " (crit)" : ""));
-    }
-    this.showRoll(a.name || "Attack", parts);
-    this.record({ label: a.name || "Attack", summary: summary.join(" · "), detail: detail.join(" · "), flag });
+        damage.length > 0 && h("div.roll-detail", dice),
+        extras.some((_, i) => !added.has(i)) && h("div.roll-extras", extras.map((p, i) => !added.has(i) && h("button.roll-extra", {
+          onclick: (e) => {
+            e.stopPropagation();  // the roll box closes on a tap
+            added.add(i);
+            damage.push(rollPart(p));
+            render();
+            const s2 = summarize();
+            this.amendRoll({ summary: `to hit ${first + toHit} · ${s2.each}`, detail: `${hitDetail} · ${s2.dice}` });
+          },
+        }, `+ ${p.situational}`, h("small", ` ${p.dice}${p.bonus.total ? sign(p.bonus.total) : ""} ${p.type}`)))),
+      ]);
+    };
+    render();
+    const s1 = summarize();
+    this.record({ label: name, summary: [`to hit ${first + toHit}`, s1.each].filter(Boolean).join(" · "),
+      detail: [hitDetail, damage.length && s1.dice].filter(Boolean).join(" · "), flag });
   }
 
   // -- roll history ---------------------------------------------------------------
@@ -476,6 +522,18 @@ export class PlayView extends SheetView {
   record(roll) {
     this.loadRolls();
     this.rolls = [{ ...roll, created_at: new Date().toISOString() }, ...this.rolls].slice(0, ROLLS_KEPT);
+    this.saveRolls();
+  }
+
+  // Change the latest roll (situational damage added to it after the fact).
+  amendRoll(changes) {
+    this.loadRolls();
+    if (!this.rolls.length) return;
+    this.rolls[0] = { ...this.rolls[0], ...changes };
+    this.saveRolls();
+  }
+
+  saveRolls() {
     try {
       localStorage.setItem(this.rollsKey, JSON.stringify(this.rolls));
     } catch {

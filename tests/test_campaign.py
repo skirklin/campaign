@@ -4,7 +4,7 @@ from pathlib import Path
 import pymupdf
 import pytest
 
-from campaign.charsheet import Attack, Bonus, CharacterSheet, Damage, Item, PartyStash, merge_patch, move
+from campaign.charsheet import Attack, Bonus, CharacterSheet, Damage, Item, PartyStash, Status, merge_patch, move, rest
 from campaign.db import Store
 from campaign.ingest import chunk_file, chunk_markdown
 from campaign.tools import ToolContext, build_tools
@@ -208,3 +208,59 @@ def test_merge_patch():
         "a": {"c": 2, "e": 3},
         "d": [2],
     }
+
+
+def test_statuses_switch_their_bonuses_and_rests_end_them():
+    cid = CharacterSheet(
+        name="Cid", classes=[{"name": "Barbarian", "level": 7}], abilities={"str": 20},
+        attacks=[Attack(name="Greataxe", damage=[Damage(dice="1d12", type="slashing", add_ability=True)])],
+        statuses=[Status(name="Rage", resource="Rage")],
+        bonuses=[Bonus(target="damage:str", amount=2, source="Rage", during="Rage")],
+    )
+    assert cid.derived()["attacks"][0]["text"] == "1d12+5 slashing"
+    cid.statuses[0].active = True
+    assert parts(cid.derived()["attacks"][0]["damage"][0]["bonus"]) == {"STR": 5, "Rage": 2}
+    rest(cid, long=False)  # an hour: Rage is long over
+    assert not cid.statuses[0].active and cid.derived()["attacks"][0]["text"] == "1d12+5 slashing"
+
+
+def test_situational_damage_and_dice_that_scale_with_a_class():
+    vex = CharacterSheet(
+        name="Vex", classes=[{"name": "Rogue", "level": 7}, {"name": "Fighter", "level": 2}], abilities={"dex": 16},
+        attacks=[Attack(name="Rapier", ability="finesse", damage=[
+            Damage(dice="1d8", type="piercing", add_ability=True),
+            Damage(dice="(half_level:rogue)d6", type="piercing", situational="Sneak Attack"),
+            Damage(dice="2d6", type="radiant", situational="vs undead")])],
+    )
+    a = vex.derived()["attacks"][0]
+    # Only what always applies is the attack's damage; the rest is offered when rolling.
+    assert a["text"] == "1d8+3 piercing (Sneak Attack +4d6 piercing) (vs undead +2d6 radiant)"
+    assert [(d["dice"], d["situational"]) for d in a["damage"]] == [
+        ("1d8", ""), ("4d6", "Sneak Attack"), ("2d6", "vs undead")]  # rogue 7 of level 9: 4d6
+    assert vex.amount("level:fighter") == 2 and vex.amount("half_level") == 5
+    with pytest.raises(ValueError):
+        Damage(dice="lots of d6")
+    with pytest.raises(ValueError):
+        Bonus(target="ac", amount="prof:rogue")
+
+
+def test_items_can_raise_or_set_ability_scores():
+    sheet = CharacterSheet(name="Cid", classes=[{"name": "Barbarian", "level": 7}], abilities={"str": 17, "cha": 10},
+                           skill_proficiencies=["athletics"], inventory=[
+        Item(name="Breastplate of Mytros", equipped=True, bonuses=[Bonus(target="score:cha", amount=1)]),
+        Item(name="Gauntlets of Ogre Power", equipped=True, bonuses=[Bonus(target="score_set:str", amount=19)]),
+    ])
+    d = sheet.derived()
+    assert parts(d["scores"]["cha"]) == {"Base": 10, "Breastplate of Mytros": 1} and d["modifiers"]["cha"] == 0
+    assert d["scores"]["str"]["total"] == 19 and d["skills"]["athletics"]["total"] == 4 + 3
+    sheet.abilities["str"] = 20  # better than the gauntlets: they stop mattering
+    assert parts(sheet.derived()["scores"]["str"]) == {"Base": 20}
+
+
+def test_nicknames_are_world_aliases(store):
+    camp = store.create_campaign("Odyssey", "dm")
+    t = tools(store, "odyssey")
+    t["update_character"](name="Cid", patch={"nicknames": ["Lycidus"]}, reason="new")
+    assert "Cid" in t["get_character"](name="Lycidus")
+    from campaign.world import World
+    assert World(store, camp).resolve("Lycidus")["name"] == "Cid"
