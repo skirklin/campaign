@@ -48,6 +48,11 @@ GOOGLE_ISSUERS = {"accounts.google.com", "https://accounts.google.com"}
 SESSION_DAYS = 30
 FLOW_MINUTES = 10
 OPEN_PATHS = ("/auth/", "/invite/", "/healthz")
+# The remote MCP endpoint and its OAuth endpoints check bearer tokens (or a
+# client's own credentials) themselves, and are called by apps from other
+# origins, so they skip both the session check and the same-origin check.
+# The consent page in between is an ordinary signed-in page.
+BEARER_PATHS = {"/mcp", "/mcp/", "/authorize", "/token", "/register", "/revoke"}
 
 
 @dataclass(frozen=True)
@@ -289,6 +294,8 @@ def install(
     @app.middleware("http")
     async def require_login(request: Request, call_next: Callable) -> Response:
         path = request.url.path
+        if path in BEARER_PATHS or path.startswith("/.well-known/oauth-"):
+            return await call_next(request)
         if request.method not in ("GET", "HEAD", "OPTIONS"):
             origin = request.headers.get("origin")
             if origin and origin != cfg.origin:
@@ -306,7 +313,8 @@ def install(
         if user is None:
             if path.startswith("/api/"):
                 return JSONResponse({"detail": "sign in required"}, status_code=401)
-            return RedirectResponse(f"/auth/login?next={urllib.parse.quote(path)}", status_code=303)
+            target = path + (f"?{request.url.query}" if request.url.query else "")
+            return RedirectResponse(f"/auth/login?next={urllib.parse.quote(target)}", status_code=303)
         request.state.user = user
         return await call_next(request)
 

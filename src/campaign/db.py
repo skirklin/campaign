@@ -308,11 +308,35 @@ CREATE INDEX characters_owner ON characters(owner_id);
 CREATE INDEX characters_entity ON characters(entity_id);
 """
 
+# v6: OAuth for the remote MCP endpoint (mcp_server.py, oauth.py). Clients
+# register themselves; codes and tokens are stored as hashes and belong to a
+# user, so removing the user revokes everything they granted.
+V6_OAUTH = """
+CREATE TABLE oauth_clients (
+    client_id   TEXT PRIMARY KEY,
+    info        TEXT NOT NULL,
+    created_at  TEXT NOT NULL
+);
+CREATE TABLE oauth_grants (
+    hash        TEXT PRIMARY KEY,
+    kind        TEXT NOT NULL CHECK (kind IN ('code', 'access', 'refresh')),
+    client_id   TEXT NOT NULL REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    scopes      TEXT NOT NULL DEFAULT '[]',
+    resource    TEXT,
+    data        TEXT NOT NULL DEFAULT '{}',
+    expires_at  INTEGER NOT NULL,
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX oauth_grants_user ON oauth_grants(user_id);
+"""
+
 # Append only, for changes small enough to migrate. Each step runs in its
 # own transaction and then sets user_version to its number.
 MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (BASELINE, SCHEMA),
     (5, V5_CHARACTERS),
+    (6, V6_OAUTH),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 
@@ -869,6 +893,73 @@ class Store:
             (campaign.id,),
         ).fetchone()
         return row["n"]
+
+    # -- OAuth (remote MCP) -----------------------------------------------------
+
+    def oauth_client(self, client_id: str) -> str | None:
+        row = self.conn.execute("SELECT info FROM oauth_clients WHERE client_id = ?", (client_id,)).fetchone()
+        return None if row is None else row["info"]
+
+    def add_oauth_client(self, client_id: str, info: str, keep: int = 200) -> None:
+        """Register a client, forgetting the oldest ones nobody holds a grant for beyond `keep`."""
+        with self.conn:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO oauth_clients (client_id, info, created_at) VALUES (?, ?, ?)",
+                (client_id, info, now()),
+            )
+            self.conn.execute(
+                "DELETE FROM oauth_clients WHERE client_id IN (SELECT client_id FROM oauth_clients c"
+                " WHERE NOT EXISTS (SELECT 1 FROM oauth_grants g WHERE g.client_id = c.client_id)"
+                " ORDER BY created_at DESC LIMIT -1 OFFSET ?)",
+                (keep,),
+            )
+
+    def add_oauth_grant(
+        self, secret_hash: str, kind: str, client_id: str, user_id: int, scopes: list[str],
+        resource: str | None, expires_at: int, data: dict[str, Any] | None = None,
+    ) -> None:
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO oauth_grants (hash, kind, client_id, user_id, scopes, resource, data, expires_at, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (secret_hash, kind, client_id, user_id, json.dumps(scopes), resource, json.dumps(data or {}),
+                 expires_at, now()),
+            )
+
+    def oauth_grant(self, secret_hash: str, kind: str, at: int) -> dict[str, Any] | None:
+        """An unexpired grant of that kind, or None."""
+        row = self.conn.execute(
+            "SELECT * FROM oauth_grants WHERE hash = ? AND kind = ? AND expires_at > ?", (secret_hash, kind, at)
+        ).fetchone()
+        if row is None:
+            return None
+        d = dict(row)
+        d["scopes"], d["data"] = json.loads(d["scopes"]), json.loads(d["data"])
+        return d
+
+    def delete_oauth_grants(self, *hashes: str) -> None:
+        with self.conn:
+            self.conn.executemany("DELETE FROM oauth_grants WHERE hash = ?", [(h,) for h in hashes])
+
+    def prune_oauth(self, at: int) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM oauth_grants WHERE expires_at <= ?", (at,))
+
+    def oauth_sessions(self, user_id: int) -> list[dict[str, Any]]:
+        """Apps the user has connected: one row per client holding a live refresh token."""
+        rows = self.conn.execute(
+            "SELECT g.client_id, json_extract(c.info, '$.client_name') AS client_name, max(g.created_at) AS last_used"
+            " FROM oauth_grants g JOIN oauth_clients c ON c.client_id = g.client_id"
+            " WHERE g.user_id = ? AND g.kind = 'refresh' GROUP BY g.client_id ORDER BY last_used DESC",
+            (user_id,),
+        )
+        return [dict(r) for r in rows]
+
+    def revoke_oauth_client(self, user_id: int, client_id: str) -> int:
+        with self.conn:
+            return self.conn.execute(
+                "DELETE FROM oauth_grants WHERE user_id = ? AND client_id = ?", (user_id, client_id)
+            ).rowcount
 
     # -- characters ----------------------------------------------------------
 

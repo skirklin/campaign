@@ -231,7 +231,7 @@ def test_tools_find_a_character_by_any_name_its_entity_has():
 def test_v4_database_migrates_characters_into_campaigns(tmp_path):
     import sqlite3
 
-    from campaign.db import BASELINE, SCHEMA
+    from campaign.db import BASELINE, SCHEMA, SCHEMA_VERSION
 
     path = tmp_path / "old.db"
     old = sqlite3.connect(path)
@@ -245,10 +245,10 @@ def test_v4_database_migrates_characters_into_campaigns(tmp_path):
     old.close()
 
     store = Store(path)
-    assert store.schema_version == 5
+    assert store.schema_version == SCHEMA_VERSION
     assert [c["name"] for c in store.characters()] == ["Bram"]  # the campaign-less sheet is gone
     assert store.conn.execute("SELECT count(*) FROM character_log").fetchone()[0] == 1
     assert store.conn.execute("SELECT email FROM users").fetchone()[0] == "me@example.com"  # accounts kept
     eid = store.link_character(1)  # linked the first time it's touched
     assert World(store, store.campaign("strahd")).entity(eid)["name"] == "Bram"
-    assert list((tmp_path / "backups").glob("campaign-*-pre-v5.db"))
+    assert list((tmp_path / "backups").glob(f"campaign-*-pre-v{SCHEMA_VERSION}.db"))

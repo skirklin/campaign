@@ -29,6 +29,14 @@ GitHub Actions: push to main ─▶ test ─▶ ghcr.io/skirklin/campaign:sha-�
   open. A Google account that isn't a user and has no valid invite is
   turned away. Users are looked up on every request, so removing someone
   locks them out immediately.
+- **The MCP endpoint takes bearer tokens instead.** `/mcp` and its OAuth
+  endpoints (`/.well-known/oauth-*`, `/authorize`, `/token`, `/register`,
+  `/revoke`) skip the session check, because apps call them from elsewhere.
+  `/mcp` refuses anything without a valid access token issued for it, and
+  the only way to get one is the consent page, which needs your session
+  and shows which app and redirect host is asking. The page can't be
+  framed. Tokens are stored hashed, expire, rotate, and are revoked when
+  you disconnect the app or the user is removed.
 - **Every campaign checks membership.** A campaign you don't belong to
   looks like it doesn't exist. Players see only what the party knows,
   including names and search results, and viewers can't change anything.

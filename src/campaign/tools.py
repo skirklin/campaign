@@ -36,6 +36,7 @@ class ToolContext:
     session: int | None = None  # the session being ingested; otherwise the latest one
     run_kind: str = "chat"
     run_id: int | None = None
+    user_id: int | None = None  # who's asking, when signed in: owns the characters they create
 
     @property
     def world(self) -> World:
@@ -322,8 +323,28 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         if found:
             store.update_character(found["id"], sheet.model_dump(), reason=reason)
         else:
-            store.create_character(sheet.model_dump(), campaign_id=campaign.id, reason=reason)
+            store.create_character(sheet.model_dump(), campaign_id=campaign.id, owner_id=ctx.user_id, reason=reason)
         return f"Updated {sheet.name}: {reason}"
+
+    def create_character(sheet: CharacterSheet, reason: str = "created") -> str:
+        """Add a new player character to this campaign from a complete sheet.
+
+        Use this to enter a character from a paper sheet, a scan, or a
+        description: fill in every field the source shows (ability scores,
+        not modifiers; proficient saves and skills by their keys, e.g. "wis",
+        "sleight of hand"; spell slots and other limited uses as resources).
+        The sheet becomes a character in the party, owned by whoever is
+        using this tool, and the world model's player character of that name.
+
+        Args:
+            sheet: The whole character sheet.
+            reason: Where it came from, e.g. "entered from a scan of the paper sheet".
+        """
+        if _find_character(sheet.name):
+            return f"{sheet.name} already exists in this campaign; use update_character to change the sheet."
+        character_id = store.create_character(sheet.model_dump(), campaign_id=campaign.id, owner_id=ctx.user_id,
+                                              reason=reason)
+        return _json({"created": character_id, "derived": sheet.derived()})
 
     readers = [
         list_sources,
@@ -338,5 +359,5 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         recent_journal,
         get_character,
     ]
-    writers = [record_fact, end_fact, party_learned, add_journal_entry, update_character]
+    writers = [record_fact, end_fact, party_learned, add_journal_entry, update_character, create_character]
     return readers + (writers if writable else [])

@@ -1,11 +1,12 @@
 import { characterList, sheetView } from "./sheet.js";
 import { campaignList, campaignView, entityView, sourceView } from "./campaigns.js";
-import { adminView } from "./admin.js";
+import { accountView, adminView } from "./admin.js";
 import { whoami } from "./util.js";
 
 const routes = [
   [/^#\/characters\/(\d+)$/, (m) => sheetView(m[1]), "characters"],
   [/^#\/admin$/, () => adminView(), "admin"],
+  [/^#\/account$/, () => accountView(), "account"],
   [/^#\/campaigns\/([^/]+)\/source\/(\d+)$/, (m) => sourceView(m[1], m[2]), "campaigns"],
   [/^#\/campaigns\/([^/]+)\/entity\/(\d+)$/, (m) => entityView(m[1], m[2]), "campaigns"],
   [/^#\/campaigns\/([^/]+)(?:\/(\w+))?$/, (m) => campaignView(m[1], m[2] || "ingest"), "campaigns"],
