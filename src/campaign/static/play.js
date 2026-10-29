@@ -262,55 +262,42 @@ export class PlayView extends SheetView {
       .map((b) => `${typeof b.amount === "number" ? sign(b.amount) : `+${b.amount}`} ${targetLabel(b.target)}`).join(", ");
   }
 
-  // "round 3 of 10" in combat, for a status with a duration started this fight.
+  // "round 3 of 10" in combat, for a status started this fight; past its duration it
+  // says so, and stays on until it's ended.
   statusClock(st) {
     const since = this.combat?.since?.[st.name];
     if (!st.active || since === undefined) return "";
     const round = this.combat.round - since + 1;
-    return st.duration ? `round ${round} of ${st.duration}` : `round ${round}`;
+    if (!st.duration) return `round ${round}`;
+    return round > st.duration ? `round ${round} · lasts ${st.duration}` : `round ${round} of ${st.duration}`;
   }
 
   // -- combat -------------------------------------------------------------------
-  // Kept on this device (combat:<id>), so a reload mid-fight carries on: the round,
-  // what this turn has used, and when each status started.
+  // A layout for the fight, and a scratch pad: a round tally, the turn's actions to tick
+  // off, how long statuses have run. It decides nothing: it doesn't roll, end statuses
+  // or limit what can be used. Kept on this device (combat:<id>), so a reload carries on.
 
   startCombat() {
-    this.combat = { round: 1, used: {}, moved: 0, once: [], since: {} };
+    this.combat = { round: 1, used: {}, moved: 0, since: {} };
     for (const st of this.sheet.statuses) if (st.active) this.combat.since[st.name] = 1;
     saveCombat(this.id, this.combat);
     this.rerender();
-    this.roll("Initiative", this.derived.initiative);
   }
 
-  // A new turn: the turn's actions, movement and once-a-turn damage come back. A status
-  // that has run its rounds ends (with Undo, if it shouldn't have).
+  // The next round: the turn's ticks are cleared, like rubbing out pencil marks.
   nextTurn() {
     const c = this.combat;
     c.round += 1;
     c.used = {};
     c.moved = 0;
-    c.once = [];
-    const over = this.sheet.statuses.filter((st) => st.active && st.duration && c.since[st.name] !== undefined
-      && c.round - c.since[st.name] >= st.duration);
-    for (const st of over) { st.active = false; delete c.since[st.name]; }
     saveCombat(this.id, c);
-    if (over.length) this.changed(`${over.map((st) => st.name).join(", ")} ended after ${over[0].duration} rounds`);
     this.rerender();
   }
 
   endCombat() {
-    if (!confirm("End combat?")) return;
-    const ended = this.sheet.statuses.filter((st) => st.active && st.duration);
-    for (const st of ended) st.active = false;
     this.combat = null;
     saveCombat(this.id, null);
-    if (ended.length) this.changed(`combat over: ${ended.map((st) => st.name).join(", ")} ended`);
     this.rerender();
-    const dialog = bottomSheet("Combat over",
-      ended.length > 0 && h("p.muted", `${ended.map((st) => st.name).join(", ")} ended.`),
-      h("div.hp-buttons",
-        h("button", { onclick: () => { dialog.close(); this.rest(false); } }, "Short rest"),
-        h("button.primary", { onclick: () => dialog.close() }, "Done")));
   }
 
   combatBar() {
@@ -791,20 +778,14 @@ export class PlayView extends SheetView {
         optionDamage !== 0 && h("div.roll-detail.muted", chosen.filter((x) => x.v.damage).map((x) => `${x.o.name} ${sign(x.v.damage)}`).join(" · ")),
         extras.some((_, k) => !added.has(k)) && h("h3", "If it applies"),
         h("div.extras", extras.map((p, k) => !added.has(k) && h("button.choice", {
-          disabled: this.usedThisTurn(p),
           onclick: () => {
             if (p.spends && !this.spend(p.spends, p.situational)) return;
-            if (p.once_per_turn && this.combat) {
-              this.combat.once.push(p.situational.toLowerCase());
-              saveCombat(this.id, this.combat);
-            }
             added.add(k);
             rolled.push(rollPart(p));
             render();
           },
         }, h("span.choice-name", `+ ${p.situational}`),
-          h("span.choice-detail", this.usedThisTurn(p) ? "used this turn"
-            : `${p.dice}${p.bonus.total ? sign(p.bonus.total) : ""} ${p.type}${p.spends ? ` · spends ${p.spends}` : ""}${p.once_per_turn ? " · once a turn" : ""}`)))),
+          h("span.choice-detail", `${p.dice}${p.bonus.total ? sign(p.bonus.total) : ""} ${p.type}${p.spends ? ` · spends ${p.spends}` : ""}`)))),
       ], [
         h("button", { onclick: () => this.attack(i) }, "Attack again"),
         h("button.primary", { onclick: () => this.closeScreen() }, "Done"),
@@ -823,10 +804,6 @@ export class PlayView extends SheetView {
     };
     this.damageRecorded = false;
     render();
-  }
-
-  usedThisTurn(part) {
-    return !!(part.once_per_turn && this.combat?.once.includes(part.situational.toLowerCase()));
   }
 
   // Use up one of a resource by name; asks first when none are left. False if not spent.

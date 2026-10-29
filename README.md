@@ -74,16 +74,15 @@ uv run campaign web            # http://127.0.0.1:8765
   with advantage and any reminder an option carries. On a hit it rolls
   damage, doubling dice on a crit, with situational damage to add if it
   applies. "Attack again" keeps the choices for a second swing.
-  **Start combat** rolls initiative and switches Main to the fight:
-  - a round counter with **Next turn**;
-  - Action, Bonus, Reaction and Movement to mark off;
-  - statuses as cards, counting their rounds ("Rage · round 3 of 10"), each
-    ending on its own when its rounds run out;
-  - once-a-turn damage (Charge, Sneak Attack), greyed out after use until
-    the next turn.
+  **Start combat** switches Main to a layout for the fight, which is a
+  scratch pad and decides nothing:
+  - a round tally with **Next turn**, which clears the turn's ticks;
+  - Action, Bonus, Reaction and Movement to tick off;
+  - statuses, attacks and resources first, with how long each status has
+    run ("Rage · round 3 of 10"). A status stays on until it's ended.
 
-  **End** ends statuses that have a duration and offers a short rest.
-  Combat state is kept on that device, so a reload mid-fight carries on.
+  **End** switches back. The round and ticks are kept on that device, so a
+  reload mid-fight carries on.
   Every change made in the Play view (HP, pips, statuses, coin, rests)
   shows an **Undo** on its toast. The 🎲 button opens a dice tray: tap dice to build an expression or
   type one (`8d6 fire`, `2d20kh1+5` for advantage, `4d6kh3` for a stat),
@@ -150,8 +149,8 @@ localhost without it, unless you pass `--no-auth`. With sign-in on:
   applies sometimes (Sneak Attack, "vs giants", a centaur's Charge) is
   **situational**: it's left out of the attack's damage and offered as a
   button on the roll, to add when it applies; adding one can spend a
-  resource (a smite's slot), and can be once a turn. A status can last a
-  number of rounds (Rage: 10). **Attack options** are choices made before
+  resource (a smite's slot). A status can say how many rounds it lasts
+  (Rage: 10), which combat mode shows. **Attack options** are choices made before
   an attack roll: advantage or disadvantage, a change to hit and damage,
   and a reminder (Reckless Attack: "attacks against you have advantage").
   Each applies to the attacks it names, by ability, melee or ranged,

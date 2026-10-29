@@ -107,7 +107,7 @@ class Status(Model):
     active: bool = False
     note: str = ""  # what it's on: the spell being concentrated on
     resource: str = ""  # a resource's name, spent when switched on
-    duration: int = Field(default=0, ge=0)  # rounds it lasts (Rage, Bless: 10); 0 until ended
+    duration: int = Field(default=0, ge=0)  # rounds it lasts (Rage, Bless: 10), shown in combat; 0 if open-ended
 
 
 class HitPoints(Model):
@@ -166,7 +166,6 @@ class Damage(Model):
     # left out of the attack's damage, and added when rolling if it applies.
     situational: str = ""
     spends: str = ""  # a resource's name: adding this situational damage spends a use (Divine Smite, a slot)
-    once_per_turn: bool = False  # Sneak Attack, Charge: offered once a turn in combat
 
 
 ATTACK_ABILITIES = (*ABILITIES, "finesse", "spell", "none")
@@ -482,7 +481,7 @@ class CharacterSheet(Model):
                     parts.append(("Magic", attack.bonus))
                 parts += self._bonuses("damage", *([f"damage:{ability}"] if ability else []))
             damage.append({"dice": self.dice(d.dice), "type": d.type, "bonus": _total(parts),
-                           "situational": d.situational, "spends": d.spends, "once_per_turn": d.once_per_turn})
+                           "situational": d.situational, "spends": d.spends})
         options = [i for i, o in enumerate(self.attack_options) if self.option_applies(o, attack)]
         return {"to_hit": _total(hit), "damage": damage, "text": _damage_text(damage), "options": options}
 

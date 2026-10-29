@@ -589,9 +589,6 @@ export class SheetView {
             h("option", { value: "" }, "spends nothing"),
             [...new Set([...this.sheet.resources.map((r) => r.name), d.spends].filter(Boolean))]
               .map((name) => h("option", { value: name }, `spends ${name}`))),
-          d.situational && h("label.mini", { title: "Offered once a turn in combat (Sneak Attack, Charge)" },
-            h("input", { type: "checkbox", checked: !!d.once_per_turn,
-              onchange: (e) => { d.once_per_turn = e.target.checked; this.changed("damage"); } }), "1/turn"),
           remove(a.damage, j, "damage", "attacks"),
         )),
         this.chips("attacks", `attacks.${i}.properties`, { placeholder: "Add property (finesse, reach…)" }),
@@ -696,7 +693,7 @@ export class SheetView {
     const list = this.sheet.statuses;
     return h("div.rows",
       list.length === 0 && h("p.empty", "Rage, Concentration, Bless… switched on in play."),
-      list.length > 0 && h("p.muted.small", "Rounds: how long it lasts in combat (Rage, Bless: 10); blank lasts until ended."),
+      list.length > 0 && h("p.muted.small", "Rounds: how long it lasts (Rage, Bless: 10), shown in combat; 0 if open-ended."),
       list.map((st, i) => h("div.row.status-row", { style: "grid-template-columns:auto 1fr 1fr 8rem 4.5rem auto" },
         h("input", { type: "checkbox", checked: st.active, title: "On now", "aria-label": `${st.name || "status"} on`,
           onchange: (e) => { st.active = e.target.checked; this.changed(`${st.name || "status"} ${st.active ? "on" : "off"}`); } }),
