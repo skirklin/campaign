@@ -34,6 +34,7 @@ import json
 import os
 import re
 import time
+import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -46,7 +47,7 @@ from .db import Store
 from .loops import LeasedLoop
 
 LEAF_VERSION = 1
-BRANCH_VERSION = 1
+BRANCH_VERSION = 2  # 2: stricter merge rules (no merging across kinds, members into groups, shared titles)
 MODEL = os.environ.get("CAMPAIGN_DIGEST_MODEL", os.environ.get("CAMPAIGN_MODEL", "claude-opus-5-5"))
 EFFORT = os.environ.get("CAMPAIGN_DIGEST_EFFORT", "medium")
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
@@ -149,11 +150,20 @@ Return:
   summaries: what it covers, the main NPCs and threats, important treasure,
   and how it connects to the rest of the adventure. 3-6 sentences; for a
   whole book, up to three short paragraphs.
-- merges: groups of entity ids that are the same thing under different names
-  or kinds (for example "Morgantha" and "the hag of Old Bonegrinder", or one
-  item described in two rooms). For each group give the best canonical name
-  (the book's proper name) and a 1-2 sentence summary combining what's known.
-  Only merge when you're confident. Leave everything else out.
+- merges: groups of entity ids that are the same single thing under
+  different names (for example "Morgantha" and "the hag of Old
+  Bonegrinder", or one item described in two rooms). For each group give the
+  best canonical name (the book's proper name) and a 1-2 sentence summary
+  combining what's known. Only merge when the text makes clear they are one
+  and the same. Never merge:
+  - different individuals who share a title, role or epithet ("the Titan",
+    "the king", "her father" can each be several people);
+  - a member, leader or servant into the group they belong to, or a group
+    into its leader;
+  - a creature with the place it lives in, the treasure it guards, or the
+    kind of creature it is (a named dragon is not "dragons");
+  - things of different kinds (a person and an item, a place and a faction).
+  Leave everything else out.
 """
 
 
@@ -365,13 +375,23 @@ def premerge(children: list[DNode]) -> list[dict[str, Any]]:
     return [combine(g) if len(g) > 1 else g[0] for g in groups.values()]
 
 
+def _family(kind: str) -> str:
+    return "creature" if kind in ("npc", "monster") else kind
+
+
+MAX_MERGE = 6  # more than this many entries being "one thing" is a sign of lumping, not merging
+
+
 def apply_merges(candidates: list[dict[str, Any]], merges: list[Merge]) -> list[dict[str, Any]]:
+    """Combine the groups Claude says are one thing, within limits checked here: only
+    entries of the same kind of thing (a named creature may be an npc or a monster),
+    and only small groups. A group that breaks them is left unmerged."""
     index = {f"e{i}": i for i in range(len(candidates))}
     merged_into: dict[int, int] = {}  # candidate -> first candidate of its group
     groups: dict[int, tuple[list[int], Merge]] = {}
     for m in merges:
         ids = [index[i] for i in dict.fromkeys(m.ids) if i in index and index[i] not in merged_into]
-        if len(ids) < 2:
+        if len(ids) < 2 or len(ids) > MAX_MERGE or len({_family(candidates[i]["kind"]) for i in ids}) > 1:
             continue
         for i in ids:
             merged_into[i] = ids[0]
@@ -756,7 +776,32 @@ class Reconciler(LeasedLoop):
             s.close()
 
     def pass_once(self) -> bool:
+        if not self._replanned:
+            self.replan()
         return self.reconcile_once()
+
+    _replanned = False
+
+    def replan(self) -> None:
+        """Once per start: plan every source with a target again (no API calls).
+
+        A new version of the digest (LEAF_VERSION, BRANCH_VERSION) or of how a
+        catalog is applied to the world (world.APPLY_VERSION) changes the
+        keys; planning saves the new ones, so changed sections get digested,
+        and a cached catalog is applied again under the new rules.
+        """
+        s = Store(self.db)
+        try:
+            for t in s.digest_targets():
+                if self.stopping:
+                    return
+                try:
+                    plan(s, t["id"], t["model"])
+                except Exception:  # one bad source shouldn't stop the rest
+                    traceback.print_exc()
+        finally:
+            s.close()
+        self._replanned = True
 
     def reconcile_once(self) -> bool:
         """One pass over every source with a target. True if it digested anything."""

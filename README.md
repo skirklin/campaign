@@ -387,8 +387,17 @@ that tree bottom-up (`digest.py`):
   summary plus the entities in that text.
 - **Branches** see only their children's digests, never raw text. Claude
   returns a summary of the section and says which children's entities are
-  the same thing under different names. The merge itself is done in code.
-  Exact duplicates are merged without asking.
+  the same thing under different names. The merge itself is done in code,
+  which refuses groups that mix kinds of thing (a named creature may be an
+  npc or a monster) or are too big to be one thing. Exact duplicates are
+  merged without asking.
+- **Applying the catalog** to the world matches entries to entities by their
+  own names, and by naming aliases only: a title ("the Titan"), a
+  description ("the old boar") or a map key ("C3") can belong to several
+  things, so it never joins two entries into one. A new version of these
+  rules (`world.APPLY_VERSION`), or of the digest, takes effect when a
+  server starts: it plans every source again, digests what changed, and
+  applies cached catalogs again.
 - **The root's** entities become the source's catalog.
 
 Each node's output is cached under a hash of exactly what produced it:
