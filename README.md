@@ -64,6 +64,12 @@ uv run campaign web            # http://127.0.0.1:8765
   - **Sessions**: paste a transcript, or upload a text file or a recording,
     to run an ingest. A live log shows what Claude is reading and
     recording. Each past session has its recap and a **Revert** button.
+    An ingest is queued in the database and carried out by a background
+    loop, so it continues with the page closed and is redone from the
+    start if a restart or deploy interrupts it (an ingest replaces the
+    session's earlier recording, so redoing it is safe). Failures retry
+    after 1 and 4 minutes, then show **Retry**; **Cancel** stops one and
+    undoes what it wrote.
   - **Reference**: upload module PDFs and notes, mark them DM-only, and
     search the text directly.
   - **World state**: every person, place, item and quest, from the book and

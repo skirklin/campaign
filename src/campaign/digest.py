@@ -33,7 +33,6 @@ import hashlib
 import json
 import os
 import re
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -44,6 +43,7 @@ import anthropic
 from pydantic import BaseModel
 
 from .db import Store
+from .loops import LeasedLoop
 
 LEAF_VERSION = 1
 BRANCH_VERSION = 1
@@ -730,7 +730,7 @@ def retry_failed(store: Store, source_id: int, model: str = MODEL) -> int:
 # -- the reconciliation loop ---------------------------------------------------------
 
 
-class Reconciler:
+class Reconciler(LeasedLoop):
     """Keeps every source's digest where its target says it should be.
 
     The desired state is on the source (digest_model, set by clicking
@@ -741,73 +741,12 @@ class Reconciler:
     after the calls in flight, which still land in the cache.
     """
 
-    IDLE_SECONDS = 30
     LEASE = "digest-loop"
-    LEASE_SECONDS = 300  # how long a loop that died without letting go blocks the others
-    BUSY_RETRY_SECONDS = 10  # how soon to try again when another server holds the lease
 
     def __init__(self, db: Path | str, client_factory: Callable[[], Any] | None = None, workers: int = 4):
-        import os
-        import uuid
-
-        self.db = db
+        super().__init__(db)
         self.client_factory = client_factory or (lambda: anthropic.Anthropic())
         self.workers = workers
-        # Which copy of the server this is. While two overlap in a deploy, only the lease holder digests.
-        self.holder = f"{os.uname().nodename}:{os.getpid()}:{uuid.uuid4().hex[:6]}"
-        self._wake = threading.Event()
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
-
-    def start(self) -> None:
-        if self._thread and self._thread.is_alive():
-            return
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._loop, name="digest-reconciler", daemon=True)
-        self._thread.start()
-
-    def stop(self, timeout: float | None = 20) -> None:
-        """Stop, and hand the lease over at once rather than leaving the next server to wait it out.
-
-        Calls still in flight after `timeout` are abandoned (the process is
-        going away anyway); the next loop simply does those sections again.
-        """
-        self._stop.set()
-        self._wake.set()
-        if self._thread:
-            self._thread.join(timeout)
-        s = Store(self.db)
-        try:
-            s.release_lease(self.LEASE, self.holder)
-        finally:
-            s.close()
-
-    def _lease(self) -> bool:
-        s = Store(self.db)
-        try:
-            return s.take_lease(self.LEASE, self.holder, self.LEASE_SECONDS, int(time.time()))
-        finally:
-            s.close()
-
-    def wake(self) -> None:
-        """Look again now (a target changed), rather than at the next idle tick."""
-        self._wake.set()
-
-    def _loop(self) -> None:
-        import traceback
-
-        while not self._stop.is_set():
-            self._wake.clear()
-            try:
-                if not self._lease():  # another server is digesting; wait our turn
-                    self._wake.wait(self.BUSY_RETRY_SECONDS)
-                    continue
-                busy = self.reconcile_once()
-            except Exception:  # keep the loop alive; the next pass starts from the database again
-                traceback.print_exc()
-                busy = False
-            if not busy:
-                self._wake.wait(self.IDLE_SECONDS)
 
     def _wanted(self, source_id: int, model: str) -> bool:
         s = Store(self.db)
@@ -815,6 +754,9 @@ class Reconciler:
             return any(t["id"] == source_id and t["model"] == model for t in s.digest_targets())
         finally:
             s.close()
+
+    def pass_once(self) -> bool:
+        return self.reconcile_once()
 
     def reconcile_once(self) -> bool:
         """One pass over every source with a target. True if it digested anything."""
@@ -825,13 +767,13 @@ class Reconciler:
             s.close()
         busy = False
         for t in pending:
-            if self._stop.is_set():
+            if self.stopping:
                 break
             stats = run(
                 self.db, t["id"], client=self.client_factory(), workers=self.workers,
                 model=t["model"], effort=t["effort"] or EFFORT,
                 # Before each call: still running, still wanted, and still ours (renewing the lease).
-                keep_going=lambda t=t: not self._stop.is_set() and self._wanted(t["id"], t["model"]) and self._lease(),
+                keep_going=lambda t=t: not self.stopping and self._wanted(t["id"], t["model"]) and self.holds_lease(),
             )
             busy = busy or stats["digested"] > 0
         return busy

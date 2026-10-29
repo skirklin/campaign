@@ -289,7 +289,10 @@ a.card:hover { border-color: var(--accent); }
 .file-row input { width: auto; flex: 1; }
 
 .job { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); overflow: hidden; }
-.job-head { display: flex; justify-content: space-between; padding: .5rem .8rem; background: var(--surface-2); }
+.job-head { display: flex; gap: .6rem; align-items: center; padding: .5rem .8rem; background: var(--surface-2); }
+.job-head > strong { margin-right: auto; }
+.job-actions { display: flex; gap: .4rem; }
+.ingests .job + .job { margin-top: .6rem; }
 .job-status.running { color: var(--warn); }
 .job-status.running::after { content: " …"; }
 .job-status.done { color: var(--ok); }

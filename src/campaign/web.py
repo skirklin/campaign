@@ -2,8 +2,10 @@
 
     campaign web            # http://127.0.0.1:8765
 
-Session ingests and digests take minutes, so they run as background jobs
-that the page polls.
+Session ingests and digests take minutes. Asking for one records a target
+in the database, and a background loop (digest.Reconciler, ingests.IngestLoop)
+carries it out, wherever and whenever a server is running; the page reads
+progress back from the database.
 
 Without sign-in (local use), whoever runs the server owns everything. With
 it (auth.py), every campaign route checks the user's membership:
@@ -16,12 +18,8 @@ A campaign you don't belong to answers 404, as if it didn't exist.
 from __future__ import annotations
 
 import sqlite3
-import tempfile
-import threading
-import traceback
-import uuid
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Iterator
 
@@ -39,28 +37,11 @@ from .oauth import Provider
 from .oauth import install as install_oauth
 from .charsheet import CharacterSheet, apply_hp, rest
 from .db import Campaign, Store
+from .ingests import IngestLoop
 from .library import add_reference, reindex
 from .world import World
 
 STATIC = Path(__file__).parent / "static"
-AUDIO = {".mp3", ".m4a", ".wav", ".ogg", ".flac", ".opus", ".webm"}
-
-
-@dataclass
-class Job:
-    id: str
-    campaign: str
-    status: str = "running"  # running | done | failed
-    log: list[dict[str, str]] = field(default_factory=list)
-    result: dict[str, Any] | None = None
-    error: str | None = None
-
-    def emit(self, kind: str, text: str) -> None:
-        # Merge consecutive text deltas so the log is lines, not tokens.
-        if kind == "text" and self.log and self.log[-1]["kind"] == "text":
-            self.log[-1]["text"] += text
-        else:
-            self.log.append({"kind": kind, "text": text})
 
 
 class NewCampaign(BaseModel):
@@ -133,10 +114,12 @@ def create_app(
     # Digests run in the background for as long as the server does, toward
     # whatever the sources' targets say (see digest.Reconciler).
     reconciler = digest.Reconciler(db, **({"client_factory": digest_client} if digest_client else {}))
+    ingest_loop = IngestLoop(db)  # likewise session ingests (ingests.py)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         reconciler.start()
+        ingest_loop.start()
         try:
             if mcp is None:
                 yield
@@ -145,6 +128,7 @@ def create_app(
                     yield
         finally:
             reconciler.stop()
+            ingest_loop.stop()
 
     # No interactive API docs: they'd be one more surface to protect.
     app = FastAPI(title="campaign", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
@@ -152,7 +136,6 @@ def create_app(
         install_auth(app, auth, db, **({"exchange": exchange} if exchange else {}))
         install_oauth(app, Provider(db, auth))
     local = auth is None
-    jobs: dict[str, Job] = {}
     # Cost estimates for sources not yet fully digested. Planning re-reads the
     # whole source, so it's done once, not on every poll; asking for a digest
     # (or removing the source) forgets it.
@@ -500,8 +483,9 @@ def create_app(
 
     @app.get("/api/campaigns/{slug}/sessions")
     def sessions(c: Campaign = Depends(reader), s: Store = Depends(store)) -> dict[str, Any]:
-        running = [vars(j) | {"log": None} for j in jobs.values() if j.campaign == c.slug and j.status == "running"]
-        return {"sessions": s.sessions(c), "next": s.next_session_number(c), "running": running}
+        # Recent ingests that are waiting, running or need attention (finished ones show as sessions).
+        active = [ingest_view(i) for i in s.ingests(c) if i["state"] in ("wanted", "running", "failed")]
+        return {"sessions": s.sessions(c), "next": s.next_ingest_session(c), "ingests": active}
 
     @app.post("/api/campaigns/{slug}/sessions/{number}/revert")
     def revert(number: int, c: Campaign = Depends(editor), s: Store = Depends(store)) -> dict[str, int]:
@@ -577,69 +561,63 @@ def create_app(
         return World(s, c).events(session=session)
 
     # -- session ingest ------------------------------------------------------------
+    # An ingest is a target ("session N should be what this transcript says"),
+    # worked through by the ingest loop in the background (ingests.py).
+
+    def ingest_view(ing: dict[str, Any]) -> dict[str, Any]:
+        keep = ("id", "session", "input_name", "state", "attempts", "retry_at", "error", "result", "created_at")
+        return {k: ing[k] for k in keep}
+
+    def campaign_ingest(s: Store, c: Campaign, ingest_id: int) -> dict[str, Any]:
+        ing = s.ingest(ingest_id)
+        if ing is None or ing["campaign_id"] != c.id:
+            raise HTTPException(404, "no such ingest")
+        return ing
 
     @app.post("/api/campaigns/{slug}/ingest", status_code=202)
     def ingest(
+        request: Request,
         file: UploadFile | None = File(None),
         text: str = Form(""),
         number: int | None = Form(None),
         played_on: str = Form(""),
         c: Campaign = Depends(editor),
-    ) -> dict[str, str]:
-        if any(j.campaign == c.slug and j.status == "running" for j in jobs.values()):
-            raise HTTPException(409, "an ingest is already running for this campaign")
-        upload: tuple[str, bytes] | None = None
+        s: Store = Depends(store),
+    ) -> dict[str, Any]:
         if file is not None and file.filename:
-            upload = (Path(file.filename).suffix.lower(), file.file.read())
-        elif not text.strip():
+            name, data = file.filename, file.file.read()
+        elif text.strip():
+            name, data = "pasted.txt", text.encode("utf-8")
+        else:
             raise HTTPException(422, "paste a transcript or upload a file")
+        session = number or s.next_ingest_session(c)
+        user = None if local else user_of(request)["id"]
+        ingest_id = s.add_ingest(c, session, s.blobs.put(data), name, played_on or None, user)
+        ingest_loop.wake()
+        return {"ingest": ingest_id, "session": session}
 
-        job = Job(id=uuid.uuid4().hex[:12], campaign=c.slug)
-        jobs[job.id] = job
+    @app.get("/api/campaigns/{slug}/ingests/{ingest_id}")
+    def ingest_status(ingest_id: int, since: int = 0, c: Campaign = Depends(reader), s: Store = Depends(store)) -> dict:
+        """An ingest's state and its progress log from entry `since` (the last entry is resent: text lines grow)."""
+        ing = campaign_ingest(s, c, ingest_id)
+        start = max(0, since - 1)
+        return ingest_view(ing) | {"log": s.ingest_log(ingest_id, since=start), "from": start}
 
-        def run() -> None:
-            from .agent import describe_tool_call, ingest_session
+    @app.post("/api/campaigns/{slug}/ingests/{ingest_id}/retry", status_code=202)
+    def retry_ingest(ingest_id: int, c: Campaign = Depends(editor), s: Store = Depends(store)) -> dict:
+        ing = campaign_ingest(s, c, ingest_id)
+        if ing["state"] not in ("failed", "cancelled", "wanted"):
+            raise HTTPException(409, f"this ingest is {ing['state']}")
+        s.update_ingest(ingest_id, state="wanted", attempts=0, retry_at=None, error=None)
+        ingest_loop.wake()
+        return ingest_view(s.ingest(ingest_id))
 
-            js = Store(db)
-            try:
-                transcript = text
-                if upload is not None:
-                    suffix, data = upload
-                    if suffix in AUDIO:
-                        from .transcribe import transcribe
-
-                        job.emit("status", "Transcribing audio…")
-                        with tempfile.TemporaryDirectory() as tmp:
-                            path = Path(tmp) / f"audio{suffix}"
-                            path.write_bytes(data)
-                            transcript = transcribe(path)
-                    else:
-                        transcript = data.decode("utf-8", errors="replace")
-                job.emit("status", "Reading the transcript and updating the campaign…")
-                job.result = ingest_session(
-                    js, c, transcript, number=number, played_on=played_on or None,
-                    on_text=lambda t: job.emit("text", t),
-                    on_tool=lambda n, a: job.emit("tool", describe_tool_call(n, a).strip(" ·")),
-                )
-                job.status = "done"
-            except BaseException as err:  # SystemExit from a missing audio extra too
-                job.error = str(err) or type(err).__name__
-                job.emit("error", traceback.format_exc(limit=3))
-                job.status = "failed"
-            finally:
-                js.close()
-
-        threading.Thread(target=run, name=f"ingest-{job.id}", daemon=True).start()
-        return {"job": job.id}
-
-    @app.get("/api/campaigns/{slug}/jobs/{job_id}")
-    def job_status(job_id: str, since: int = 0, c: Campaign = Depends(reader)) -> dict[str, Any]:
-        job = jobs.get(job_id)
-        if job is None or job.campaign != c.slug:
-            raise HTTPException(404, "no such job (the server may have restarted)")
-        # Resend the last entry: text entries grow in place.
-        start = max(0, min(since, len(job.log)) - 1)
-        return {"status": job.status, "result": job.result, "error": job.error, "log": job.log[start:], "from": start}
+    @app.delete("/api/campaigns/{slug}/ingests/{ingest_id}", status_code=204)
+    def cancel_ingest(ingest_id: int, c: Campaign = Depends(editor), s: Store = Depends(store)) -> None:
+        """Stop wanting it. A running one stops at its next step and undoes what it wrote."""
+        ing = campaign_ingest(s, c, ingest_id)
+        if ing["state"] in ("wanted", "running"):
+            s.update_ingest(ingest_id, state="cancelled")
 
     # -- characters ----------------------------------------------------------------
     # A sheet belongs to one campaign and to the person who made it. Its owner
