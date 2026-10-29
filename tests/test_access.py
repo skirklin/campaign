@@ -138,10 +138,6 @@ def test_character_sheets_belong_to_their_players(site):
     assert bob.post(f"/api/characters/{cid}/hp", json={"delta": -3}).status_code == 403
     assert dm.post(f"/api/characters/{cid}/hp", json={"delta": -3}).status_code == 200
     assert alice.post(f"/api/characters/{cid}/rest", json={"long": True}).status_code == 200
-    # Rolls: the party can read a character's, only those who can change it add to them.
-    assert alice.post(f"/api/characters/{cid}/rolls", json={"label": "Stealth", "summary": "17"}).status_code == 201
-    assert bob.post(f"/api/characters/{cid}/rolls", json={"label": "Stealth", "summary": "20"}).status_code == 403
-    assert [r["summary"] for r in bob.get(f"/api/characters/{cid}/rolls").json()] == ["17"]
     # A player sees their own character in the world, even before anything has happened to it.
     assert alice.get(f"/api/campaigns/strahd/entities/{sheet['entity_id']}").json()["kind"] == "pc"
     # A sheet in a campaign you're not in is invisible.

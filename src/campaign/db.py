@@ -475,24 +475,6 @@ CREATE TABLE party_stash_log (
 CREATE INDEX party_stash_log_campaign ON party_stash_log(campaign_id, id);
 """
 
-# v13: dice rolls, kept per character so the history follows the player
-# between devices and the party can see it. Rolled in the browser; this is
-# the record. Only the most recent ROLLS_KEPT per character are kept.
-V13_ROLLS = """
-CREATE TABLE rolls (
-    id            INTEGER PRIMARY KEY,
-    character_id  INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
-    user_id       INTEGER REFERENCES users(id) ON DELETE SET NULL,
-    label         TEXT NOT NULL,             -- "Stealth", "Warhammer", "8d6"
-    summary       TEXT NOT NULL,             -- "17", "to hit 19 · 7 bludgeoning"
-    detail        TEXT NOT NULL DEFAULT '',  -- the dice: "d20: 13 + 4"
-    flag          TEXT NOT NULL DEFAULT '',  -- "crit" or "fumble"
-    created_at    TEXT NOT NULL
-);
-CREATE INDEX rolls_character ON rolls(character_id, id);
-"""
-ROLLS_KEPT = 200
-
 # Append only, for changes small enough to migrate.
 #
 # Deploys are rolling: the new server starts, and runs these, while the old
@@ -512,7 +494,6 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (10, V10_CONVERSATIONS),
     (11, V11_JOBS),
     (12, V12_PARTY_STASH),
-    (13, V13_ROLLS),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 
@@ -1475,32 +1456,6 @@ class Store:
             "SELECT l.created_at, l.reason, u.email AS who FROM party_stash_log l"
             " LEFT JOIN users u ON u.id = l.user_id WHERE l.campaign_id = ? ORDER BY l.id DESC LIMIT ?",
             (campaign_id, limit),
-        )
-        return [dict(r) for r in rows]
-
-    # -- dice rolls ----------------------------------------------------------
-
-    def add_roll(
-        self, character_id: int, label: str, summary: str, detail: str = "", flag: str = "",
-        user_id: int | None = None,
-    ) -> dict[str, Any]:
-        with self.conn:
-            roll_id = self.conn.execute(
-                "INSERT INTO rolls (character_id, user_id, label, summary, detail, flag, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (character_id, user_id, label, summary, detail, flag, now()),
-            ).lastrowid
-            self.conn.execute(
-                "DELETE FROM rolls WHERE character_id = ? AND id <= ?", (character_id, roll_id - ROLLS_KEPT)
-            )
-        return self.rolls(character_id, limit=1)[0]
-
-    def rolls(self, character_id: int, limit: int = 50) -> list[dict[str, Any]]:
-        """Newest first: {id, label, summary, detail, flag, created_at}."""
-        rows = self.conn.execute(
-            "SELECT id, label, summary, detail, flag, created_at FROM rolls WHERE character_id = ?"
-            " ORDER BY id DESC LIMIT ?",
-            (character_id, limit),
         )
         return [dict(r) for r in rows]
 

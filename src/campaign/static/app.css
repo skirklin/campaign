@@ -662,4 +662,3 @@ ul.rolls li:last-child { border-bottom: 0; }
 .roll-meta { font-size: .78rem; color: var(--muted); font-variant-numeric: tabular-nums; word-break: break-word; }
 li.roll-crit .roll-line strong { color: var(--ok); }
 li.roll-fumble .roll-line strong { color: var(--danger); }
-.unsaved { color: var(--danger); }

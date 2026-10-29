@@ -12,6 +12,9 @@ import { StashView } from "./stash.js";
 import { d, fmtMod, parseExpr, formatExpr, rollExpr } from "./dice.js";
 import { SheetView, ABILITIES, ABILITY_NAMES, SKILLS, CONDITIONS, COINS } from "./sheet.js";
 
+// Rolls remembered per character on this device.
+const ROLLS_KEPT = 100;
+
 const TABS = [
   ["main", "Main", "⚔"],
   ["skills", "Skills", "🎯"],
@@ -271,7 +274,8 @@ export class PlayView extends SheetView {
     return [
       note("notes", "Notes", 10),
       note("personality", "Personality", 4),
-      block("Rolls", this.historyBox(50)),
+      block("Rolls", this.historyBox(ROLLS_KEPT),
+        h("button.link.muted.small", { onclick: () => this.clearRolls() }, "Clear")),
       block("In the world", this.worldBox),
       block("History", h("ul.log", this.log.map((l) => h("li", h("time", l.created_at.replace("T", " ").slice(0, 16)), " ", l.reason)))),
     ];
@@ -434,26 +438,41 @@ export class PlayView extends SheetView {
   }
 
   // -- roll history ---------------------------------------------------------------
-  // Kept on the server against the character (for its owner and DM; anyone
-  // else's rolls on this sheet stay on their screen).
+  // Kept on this device only, per character: the latest ROLLS_KEPT.
 
-  async loadRolls() {
-    if (!this.rollsLoading) {
-      this.rollsLoading = api("GET", `/api/characters/${this.id}/rolls`)
-        .then((list) => { this.rolls = [...(this.rolls || []).filter((r) => r.pending), ...list]; this.showHistory(); })
-        .catch(() => { this.rollsLoading = null; });
+  get rollsKey() {
+    return `rolls:${this.id}`;
+  }
+
+  loadRolls() {
+    if (this.rolls) return;
+    try {
+      this.rolls = JSON.parse(localStorage.getItem(this.rollsKey)) || [];
+    } catch {
+      this.rolls = [];  // Private browsing or a corrupt entry: start empty.
     }
-    return this.rollsLoading;
   }
 
   record(roll) {
-    const entry = { ...roll, created_at: new Date().toISOString(), pending: true };
-    this.rolls = [entry, ...(this.rolls || [])];
+    this.loadRolls();
+    this.rolls = [{ ...roll, created_at: new Date().toISOString() }, ...this.rolls].slice(0, ROLLS_KEPT);
+    try {
+      localStorage.setItem(this.rollsKey, JSON.stringify(this.rolls));
+    } catch {
+      // Storage full or blocked: the roll still shows until the page is left.
+    }
     this.showHistory();
-    if (!this.canEdit) return;
-    api("POST", `/api/characters/${this.id}/rolls`, roll)
-      .then((saved) => { Object.assign(entry, saved, { pending: false }); })
-      .catch(() => { entry.unsaved = true; this.showHistory(); });
+  }
+
+  clearRolls() {
+    if (!confirm("Clear this character's roll history on this device?")) return;
+    this.rolls = [];
+    try {
+      localStorage.removeItem(this.rollsKey);
+    } catch {
+      // Nothing stored to clear.
+    }
+    this.showHistory();
   }
 
   // Redraw every open roll list (the tray's, the Notes tab's).
@@ -464,10 +483,8 @@ export class PlayView extends SheetView {
   }
 
   historyBox(limit) {
-    const el = h("div.roll-history", { dataset: { limit: String(limit) } }, h("p.muted", "Loading…"));
-    if (this.rolls) el.replaceChildren(rollList(this.rolls, limit));
     this.loadRolls();
-    return el;
+    return h("div.roll-history", { dataset: { limit: String(limit) } }, rollList(this.rolls, limit));
   }
 
   // The dice tray: build an expression with the buttons, or type one.
@@ -547,12 +564,12 @@ function rollList(rolls, limit) {
   if (!rolls.length) return h("p.empty", "No rolls yet.");
   return h("ul.rolls", rolls.slice(0, limit).map((r) => h("li", { className: r.flag ? `roll-${r.flag}` : "" },
     h("div.roll-line", h("span.roll-what", r.label), h("strong", r.summary)),
-    h("div.roll-meta", r.detail, " · ", when(r.created_at), r.unsaved && h("span.unsaved", " · not saved")))));
+    h("div.roll-meta", r.detail, " · ", when(r.created_at)))));
 }
 
 // "14:05" today, else "Oct 27 14:05".
 function when(iso) {
-  const t = new Date(iso.endsWith("Z") || iso.includes("+") ? iso : `${iso}Z`);
+  const t = new Date(iso);
   const time = t.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   return t.toDateString() === new Date().toDateString() ? time : `${t.toLocaleDateString([], { month: "short", day: "numeric" })} ${time}`;
 }

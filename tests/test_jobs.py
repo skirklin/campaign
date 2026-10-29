@@ -320,7 +320,6 @@ def test_ingests_move_over_to_jobs_keeping_their_ids(tmp_path):
     camp = s.create_campaign("Strahd", "dm")
     # The database as the v10 server left it: an ingest in the ingests table, no jobs.
     s.conn.executescript("DROP TABLE job_log; DROP TABLE jobs; DROP TABLE party_stash_log; DROP TABLE party_stash;"
-                         " DROP TABLE rolls;"
                          " PRAGMA user_version = 10;")
     s.conn.execute(
         "INSERT INTO ingests (id, campaign_id, session, input_blob, input_name, transcript_blob, played_on, role,"
