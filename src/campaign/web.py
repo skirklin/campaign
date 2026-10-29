@@ -121,6 +121,10 @@ def create_app(db: Path | str, auth: AuthConfig | None = None, exchange: Callabl
     local = auth is None
     jobs: dict[str, Job] = {}
     digesting: dict[int, threading.Thread] = {}
+    # Cost estimates for sources not yet fully digested. Planning re-reads the
+    # whole source, so it's done once, not on every poll; starting a digest
+    # (or removing the source) forgets it.
+    estimates: dict[int, dict[str, Any]] = {}
 
     def store() -> Iterator[Store]:
         # One connection per request: sqlite connections shouldn't be shared
@@ -324,6 +328,7 @@ def create_app(db: Path | str, auth: AuthConfig | None = None, exchange: Callabl
         thread = digesting.get(source_id)
         if thread and thread.is_alive():
             return False
+        estimates.pop(source_id, None)
         thread = threading.Thread(
             target=lambda: digest.run(db, source_id), name=f"digest-{source_id}", daemon=True
         )
@@ -347,7 +352,14 @@ def create_app(db: Path | str, auth: AuthConfig | None = None, exchange: Callabl
             if c.spoiler_safe and src["dm_only"] and not at_least(c.access, "editor"):
                 continue
             thread = digesting.get(src["id"])
-            status = s.digest_status(src["id"]) | {"running": bool(thread and thread.is_alive())}
+            running = bool(thread and thread.is_alive())
+            if src["kind"] != "transcript" and not running and src["id"] not in estimates:
+                # Re-plans against the current model, so the counts below match what a digest would do.
+                estimates[src["id"]] = digest.estimate(s, digest.plan(s, src["id"]))
+            status = s.digest_status(src["id"]) | {"running": running, "model": digest.MODEL,
+                                                    "spent_usd": digest.spent(s.digest_usage(src["id"]))}
+            if not running and status["done"] < status["total"] and src["id"] in estimates:
+                status["estimate"] = estimates[src["id"]]
             out.append(src | {"digest": status})
         return out
 
@@ -371,6 +383,7 @@ def create_app(db: Path | str, auth: AuthConfig | None = None, exchange: Callabl
             raise HTTPException(422, str(err))
         except Exception as err:
             raise HTTPException(422, f"couldn't read {file.filename}: {err}")
+        estimates[result["id"]] = result["estimate"]
         result["digesting"] = bool(digest_now and result["pending"]) and start_digest(result["id"])
         return result
 
@@ -385,6 +398,17 @@ def create_app(db: Path | str, auth: AuthConfig | None = None, exchange: Callabl
     def source_outline(source_id: int, c: Campaign = Depends(reader), s: Store = Depends(store)) -> list[dict]:
         visible_source(s, c, source_id)
         return s.digest_outline(source_id)
+
+    @app.get("/api/campaigns/{slug}/sources/{source_id}/outline/{node_id}")
+    def outline_node(
+        source_id: int, node_id: int, c: Campaign = Depends(reader), s: Store = Depends(store),
+    ) -> dict[str, Any]:
+        """One section's digest: its summary and the entities found in it, before any merging above."""
+        visible_source(s, c, source_id)
+        found = s.digest_node_output(node_id)
+        if found is None or found[0] != source_id:
+            raise HTTPException(404, "no such section")
+        return found[1] or {"summary": None, "entities": []}
 
     @app.get("/api/campaigns/{slug}/sources/{source_id}/entities")
     def source_entities(
@@ -410,6 +434,7 @@ def create_app(db: Path | str, auth: AuthConfig | None = None, exchange: Callabl
     def delete_source(source_id: int, c: Campaign = Depends(editor), s: Store = Depends(store)) -> None:
         visible_source(s, c, source_id, manage=True)
         s.delete_source(c, source_id)
+        estimates.pop(source_id, None)
 
     @app.get("/api/campaigns/{slug}/search")
     def search(q: str, c: Campaign = Depends(reader), s: Store = Depends(store)) -> list[dict[str, Any]]:

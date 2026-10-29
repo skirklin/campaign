@@ -39,7 +39,8 @@ def add_reference(
         blob=blob, filename=filename,
     )
     root = digest.plan(store, source_id)
-    return {"id": source_id, "chunks": len(doc.chunks), "pending": digest.pending_calls(root)}
+    return {"id": source_id, "chunks": len(doc.chunks), "pending": digest.pending_calls(root),
+            "estimate": digest.estimate(store, root)}
 
 
 def reindex(store: Store, force: bool = False) -> list[dict[str, Any]]:

@@ -351,6 +351,7 @@ mark { background: color-mix(in srgb, var(--warn) 30%, transparent); color: inhe
 .outline-node > summary { cursor: pointer; display: flex; gap: .4rem; align-items: baseline; flex-wrap: wrap; }
 .outline-node > .outline-node { margin-left: .4rem; }
 .node-summary { margin: .3rem 0 .5rem; max-width: 70ch; }
+.section-entities { margin: .2rem 0 .6rem; }
 .error-text { color: var(--danger); font-size: .85rem; }
 
 .facts { margin: .3rem 0; padding-left: 1.1rem; font-size: .87rem; }

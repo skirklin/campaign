@@ -134,6 +134,7 @@ def test_digest_endpoints_and_original_kept(client, monkeypatch):
     r = client.post("/api/campaigns/strahd/sources", files={"file": ("book.md", book)},
                     data={"kind": "module", "digest_now": "true"}).json()
     assert r["pending"] == 8 and r["digesting"] is True
+    assert r["estimate"]["calls"] == 8 and r["estimate"]["usd"] > 0
     for _ in range(100):
         src = client.get("/api/campaigns/strahd/sources").json()[0]
         if not src["digest"]["running"]:
@@ -141,9 +142,16 @@ def test_digest_endpoints_and_original_kept(client, monkeypatch):
         time.sleep(0.05)
     assert src["digest"]["done"] == src["digest"]["total"] == 8
     assert src["digest"]["entities"] == 3 and src["has_original"]
+    # The fake reports 100 input and 10 output tokens per call, at Opus prices.
+    assert src["digest"]["spent_usd"] == pytest.approx(8 * (100 * 4 + 10 * 20) / 1e6)
+    assert "estimate" not in src["digest"]  # nothing left to estimate
 
     outline = client.get(f"/api/campaigns/strahd/sources/{r['id']}/outline").json()
     assert outline[0]["parent_id"] is None and outline[0]["summary"].startswith("Branch summary")
+    leaf = next(n for n in outline if n["is_leaf"] and n["entity_count"])
+    node = client.get(f"/api/campaigns/strahd/sources/{r['id']}/outline/{leaf['id']}").json()
+    assert node["summary"] == leaf["summary"] and len(node["entities"]) == leaf["entity_count"]
+    assert client.get(f"/api/campaigns/strahd/sources/{r['id'] + 1}/outline/{leaf['id']}").status_code == 404
     hits = client.get(f"/api/campaigns/strahd/sources/{r['id']}/entities", params={"q": "windmill hag"}).json()
     assert "Morgantha" in [e["name"] for e in hits]
     assert client.get(f"/api/campaigns/strahd/sources/{r['id']}/original").content == book
@@ -151,6 +159,7 @@ def test_digest_endpoints_and_original_kept(client, monkeypatch):
     # Re-uploading the same file is free, and nothing is left to digest.
     again = client.post("/api/campaigns/strahd/sources", files={"file": ("book.md", book)},
                         data={"title": "book", "digest_now": "true"}).json()
+    assert again.pop("estimate")["calls"] == 0
     assert again == {"id": r["id"], "chunks": r["chunks"], "pending": 0, "digesting": False}
     assert client.post(f"/api/campaigns/strahd/sources/{r['id']}/digest").status_code == 202
 

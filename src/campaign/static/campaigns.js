@@ -198,7 +198,7 @@ async function referenceTab(c) {
   const title = h("input", { placeholder: "Title (defaults to file name)", "aria-label": "Title" });
   const kind = h("select", { "aria-label": "Kind" }, h("option", { value: "module" }, "Published module"), h("option", { value: "notes" }, "My notes"));
   const dmOnly = h("input", { type: "checkbox", checked: true });
-  const digestNow = h("input", { type: "checkbox", checked: true });
+  const digestNow = h("input", { type: "checkbox" });
   kind.addEventListener("change", () => (dmOnly.checked = kind.value === "module"));
   const submit = h("button.primary", { type: "submit" }, "Upload");
   const form = h("form.card", {
@@ -214,9 +214,11 @@ async function referenceTab(c) {
       submit.textContent = "Reading…";
       try {
         const r = await api("POST", `${base}/sources`, fd);
-        toast(r.pending ? `Loaded: ${r.chunks} chunks, ${r.pending} sections to digest` : `Loaded: ${r.chunks} chunks, digest already cached`);
+        toast(!r.pending ? `Loaded: ${r.chunks} chunks, digest already cached`
+          : r.digesting ? `Loaded: digesting ${r.pending} sections (${estimateText(r.estimate)})`
+          : `Loaded: ${r.pending} sections to digest, ${estimateText(r.estimate)}`);
         form.reset();
-        dmOnly.checked = digestNow.checked = true;
+        dmOnly.checked = true;
         refresh();
       } catch (err) {
         toast(err.message, true);
@@ -230,7 +232,7 @@ async function referenceTab(c) {
     h("div.identity", file, title, kind),
     h("label.check", dmOnly, " DM only ", h("span.muted.small", "(hidden from the assistant in player campaigns)")),
     h("label.check", digestNow, " Digest with Claude now ",
-      h("span.muted.small", "(builds the outline and the NPC/monster/item catalog; only new or changed sections cost anything)")),
+      h("span.muted.small", "(builds the outline and the NPC/monster/item catalog. Leave it off to see a cost estimate first; only new or changed sections cost anything)")),
     h("div.actions", submit),
   );
 
@@ -260,15 +262,21 @@ async function referenceTab(c) {
     h("h2.section-title", "Search"), h("form.inline-form", { onsubmit: search }, q, h("button", { type: "submit" }, "Search")), results);
 }
 
+const usd = (x) => (x === null || x === undefined ? "cost unknown" : x < 0.01 ? "<$0.01" : `$${x.toFixed(2)}`);
+const ktok = (n) => `${Math.round(n / 1000)}k tokens`;
+const estimateText = (e) => (e && e.calls ? `about ${usd(e.usd)} with ${e.model}` : "nothing to pay for");
+
 function digestLine(d) {
-  if (d.running) return h("span.digest-status.running", `Digesting… ${d.done}/${d.total} sections`);
-  if (!d.total) return h("span.digest-status", "Not digested");
-  if (d.done === d.total) {
+  const spent = d.input_tokens + d.output_tokens ? ` · ${usd(d.spent_usd)} so far` : "";
+  if (d.running) return h("span.digest-status.running", `Digesting… ${d.done}/${d.total} sections${spent}`);
+  if (d.done === d.total && d.total) {
     const tokens = d.input_tokens + d.output_tokens;
-    return h("span.digest-status.done", `Digested · ${d.entities} entries${tokens ? ` · ${Math.round(tokens / 1000)}k tokens` : ""}`);
+    return h("span.digest-status.done", `Digested · ${d.entities} entries${tokens ? ` · ${ktok(tokens)}, ${usd(d.spent_usd)}` : ""}`);
   }
+  const left = d.estimate?.calls ? ` · ${d.estimate.calls} calls left, ${estimateText(d.estimate)}` : "";
+  if (!d.done) return h("span.digest-status", `Not digested${left}`);
   return h("span.digest-status.partial",
-    `${d.done}/${d.total} sections digested${d.failed ? `, ${d.failed} failed` : ""}`);
+    `${d.done}/${d.total} sections digested${d.failed ? `, ${d.failed} failed` : ""}${spent}${left}`);
 }
 
 function sourceRow(c, s, refresh) {
@@ -289,6 +297,9 @@ function sourceRow(c, s, refresh) {
     h("div.source-actions",
       canDigest && h("button", {
         onclick: async () => {
+          const e = d.estimate;
+          if (e?.calls && !confirm(`Digest ${s.title} with ${e.model}?\n\n${e.calls} calls, roughly ${ktok(e.input_tokens)} in and ${ktok(e.output_tokens)} out: ${usd(e.usd)}.`
+            + (e.calibrated_on ? `\n(Based on ${e.calibrated_on} sections already digested with this model.)` : "\n(A first guess: it gets better once a few sections have been digested with this model.)"))) return;
           try {
             await api("POST", `${base}/sources/${s.id}/digest`);
             refresh();
@@ -313,51 +324,119 @@ function sourceRow(c, s, refresh) {
 
 export async function sourceView(slug, sourceId) {
   const base = `/api/campaigns/${slug}`;
-  const [campaigns, sources, outline, entities] = await Promise.all([
-    api("GET", "/api/campaigns"), api("GET", `${base}/sources`),
-    api("GET", `${base}/sources/${sourceId}/outline`), api("GET", `${base}/sources/${sourceId}/entities`),
-  ]);
+  const campaigns = await api("GET", "/api/campaigns");
   const c = campaigns.find((x) => x.slug === slug);
-  const src = sources.find((x) => x.id === Number(sourceId));
-  if (!c || !src) throw new Error("No such source.");
+  if (!c) throw new Error("No such source.");
 
-  const children = {};
-  outline.forEach((n) => (children[n.parent_id] ||= []).push(n));
-  const pages = (n) => (n.page_start ? (n.page_end && n.page_end !== n.page_start ? ` pp. ${n.page_start}–${n.page_end}` : ` p. ${n.page_start}`) : "");
-  const nodeEl = (n) => {
-    const kids = children[n.id] || [];
-    const head = h("summary",
-      h("strong", n.title), h("span.muted.small", pages(n)),
-      n.summary === null && h("span.badge", n.error ? "failed" : "pending"),
-      n.entity_count ? h("span.muted.small", ` · ${n.entity_count} entries`) : "");
-    const body = [
-      n.summary ? h("p.node-summary", n.summary) : n.error ? h("p.error-text", n.error) : "",
-      kids.map(nodeEl),
-    ];
-    return h("details.outline-node", { open: n.depth < 1 }, head, body);
-  };
+  // Survive re-renders while a digest is running: which sections are open,
+  // and the entities already fetched for each.
+  const open = new Set();
+  const sectionEntities = new Map();
+  let entities = [];
+  let wasRunning = null;
+  let timer;
 
-  const kinds = [...new Set(entities.map((e) => e.kind))].sort();
-  const kind = h("select", { "aria-label": "Kind" }, h("option", { value: "" }, "All kinds"), kinds.map((k) => h("option", { value: k }, kindLabel(k))));
+  const status = h("span");
+  const outlineEl = h("div.outline");
+  const catalogTitle = h("h2.section-title");
+  const kind = h("select", { "aria-label": "Kind" });
   const q = h("input", { type: "search", placeholder: "Filter by name or alias…", "aria-label": "Filter" });
   const grid = h("div.entity-grid");
-  const render = () => {
+
+  const pages = (n) => (n.page_start ? (n.page_end && n.page_end !== n.page_start ? ` pp. ${n.page_start}–${n.page_end}` : ` p. ${n.page_start}`) : "");
+
+  // A finished section's own entities, as extracted (or merged) at that level.
+  const entityList = (n) => {
+    const box = h("div.entity-grid.section-entities");
+    const show = (list) => box.replaceChildren(...list.map(refCard));
+    const btn = h("button.link", {
+      onclick: async () => {
+        if (open.has(`e${n.id}`)) {
+          open.delete(`e${n.id}`);
+          box.replaceChildren();
+          btn.textContent = `Show ${n.entity_count} entries`;
+          return;
+        }
+        if (!sectionEntities.has(n.id)) sectionEntities.set(n.id, (await api("GET", `${base}/sources/${sourceId}/outline/${n.id}`)).entities);
+        open.add(`e${n.id}`);
+        show(sectionEntities.get(n.id));
+        btn.textContent = "Hide entries";
+      },
+    }, open.has(`e${n.id}`) ? "Hide entries" : `Show ${n.entity_count} entries`);
+    if (open.has(`e${n.id}`) && sectionEntities.has(n.id)) show(sectionEntities.get(n.id));
+    return [btn, box];
+  };
+
+  const renderOutline = (outline) => {
+    const children = {};
+    outline.forEach((n) => (children[n.parent_id] ||= []).push(n));
+    // [digested, total] over a node and everything under it.
+    const progress = (n) => (children[n.id] || []).map(progress)
+      .reduce(([d, t], [cd, ct]) => [d + cd, t + ct], [n.summary !== null ? 1 : 0, 1]);
+    const nodeEl = (n) => {
+      const kids = children[n.id] || [];
+      const [done, total] = progress(n);
+      const head = h("summary",
+        h("strong", n.title), h("span.muted.small", pages(n)),
+        n.summary === null && h("span.badge", n.error ? "failed" : kids.length && done ? `${done}/${total} done` : "pending"),
+        n.entity_count ? h("span.muted.small", ` · ${n.entity_count} entries`) : "");
+      const body = [
+        n.summary ? h("p.node-summary", n.summary) : n.error ? h("p.error-text", n.error) : "",
+        n.entity_count ? entityList(n) : "",
+        kids.map(nodeEl),
+      ];
+      const el = h("details.outline-node", { open: open.has(n.id) || (open.size === 0 && n.depth < 1) }, head, body);
+      el.addEventListener("toggle", () => (el.open ? open.add(n.id) : open.delete(n.id)));
+      if (el.open) open.add(n.id);
+      return el;
+    };
+    outlineEl.replaceChildren(...(outline.length ? outline.filter((n) => n.parent_id === null).map(nodeEl) : [h("p.empty", "No outline yet.")]));
+  };
+
+  const renderCatalog = () => {
+    catalogTitle.textContent = `Catalog (${entities.length})`;
+    const keep = kind.value;
+    const kinds = [...new Set(entities.map((e) => e.kind))].sort();
+    kind.replaceChildren(h("option", { value: "" }, "All kinds"), kinds.map((k) => h("option", { value: k }, kindLabel(k))));
+    kind.value = kinds.includes(keep) ? keep : "";
     const needle = q.value.toLowerCase();
     const shown = entities.filter((e) => (!kind.value || e.kind === kind.value) &&
       (!needle || [e.name, ...e.aliases, e.summary].some((x) => x.toLowerCase().includes(needle))));
-    grid.replaceChildren(shown.length ? "" : h("p.empty", entities.length ? "No matches." : "No catalog yet: it's built when the whole book is digested."),
+    grid.replaceChildren(shown.length ? "" : h("p.empty", entities.length ? "No matches." : "No catalog yet: it's built when the whole book is digested. Open a finished section above to see what it found."),
       ...shown.map(refCard));
   };
-  kind.addEventListener("change", render);
-  q.addEventListener("input", render);
-  render();
+  kind.addEventListener("change", renderCatalog);
+  q.addEventListener("input", renderCatalog);
+
+  const head = h("h1");
+  const refresh = async () => {
+    clearTimeout(timer);
+    if (wasRunning !== null && !outlineEl.isConnected) return;  // navigated away
+    const [sources, outline] = await Promise.all([
+      api("GET", `${base}/sources`), api("GET", `${base}/sources/${sourceId}/outline`),
+    ]);
+    const src = sources.find((x) => x.id === Number(sourceId));
+    if (!src) throw new Error("No such source.");
+    head.textContent = src.title;
+    status.replaceChildren(src.kind !== "transcript" ? digestLine(src.digest) : "");
+    renderOutline(outline);
+    const running = src.digest.running;
+    // The catalog only changes when a digest finishes, so fetch it on load and after a run.
+    if (wasRunning === null || (wasRunning && !running)) {
+      entities = await api("GET", `${base}/sources/${sourceId}/entities`);
+      renderCatalog();
+    }
+    wasRunning = running;
+    if (running) timer = setTimeout(refresh, 3000);
+  };
+  await refresh();
 
   return h("section.page",
     h("div.page-head", h("a", { href: `#/campaigns/${slug}/reference` }, `← ${c.name}`)),
-    h("div.page-head", h("h1", src.title), src.kind !== "transcript" && digestLine(src.digest)),
+    h("div.page-head", head, status),
     h("h2.section-title", "Outline"),
-    outline.length ? h("div.outline", outline.filter((n) => n.parent_id === null).map(nodeEl)) : h("p.empty", "No outline yet."),
-    h("h2.section-title", `Catalog (${entities.length})`),
+    outlineEl,
+    catalogTitle,
     h("div.filters.two", kind, q),
     grid,
   );

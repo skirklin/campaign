@@ -312,3 +312,31 @@ def test_fallback_only_for_models_that_support_it():
     digest._call(client, "sys", "user", LeafOutput, "claude-haiku-5-5", "medium")
     assert seen[0]["fallbacks"] == "default" and seen[0]["betas"] == [digest.FALLBACK_BETA]
     assert "fallbacks" not in seen[1] and "betas" not in seen[1]
+
+
+def test_estimate_counts_pending_calls_and_calibrates(env, monkeypatch):
+    store, camp, db = env
+    r = upload(store, camp)
+    est = r["estimate"]
+    assert est["calls"] == 8 and est["calibrated_on"] == 0  # nothing digested with this model yet
+    assert est["input_tokens"] > 5 * digest.LEAF_OVERHEAD and est["usd"] == pytest.approx(
+        digest.cost(digest.MODEL, est["input_tokens"], est["output_tokens"]))
+
+    digest.run(db, r["id"], client=FakeDigest())
+    assert store.digest_usage(r["id"]) == [{"model": digest.MODEL, "input_tokens": 800, "output_tokens": 80}]
+
+    # After an edit only the changed path is estimated. Calibration needs each leaf's text
+    # size, known only for leaves still in a plan: the old Church leaf no longer is.
+    r2 = upload(store, camp, church="Donavich prays. His son Doru is locked below.")
+    assert r2["estimate"]["calls"] == 3 and r2["estimate"]["calibrated_on"] == 0
+    monkeypatch.setattr(digest, "MIN_SAMPLES", 4)
+    est = digest.estimate(store, digest.plan(store, r["id"]))
+    assert est["calls"] == 3 and est["calibrated_on"] == 4
+    # Measured: 0.1 output tokens per input token on leaves, instead of the 0.5 default.
+    assert est["output_tokens"] < 0.5 * est["input_tokens"]
+
+def test_cost_needs_a_known_model():
+    assert digest.cost("claude-haiku-5-5", 1_000_000, 1_000_000) == pytest.approx(0.60)
+    assert digest.cost("some-new-model", 1, 1) is None
+    assert digest.spent([{"model": "some-new-model", "input_tokens": 1, "output_tokens": 1}]) is None
+    assert digest.spent([]) == 0

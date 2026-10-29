@@ -146,6 +146,14 @@ The digest turns a module into two things the assistant can use:
 
 See [How the digest works](#how-the-digest-works) for the caching rules.
 
+**In the web UI**, uploading doesn't digest unless you tick the box. The
+source's line shows how many calls are left and a rough dollar estimate,
+and **Digest** asks before spending it. The first estimate is a guess; once
+a few sections have been digested with the same model, it uses their
+measured token counts. While a digest runs, the source's page refreshes on
+its own: sections fill in as they finish, each one's entities can be opened
+before the whole book is done, and the status line shows what's been spent.
+
 ### Using it from Claude Code or Claude Desktop (MCP)
 
 The same tools are also available over MCP. Claude Code or Claude Desktop
