@@ -7,7 +7,7 @@
 // writes into `this.sheet` and the debounced save sends it; HP and rests go
 // through the server's endpoints, which apply the rules there.
 
-import { api, h, toast, sign, bottomSheet, keypad, askQty } from "./util.js";
+import { api, h, toast, sign, bottomSheet, keypad, askQty, backCloses } from "./util.js";
 import { StashView } from "./stash.js";
 import { d, fmtMod, parseExpr, formatExpr, rollExpr } from "./dice.js";
 import { SheetView, ABILITIES, ABILITY_NAMES, SKILLS, CONDITIONS, COINS } from "./sheet.js";
@@ -454,15 +454,21 @@ export class PlayView extends SheetView {
       document.body.classList.add("screen-open");
       this.onKey = (e) => { if (e.key === "Escape") this.closeScreen(); };
       document.addEventListener("keydown", this.onKey);
+      // Back (a swipe) closes the screen, not the sheet.
+      this.releaseBack = backCloses(() => this.closeScreen(true));
     }
     this.screenEl.scrollTop = 0;
     this.screenEl.querySelector(".screen-body").classList.add("pop");
   }
 
-  closeScreen() {
+  // `byBack`: the browser's back closed it, so there's no history entry left to take off.
+  closeScreen(byBack = false) {
+    if (this.screenEl.hidden) return;
     this.screenEl.hidden = true;
     document.body.classList.remove("screen-open");
     document.removeEventListener("keydown", this.onKey);
+    if (!byBack) this.releaseBack?.();
+    this.releaseBack = null;
   }
 
   // A d20 roll. A second d20 is shown alongside for advantage or disadvantage.
@@ -604,7 +610,7 @@ export class PlayView extends SheetView {
         h("div.roll-detail.muted", rolled.map((x) => x.detail).join(" · ") + (crit ? " (dice doubled)" : "")),
         optionDamage !== 0 && h("div.roll-detail.muted", chosen.filter((x) => x.v.damage).map((x) => `${x.o.name} ${sign(x.v.damage)}`).join(" · ")),
         extras.some((_, k) => !added.has(k)) && h("h3", "If it applies"),
-        extras.map((p, k) => !added.has(k) && h("button.choice", {
+        h("div.extras", extras.map((p, k) => !added.has(k) && h("button.choice", {
           onclick: () => {
             if (p.spends && !this.spend(p.spends, p.situational)) return;
             added.add(k);
@@ -612,7 +618,7 @@ export class PlayView extends SheetView {
             render();
           },
         }, h("span.choice-name", `+ ${p.situational}`),
-          h("span.choice-detail", `${p.dice}${p.bonus.total ? sign(p.bonus.total) : ""} ${p.type}${p.spends ? ` · spends ${p.spends}` : ""}`))),
+          h("span.choice-detail", `${p.dice}${p.bonus.total ? sign(p.bonus.total) : ""} ${p.type}${p.spends ? ` · spends ${p.spends}` : ""}`)))),
       ], [
         h("button", { onclick: () => this.attack(i) }, "Attack again"),
         h("button.primary", { onclick: () => this.closeScreen() }, "Done"),

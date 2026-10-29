@@ -40,6 +40,7 @@
 
 body {
   margin: 0;
+  overflow-x: clip;  /* nothing too wide can widen the page past the screen */
   background: var(--bg);
   color: var(--text);
   font: 15px/1.45 var(--sans);
@@ -393,7 +394,17 @@ ol.events li { padding: .2rem 0; }
 
 #account { margin-left: auto; display: flex; align-items: center; gap: .5rem; font-size: .85rem; color: var(--muted); }
 #account[hidden] { display: none; }
-@media (max-width: 640px) { #account-email { display: none; } }
+#account-icon { display: none; text-decoration: none; font-size: 1.2rem; padding: .2rem .3rem; }
+/* On a phone the bar is one icon, the nav and an account button: email and Sign out
+   (on the Account page) don't fit beside the nav, and a bar wider than the screen
+   makes the browser lay the whole page out wider than the screen. */
+@media (max-width: 640px) {
+  .topbar { gap: .6rem; padding: .5rem .75rem; }
+  .brand-name, #account-email, #account .sign-out { display: none; }
+  #account-icon { display: inline; }
+  .topbar nav { gap: 0; min-width: 0; overflow-x: auto; }
+  .topbar nav a { padding: .35rem .55rem; }
+}
 
 /* -- people and access ------------------------------------------------------ */
 
@@ -700,36 +711,39 @@ li.roll-fumble .roll-line strong { color: var(--danger); }
 
 /* -- roll screen: checks and attacks take over the screen ------------------------- */
 
+/* Sized to the dynamic viewport (dvh), so Safari's toolbars don't hide its bottom; the
+   bottom safe area is the action bar's. Everything shrinks on short screens. */
 .roll-screen {
-  position: fixed; inset: 0; z-index: 30; overflow-y: auto;
+  position: fixed; top: 0; left: 0; right: 0; z-index: 30;
+  height: 100vh; height: 100dvh; overflow-y: auto; overscroll-behavior: contain;
   display: flex; flex-direction: column;
   background: var(--bg);
-  padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom);
+  padding-top: env(safe-area-inset-top);
 }
 .roll-screen[hidden] { display: none; }
 body.screen-open { overflow: hidden; }
 .screen-top {
   display: flex; align-items: center; justify-content: space-between; gap: .5rem;
-  padding: .7rem 1rem; border-bottom: 1px solid var(--border); background: var(--surface);
+  padding: .5rem 1rem; border-bottom: 1px solid var(--border); background: var(--surface);
 }
-.screen-top h2 { font-size: 1.15rem; }
+.screen-top h2 { font-size: 1.15rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .screen-top .icon { font-size: 1.6rem; padding: .2rem .6rem; }
 .screen-body {
-  flex: 1; width: 100%; max-width: 32rem; margin: 0 auto; padding: 1.2rem 1rem;
-  display: flex; flex-direction: column; gap: .6rem; text-align: center;
+  flex: 1 0 auto; width: 100%; max-width: 32rem; margin: 0 auto; padding: clamp(.5rem, 2dvh, 1.2rem) 1rem;
+  display: flex; flex-direction: column; gap: clamp(.3rem, 1dvh, .6rem); text-align: center;
 }
 .screen-body.pop { animation: tray-pop .18s ease-out; }
-.screen-body h3 { text-align: left; margin-top: .6rem; }
+.screen-body h3 { text-align: left; margin: .3rem 0 0; }
 .screen-actions {
   position: sticky; bottom: 0; display: flex; gap: .5rem;
-  width: 100%; max-width: 32rem; margin: 0 auto; padding: .7rem 1rem calc(.9rem + env(safe-area-inset-bottom));
+  width: 100%; max-width: 32rem; margin: 0 auto; padding: .6rem 1rem calc(.6rem + env(safe-area-inset-bottom));
   background: var(--bg); border-top: 1px solid var(--border);
 }
-.screen-actions button { flex: 1; padding: .9rem .4rem; font-size: 1.05rem; font-weight: 600; border-radius: 12px; }
+.screen-actions button { flex: 1; padding: clamp(.65rem, 1.6dvh, .9rem) .4rem; font-size: 1.05rem; font-weight: 600; border-radius: 12px; }
 
-.big-total { font: 700 5rem/1 var(--serif); font-variant-numeric: tabular-nums; margin-top: 1rem; }
+.big-total { font: 700 clamp(2.75rem, 11dvh, 5rem)/1 var(--serif); font-variant-numeric: tabular-nums; margin-top: clamp(0rem, 2dvh, 1rem); }
 .big-total small { font: 400 1.1rem var(--sans); color: var(--muted); }
-.big-total.damage { font-size: 4rem; }
+.big-total.damage { font-size: clamp(2.5rem, 9dvh, 4rem); }
 .big-total.crit { color: var(--ok); }
 .big-total.fumble { color: var(--danger); }
 .screen-body .roll-detail { font-size: 1rem; }
@@ -756,7 +770,7 @@ body.screen-open { overflow: hidden; }
 .choice-row { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; }
 button.choice {
   display: flex; flex-direction: column; align-items: flex-start; gap: .1rem; width: 100%;
-  padding: .7rem .9rem; text-align: left; white-space: normal; border-radius: 12px;
+  padding: clamp(.45rem, 1.3dvh, .7rem) .9rem; text-align: left; white-space: normal; border-radius: 12px;
   background: var(--surface); border: 2px solid var(--border);
 }
 button.choice.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--surface)); }
@@ -772,3 +786,8 @@ button.choice.on .choice-name::after { content: " ✓"; color: var(--accent); }
 .option .amount { width: 4.5rem !important; }
 .option-applies { display: flex; flex-direction: column; gap: .2rem; }
 .attack-summary small { color: var(--accent); font-weight: 600; }
+/* Situational damage: two to a row, so a weapon with several still fits. */
+.extras { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .4rem; }
+.extras button.choice { padding: .5rem .7rem; }
+.extras .choice-detail { font-size: .8rem; }
+.signed-in { display: flex; align-items: center; justify-content: space-between; gap: .8rem; flex-wrap: wrap; }
