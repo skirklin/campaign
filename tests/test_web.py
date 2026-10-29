@@ -129,15 +129,17 @@ def test_ingest_job_runs_in_background(client, monkeypatch):
         files={"file": ("s1.txt", io.BytesIO(b"DM: A man in a cloak..."))},
         data={"played_on": "2026-10-25"},
     )
-    job_id = r.json()["job"]
+    assert r.json()["session"] == 1
+    ingest_id = r.json()["ingest"]
     for _ in range(100):
-        job = client.get(f"/api/campaigns/strahd/jobs/{job_id}").json()
-        if job["status"] != "running":
+        job = client.get(f"/api/campaigns/strahd/ingests/{ingest_id}").json()
+        if job["state"] not in ("wanted", "running"):
             break
         time.sleep(0.05)
-    assert job["status"] == "done", job
+    assert job["state"] == "done", job
     assert job["result"]["title"] == "Blood on the Vine"
     assert any(e["kind"] == "tool" and "record_fact" in e["text"] for e in job["log"])
+    assert client.get("/api/campaigns/strahd/sessions").json()["ingests"] == []  # finished: it's a session now
 
     sessions = client.get("/api/campaigns/strahd/sessions").json()
     assert sessions["sessions"][0]["played_on"] == "2026-10-25" and sessions["next"] == 2

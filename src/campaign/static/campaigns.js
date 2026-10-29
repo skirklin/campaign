@@ -151,15 +151,18 @@ async function sessionsTab(c) {
   const file = h("input", { type: "file", accept: ".txt,.md,.mp3,.m4a,.wav,.ogg,.flac,.opus,.webm", "aria-label": "Transcript or recording file" });
   const submit = h("button.primary", { type: "submit" }, "Ingest session");
 
-  const watch = (jobId) => {
-    submit.disabled = true;
-    logPanel.hidden = false;
-    pollJob(c, jobId, logPanel, async (job) => {
-      submit.disabled = false;
-      if (job.status === "done") {
-        toast(`Session ${job.result.session} recorded`);
-        text.value = "";
-        file.value = "";
+  // Ingests are targets the server works through in the background: they carry on
+  // whether or not this page is open, and survive restarts. Each shows its live log here.
+  const ingestsEl = h("div.ingests");
+  const watched = new Set();
+  const watch = (ing) => {
+    if (watched.has(ing.id)) return;
+    watched.add(ing.id);
+    const panel = h("div.job");
+    ingestsEl.append(panel);
+    pollIngest(c, ing.id, panel, async (done) => {
+      if (done.state === "done") {
+        toast(`Session ${done.result.session} recorded`);
         const fresh = await api("GET", `${base}/sessions`);
         number.value = fresh.next;
         renderSessions(fresh.sessions);
@@ -176,8 +179,11 @@ async function sessionsTab(c) {
       if (number.value) fd.append("number", number.value);
       fd.append("played_on", date.value);
       try {
-        const { job } = await api("POST", `${base}/ingest`, fd);
-        watch(job);
+        const r = await api("POST", `${base}/ingest`, fd);
+        text.value = "";
+        file.value = "";
+        number.value = r.session + 1;
+        watch({ id: r.ingest });
       } catch (err) {
         toast(err.message, true);
       }
@@ -187,46 +193,72 @@ async function sessionsTab(c) {
     h("div.identity", h("label.field", h("span", "Session #"), number), h("label.field", h("span", "Played on"), date)),
     text,
     h("div.file-row", h("span.muted", "or upload a transcript or recording:"), file),
-    h("div.actions", submit, h("span.muted.small", "Claude reads it, updates NPCs, quests and the journal, and writes a recap. Takes a few minutes.")),
+    h("div.actions", submit, h("span.muted.small",
+      "Claude reads it, updates NPCs, quests and the journal, and writes a recap. Takes a few minutes, "
+      + "and carries on in the background: you can close this page.")),
   );
 
-  if (data.running.length) watch(data.running[0].id);
-  return h("div", canEdit(c) && form, logPanel, h("h2.section-title", "Sessions"), list);
+  data.ingests.forEach(watch);
+  return h("div", canEdit(c) && form, ingestsEl, h("h2.section-title", "Sessions"), list);
 }
 
-function pollJob(c, jobId, panel, onDone) {
+const INGEST_STATES = { wanted: "Queued", running: "Running", done: "Done", failed: "Failed", cancelled: "Cancelled" };
+
+function pollIngest(c, id, panel, onDone) {
+  const base = `/api/campaigns/${c.slug}`;
   const lines = [];
   const out = h("div.job-log");
-  const statusEl = h("span.job-status.running", "Running");
-  panel.replaceChildren(h("div.job-head", h("strong", "Ingest"), statusEl), out);
+  const statusEl = h("span.job-status.running", "Queued");
+  const actions = h("span.job-actions");
+  const title = h("strong", "Ingest");
+  panel.replaceChildren(h("div.job-head", title, statusEl, actions), out);
   let since = 0;
+  let timer;
+  const act = (label, method, path, cls = "") => canEdit(c) && h(`button${cls}`, {
+    onclick: async () => {
+      await api(method, `${base}/ingests/${id}${path}`);
+      clearTimeout(timer);
+      tick();
+    },
+  }, label);
   const tick = async () => {
-    let job;
+    if (since > 0 && !panel.isConnected) return;  // the page was left
+    let ing;
     try {
-      job = await api("GET", `/api/campaigns/${c.slug}/jobs/${jobId}?since=${since}`);
+      ing = await api("GET", `${base}/ingests/${id}?since=${since}`);
     } catch (err) {
       statusEl.textContent = err.message;
       statusEl.className = "job-status failed";
-      return onDone({ status: "failed" });
+      return;
     }
-    // The server resends from `from`, since the last text entry may have grown.
-    job.log.forEach((entry, i) => {
-      const idx = job.from + i;
-      const el = lines[idx] || (lines[idx] = out.appendChild(h(`div.log-${entry.kind}`)));
+    title.textContent = `Session ${ing.session}: ${ing.input_name}`;
+    // A retry starts the log over; the server resends from `from`, since the last text entry may have grown.
+    if (ing.from === 0 && lines.length) { lines.length = 0; out.replaceChildren(); }
+    ing.log.forEach((entry) => {
+      const el = lines[entry.seq] || (lines[entry.seq] = out.appendChild(h(`div.log-${entry.kind}`)));
       el.textContent = entry.text;
     });
-    since = job.from + job.log.length;
+    since = ing.log.length ? ing.log[ing.log.length - 1].seq + 1 : since;
     out.scrollTop = out.scrollHeight;
-    if (job.status === "running") return setTimeout(tick, 1000);
-    statusEl.textContent = job.status === "done" ? "Done" : `Failed: ${job.error}`;
-    statusEl.className = `job-status ${job.status}`;
-    if (job.status === "done" && job.result) {
+    const waiting = ing.state === "wanted" && ing.retry_at;
+    statusEl.textContent = waiting ? `Retrying at ${new Date(ing.retry_at * 1000).toLocaleTimeString()} (${ing.error})`
+      : ing.state === "failed" ? `Failed: ${ing.error}` : INGEST_STATES[ing.state];
+    statusEl.className = `job-status ${ing.state === "wanted" ? "running" : ing.state}`;
+    actions.replaceChildren(
+      ing.state === "failed" || ing.state === "cancelled" ? act("Retry", "POST", "/retry") : "",
+      ing.state === "wanted" || ing.state === "running" ? act("Cancel", "DELETE", "", ".danger") : "",
+    );
+    if (ing.state === "wanted" || ing.state === "running") {
+      timer = setTimeout(tick, 1500);
+      return;
+    }
+    if (ing.state === "done" && ing.result) {
       panel.append(h("div.job-result",
-        h("h3", `Session ${job.result.session}: ${job.result.title || "(untitled)"}`),
-        h("p.muted", `${job.result.facts} facts and ${job.result.journal_entries} journal ${job.result.journal_entries === 1 ? "entry" : "entries"} recorded.`),
+        h("h3", `Session ${ing.result.session}: ${ing.result.title || "(untitled)"}`),
+        h("p.muted", `${ing.result.facts} facts and ${ing.result.journal_entries} journal ${ing.result.journal_entries === 1 ? "entry" : "entries"} recorded.`),
       ));
     }
-    onDone(job);
+    onDone(ing);
   };
   tick();
 }
