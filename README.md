@@ -107,7 +107,11 @@ localhost without it, unless you pass `--no-auth`. With sign-in on:
   PDF…** takes a photo or PDF of a filled-in sheet; Claude reads it into a
   new character (`CAMPAIGN_SHEET_MODEL`, default `CAMPAIGN_MODEL`) and lists
   anything it couldn't make out in the sheet's notes, so you can correct
-  those by hand. Reading takes a minute or two and is a
+  those by hand. While reading, it can search the campaign's reference
+  material (as the uploader sees it, so a player's scan doesn't see
+  DM-only books): it looks up abbreviated or unfamiliar classes,
+  subclasses, species, features and spells, such as a setting's own
+  subclasses, and fills in what named magic items do. Reading takes a minute or two and is a
   [job](#background-jobs), with its progress shown on the Party tab.
 - **An admin page** manages users and app-wide invites.
 [docs/deploy.md](docs/deploy.md) covers running it on the homelab cluster:

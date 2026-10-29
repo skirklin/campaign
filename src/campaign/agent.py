@@ -12,11 +12,11 @@ import anthropic
 from anthropic import beta_tool
 
 from .db import Campaign, Store
+from .digest import fallback_params
 from .tools import ToolContext, build_tools
 from .world import World
 
 MODEL = os.environ.get("CAMPAIGN_MODEL", "claude-opus-5-5")
-FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 ASK_SYSTEM = """\
 You are the campaign assistant for the D&D campaign "{name}". {role_line}
@@ -120,7 +120,11 @@ class Agent:
     writable: bool = True
     on_text: Callable[[str], None] = lambda s: (sys.stdout.write(s), sys.stdout.flush())
     on_tool: Callable[[str, dict[str, Any]], None] = lambda name, args: None
+    # Given, Claude's thinking is asked for in summary and passed here as it streams (to show progress).
+    on_thinking: Callable[[str], None] | None = None
+    model: str = MODEL
     messages: list[Any] = field(default_factory=list)
+    stop_reason: str | None = None  # of the last response
 
     def __post_init__(self) -> None:
         self.client = anthropic.Anthropic()
@@ -160,21 +164,25 @@ class Agent:
         text = ""
         for _ in range(max_turns):
             with self.client.beta.messages.stream(
-                model=MODEL,
+                model=self.model,
                 max_tokens=64000,
                 system=self.system,
                 messages=self.messages,
                 tools=[t.to_dict() for t in self.tools.values()],
-                thinking={"type": "adaptive"},
+                thinking={"type": "adaptive", **({"display": "summarized"} if self.on_thinking else {})},
                 output_config={"effort": self.effort},
                 cache_control={"type": "ephemeral"},
-                betas=[FALLBACK_BETA],
-                fallbacks="default",
+                **fallback_params(self.model),
             ) as stream:
                 for event in stream:
-                    if event.type == "content_block_delta" and event.delta.type == "text_delta":
+                    if event.type != "content_block_delta":
+                        continue
+                    if event.delta.type == "text_delta":
                         self.on_text(event.delta.text)
+                    elif event.delta.type == "thinking_delta" and self.on_thinking and event.delta.thinking:
+                        self.on_thinking(event.delta.thinking)
                 response = stream.get_final_message()
+            self.stop_reason = response.stop_reason
 
             if response.stop_reason == "refusal":
                 del self.messages[start:]  # leave history valid for the next question
