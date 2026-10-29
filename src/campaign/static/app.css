@@ -846,3 +846,17 @@ button.status-card { border-style: dashed; }
 :root:fullscreen .play-back { display: inline-flex; }
 /* Back to the list, for when the site's bar is hidden. */
 .play-back { display: none; align-items: center; text-decoration: none; font-size: 1.6rem; padding: 0 .3rem 0 0; color: var(--muted); }
+.attack-turn { display: flex; flex-wrap: wrap; gap: .4rem 1.2rem; align-items: center; padding-bottom: .4rem; border-bottom: 1px dotted var(--border); }
+.attack-turn .amount { width: 3.5rem !important; }
+
+/* -- turn bookkeeping, grapple and shove -------------------------------------------------- */
+.maneuvers { display: grid; grid-template-columns: 1fr 1fr; gap: .4rem; margin-top: .5rem; }
+.maneuvers button { padding: .6rem .4rem; border-radius: 10px; font-weight: 600; }
+.maneuvers small { font-weight: 400; color: var(--muted); }
+.grappling {
+  display: flex; align-items: center; justify-content: space-between; gap: .6rem;
+  padding: .45rem .8rem; border-radius: 10px; border: 2px solid var(--warn);
+  background: color-mix(in srgb, var(--warn) 10%, var(--surface));
+}
+.grappling button { padding: .4rem .8rem; border-radius: 8px; }
+.attack-cost { margin: 0; text-align: left; font-weight: 600; color: var(--accent); }

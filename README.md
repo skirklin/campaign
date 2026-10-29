@@ -74,10 +74,18 @@ uv run campaign web            # http://127.0.0.1:8765
   with advantage and any reminder an option carries. On a hit it rolls
   damage, doubling dice on a crit, with situational damage to add if it
   applies. "Attack again" keeps the choices for a second swing.
-  **Start combat** switches Main to a layout for the fight, which is a
-  scratch pad and decides nothing:
-  - a round tally with **Next turn**, which clears the turn's ticks;
-  - Action, Bonus, Reaction and Movement to tick off;
+  **Start combat** switches Main to a layout for the fight that keeps the
+  turn's bookkeeping:
+  - a round tally with **Next turn**, which gives the turn back;
+  - Action, Bonus, Reaction and Movement. Attacks mark them: the first
+    starts the Attack action and the rest come out of it ("1 attack
+    left", from the sheet's attacks per Attack action). A bonus-action
+    attack takes the bonus action, an opportunity attack the reaction,
+    and starting a status that takes one (Rage) its slot. It says when
+    there's none left but never stops a roll, and a tap flips a slot;
+  - **Grapple** and **Shove** roll Athletics in place of an attack (or
+    as a bonus action, if the sheet allows grappling as one), and a grapple
+    shows **Grappling** until released;
   - statuses, attacks and resources first, with how long each status has
     run ("Rage · round 3 of 10"). A status stays on until it's ended.
 

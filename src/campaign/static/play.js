@@ -240,10 +240,17 @@ export class PlayView extends SheetView {
 
   attacksBlock() {
     const s = this.sheet, d = this.derived;
-    return s.attacks.length > 0 && block("Attacks", s.attacks.map((a, i) => h("button.play-row.play-attack", { onclick: () => this.attack(i) },
-      h("span.row-main", h("strong", a.name || "Attack"), a.notes && h("small.muted", a.notes)),
-      h("span.badge-num", sign(n(d.attacks[i].to_hit))),
-      d.attacks[i].text && h("span.row-side", d.attacks[i].text))));
+    const athletics = sign(n(d.skills.athletics));
+    return block("Attacks", [
+      s.attacks.map((a, i) => h("button.play-row.play-attack", { onclick: () => this.attack(i) },
+        h("span.row-main", h("strong", a.name || "Attack"),
+          a.uses === "bonus" && h("small.muted", "bonus action"), a.notes && h("small.muted", a.notes)),
+        h("span.badge-num", sign(n(d.attacks[i].to_hit))),
+        d.attacks[i].text && h("span.row-side", d.attacks[i].text))),
+      h("div.maneuvers",
+        h("button", { onclick: () => this.grapple("grapple") }, "Grapple", h("small", ` Athletics ${athletics}`)),
+        h("button", { onclick: () => this.grapple("shove") }, "Shove", h("small", ` Athletics ${athletics}`))),
+    ]);
   }
 
   // -- statuses -----------------------------------------------------------------
@@ -260,7 +267,8 @@ export class PlayView extends SheetView {
       if (!st.active) {
         return h("button.choice.status-card", { disabled: !this.canEdit, onclick: () => this.toggleStatus(st) },
           h("span.choice-name", `Start ${st.name}`),
-          h("span.choice-detail", [r && `spends 1 ${r.name} (${left})`, effects, st.duration && `${st.duration} rounds`].filter(Boolean).join(" · ")));
+          h("span.choice-detail", [st.uses && SLOT_NAMES[st.uses], r && `spends 1 ${r.name} (${left})`, effects,
+            st.duration && `${st.duration} rounds`].filter(Boolean).join(" · ")));
       }
       return h("div.status-card.on",
         h("div.status-main",
@@ -293,9 +301,11 @@ export class PlayView extends SheetView {
   }
 
   // -- combat -------------------------------------------------------------------
-  // A layout for the fight, and a scratch pad: a round tally, the turn's actions to tick
-  // off, how long statuses have run. It decides nothing: it doesn't roll, end statuses
-  // or limit what can be used. Kept on this device (combat:<id>), so a reload carries on.
+  // A layout for the fight, with the turn's bookkeeping: a round tally, and the action,
+  // bonus action, reaction and movement, which attacks, statuses that take a bonus action
+  // (Rage), grapples and shoves mark used. It tells, it doesn't stop: anything can still
+  // be rolled, and a tap on a slot flips it. It doesn't roll or end anything on its own.
+  // Kept on this device (combat:<id>), so a reload carries on.
 
   startCombat() {
     this.combat = { round: 1, used: {}, moved: 0, since: {} };
@@ -304,11 +314,12 @@ export class PlayView extends SheetView {
     this.rerender();
   }
 
-  // The next round: the turn's ticks are cleared, like rubbing out pencil marks.
+  // The next round: the turn's action, bonus action, reaction and movement come back.
   nextTurn() {
     const c = this.combat;
     c.round += 1;
     c.used = {};
+    c.attacksLeft = undefined;
     c.moved = 0;
     saveCombat(this.id, c);
     this.rerender();
@@ -328,19 +339,128 @@ export class PlayView extends SheetView {
       this.canEdit && h("button", { onclick: () => this.endCombat() }, "End"));
   }
 
-  // Action, bonus action, reaction and movement: tap to mark used; Next turn clears them.
+  // Action, bonus action, reaction and movement. Attacks and the rest mark them; a tap
+  // flips one by hand (an action spent on Dash, a mistake). Next turn clears them.
   turnEconomy() {
     const c = this.combat;
     const speed = n(this.derived.speed);
-    const mark = (key, label) => h("button.turn-slot", {
-      className: `turn-slot${c.used[key] ? " used" : ""}`, "aria-pressed": String(!!c.used[key]),
-      onclick: () => { c.used[key] = !c.used[key]; saveCombat(this.id, c); this.renderPanel(); },
-    }, label);
+    const per = this.sheet.attacks_per_action || 1;
+    const flip = (key) => {
+      c.used[key] = !c.used[key];
+      if (key === "action") c.attacksLeft = c.used.action ? 0 : undefined;
+      saveCombat(this.id, c);
+      this.renderPanel();
+    };
+    const mark = (key, label, note) => h("button.turn-slot", {
+      className: `turn-slot${c.used[key] && !(key === "action" && c.attacksLeft > 0) ? " used" : ""}`,
+      "aria-pressed": String(!!c.used[key]), onclick: () => flip(key),
+    }, label, note && h("small", note));
+    const actionNote = !c.used.action ? (per > 1 ? `${per} attacks` : "")
+      : c.attacksLeft > 0 ? `${c.attacksLeft} attack${c.attacksLeft > 1 ? "s" : ""} left` : "";
     const left = Math.max(0, speed - c.moved);
-    return h("div.turn-economy",
-      mark("action", "Action"), mark("bonus", "Bonus"), mark("reaction", "Reaction"),
-      h("button.turn-slot", { className: `turn-slot${left === 0 ? " used" : ""}`, onclick: () => this.moveSheet() },
-        "Move", h("small", ` ${left}/${speed} ft`)));
+    return [
+      h("div.turn-economy",
+        mark("action", "Action", actionNote), mark("bonus", "Bonus"), mark("reaction", "Reaction"),
+        h("button.turn-slot", { className: `turn-slot${left === 0 ? " used" : ""}`, onclick: () => this.moveSheet() },
+          "Move", h("small", ` ${left}/${speed} ft`))),
+      c.grappling && h("div.grappling",
+        h("span", h("strong", "Grappling")),
+        h("button", { onclick: () => { c.grappling = false; saveCombat(this.id, c); this.renderPanel(); } }, "Release")),
+    ];
+  }
+
+  // Mark part of the turn used. "attack" is one of the Attack action's attacks: the first
+  // takes the action, the rest come from what it gives (Extra Attack). Nothing is refused:
+  // it says when there was none left.
+  spendTurn(what) {
+    const c = this.combat;
+    if (!c) return "";
+    const per = this.sheet.attacks_per_action || 1;
+    let note = "";
+    if (what === "attack") {
+      if (!c.used.action) {
+        c.used.action = true;
+        c.attacksLeft = per - 1;
+      } else if (c.attacksLeft > 0) {
+        c.attacksLeft -= 1;
+      } else {
+        note = "No attacks left this turn.";
+      }
+    } else {
+      if (c.used[what]) note = `Your ${SLOT_NAMES[what]} was already used this turn.`;
+      c.used[what] = true;
+    }
+    saveCombat(this.id, c);
+    this.renderPanel();  // the slots, under whatever screen is open
+    return note;
+  }
+
+  // What attack i would use, said before rolling.
+  attackCost(i, choice) {
+    const c = this.combat;
+    if (!c) return "";
+    const a = this.sheet.attacks[i];
+    const per = this.sheet.attacks_per_action || 1;
+    if (choice.reaction) return c.used.reaction ? "Uses your reaction (already used this turn)" : "Uses your reaction";
+    if (a.uses === "bonus") return c.used.bonus ? "Uses your bonus action (already used this turn)" : "Uses your bonus action";
+    if (!c.used.action) return per > 1 ? `Starts your Attack action: ${per} attacks` : "Uses your action";
+    if (c.attacksLeft > 0) return `Attack ${per - c.attacksLeft + 1} of ${per}`;
+    return "No attacks left this turn";
+  }
+
+  spendAttack(i) {
+    const choice = this.choices.get(i);
+    const a = this.sheet.attacks[i];
+    return this.spendTurn(choice.reaction ? "reaction" : a.uses === "bonus" ? "bonus" : "attack");
+  }
+
+  // -- grapple and shove ----------------------------------------------------------
+  // Athletics against the target's Athletics or Acrobatics, in place of one of the Attack
+  // action's attacks, or as a bonus action where a feature allows a grapple to be.
+
+  grapple(kind) {
+    const go = (what) => this.contest(kind, this.spendTurn(what));
+    if (kind === "grapple" && this.sheet.grapple_bonus_action && this.combat) {
+      this.screen("Grapple", [
+        h("p", "Athletics ", h("strong", sign(n(this.derived.skills.athletics))),
+          " against the target's Athletics or Acrobatics (its choice)."),
+        h("p.muted.small", "You can grapple as a bonus action, or in place of an attack."),
+      ], [
+        h("button", { onclick: () => go("attack") }, "Use an attack"),
+        h("button.primary", { onclick: () => go("bonus") }, "Bonus action"),
+      ]);
+      return;
+    }
+    go("attack");
+  }
+
+  contest(kind, note) {
+    const mod = n(this.derived.skills.athletics);
+    const a = d(20), b = d(20);
+    const label = kind === "grapple" ? "Grapple" : "Shove";
+    const c = this.combat;
+    const grappled = () => {
+      if (c) {
+        c.grappling = true;
+        saveCombat(this.id, c);
+        this.renderPanel();
+      }
+      this.closeScreen();
+    };
+    this.screen(label, [
+      note && h("p.reminder", note),
+      h("div.big-total", a + mod, h("small", " Athletics")),
+      h("div.roll-detail", `d20: ${a} ${fmtMod(mod)}`),
+      h("div.adv-line",
+        h("div", h("span", "Advantage"), h("strong", Math.max(a, b) + mod)),
+        h("div", h("span", "Disadvantage"), h("strong", Math.min(a, b) + mod))),
+      h("p.muted", kind === "grapple"
+        ? "The target resists with Athletics or Acrobatics. If you win, it's grappled: its speed is 0 until it escapes."
+        : "The target resists with Athletics or Acrobatics. If you win, knock it prone or push it 5 feet away."),
+    ], kind === "grapple"
+      ? [h("button", { onclick: () => this.closeScreen() }, "It got away"), h("button.primary", { onclick: grappled }, "Grappled")]
+      : [h("button.primary", { onclick: () => this.closeScreen() }, "Done")]);
+    this.record({ label, summary: `Athletics ${a + mod}`, detail: `d20: ${a} ${fmtMod(mod)} · 2nd d20: ${b} → ${b + mod}`, flag: "" });
   }
 
   moveSheet() {
@@ -591,12 +711,17 @@ export class PlayView extends SheetView {
       }
     }
     st.active = !st.active;
+    let note = "";
     if (this.combat) {
-      if (st.active) this.combat.since[st.name] = this.combat.round;
-      else delete this.combat.since[st.name];
+      if (st.active) {
+        this.combat.since[st.name] = this.combat.round;
+        if (st.uses) note = this.spendTurn(st.uses);
+      } else {
+        delete this.combat.since[st.name];
+      }
       saveCombat(this.id, this.combat);
     }
-    this.changed(`${st.name} ${st.active ? "on" : "off"}`);
+    this.changed(`${st.name} ${st.active ? "on" : "off"}${note ? ` · ${note}` : ""}`);
     this.renderHead();
     this.renderPanel();
   }
@@ -694,7 +819,7 @@ export class PlayView extends SheetView {
     const a = this.sheet.attacks[i], da = this.derived.attacks[i];
     if (!a || !da) return;
     this.choices ||= new Map();
-    const c = this.choices.get(i) || { adv: "", options: new Set() };
+    const c = this.choices.get(i) || { adv: "", options: new Set(), reaction: false };
     this.choices.set(i, c);
     const options = (da.options || []).map((k) => ({ k, o: this.sheet.attack_options[k], v: this.derived.attack_options[k] }));
     const chosen = options.filter(({ k }) => c.options.has(k));
@@ -711,9 +836,12 @@ export class PlayView extends SheetView {
         h("div", h("span.muted", "To hit"), h("strong", sign(toHit))),
         h("div", h("span.muted", "Damage"), h("strong", da.text || "—"),
           extraDamage !== 0 && h("small", `${sign(extraDamage)} from ${chosen.filter((x) => x.v.damage).map((x) => x.o.name).join(", ")}`))),
+      this.combat && h("p.attack-cost", this.attackCost(i, c)),
       h("div.choice-row",
         toggle(c.adv === "advantage", "Advantage", "", () => { c.adv = c.adv === "advantage" ? "" : "advantage"; this.attack(i); }),
         toggle(c.adv === "disadvantage", "Disadvantage", "", () => { c.adv = c.adv === "disadvantage" ? "" : "disadvantage"; this.attack(i); })),
+      this.combat && a.uses !== "bonus" && toggle(c.reaction, "Opportunity attack", "uses your reaction instead",
+        () => { c.reaction = !c.reaction; this.attack(i); }),
       options.length > 0 && h("h3", "Options"),
       options.map(({ k, o, v }) => toggle(c.options.has(k), o.name, effect(o, v), () => {
         if (c.options.has(k)) c.options.delete(k); else c.options.add(k);
@@ -729,7 +857,7 @@ export class PlayView extends SheetView {
         })),
       a.notes && h("p.muted.small", a.notes),
     ], [
-      h("button", { onclick: () => this.damage(i, false, "") }, "Damage only"),
+      h("button", { onclick: () => { this.spendAttack(i); this.damage(i, false, ""); } }, "Damage only"),
       h("button.primary", { onclick: () => this.rollToHit(i) }, "Roll to hit"),
     ]);
   }
@@ -738,6 +866,9 @@ export class PlayView extends SheetView {
   rollToHit(i) {
     const a = this.sheet.attacks[i], da = this.derived.attacks[i];
     const c = this.choices.get(i);
+    const turnNote = this.spendAttack(i);
+    const another = this.combat && !c.reaction && a.uses !== "bonus" && this.combat.attacksLeft > 0;
+    c.reaction = false;  // an opportunity attack is one swing
     const chosen = (da.options || []).filter((k) => c.options.has(k)).map((k) => ({ o: this.sheet.attack_options[k], v: this.derived.attack_options[k] }));
     const sources = { advantage: [], disadvantage: [] };
     if (c.adv) sources[c.adv].push("chosen");
@@ -760,8 +891,10 @@ export class PlayView extends SheetView {
       !mode && h("div.roll-detail.muted", `2nd d20: ${r2} → ${r2 + toHit}`),
       sources.advantage.length > 0 && sources.disadvantage.length > 0 && h("p.muted.small", "Advantage and disadvantage cancel out."),
       notes.map((t) => h("p.reminder", t)),
+      turnNote && h("p.reminder", turnNote),
     ], [
-      h("button", { onclick: () => this.closeScreen() }, flag === "fumble" ? "Done" : "Miss"),
+      another ? h("button", { onclick: () => this.attack(i) }, flag === "fumble" ? "Next attack" : "Miss · next attack")
+        : h("button", { onclick: () => this.closeScreen() }, flag === "fumble" ? "Done" : "Miss"),
       flag !== "fumble" && h("button.primary", { onclick: () => this.damage(i, flag === "crit", label) }, flag === "crit" ? "Crit! Roll damage" : "Hit: roll damage"),
     ]);
     this.record({ label, summary: `to hit ${kept + toHit}`,
@@ -984,6 +1117,8 @@ function fullscreenIcon(on) {
   svg.append(path);
   return svg;
 }
+
+const SLOT_NAMES = { action: "action", bonus: "bonus action", reaction: "reaction" };
 
 const capFirst = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 
