@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Campaign</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script type="module" src="/static/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#/characters">⚔ Campaign</a>
+    <nav>
+      <a href="#/characters" data-nav="characters">Characters</a>
+      <a href="#/campaigns" data-nav="campaigns">Campaigns</a>
+      <a href="#/admin" data-nav="admin" id="admin-link" hidden>Admin</a>
+    </nav>
+    <form id="account" method="post" action="/auth/logout" hidden>
+      <span id="account-email"></span>
+      <button type="submit">Sign out</button>
+    </form>
+  </header>
+  <main id="view"></main>
+  <div id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

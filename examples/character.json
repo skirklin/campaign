@@ -1,0 +1,41 @@
+{
+  "name": "Brannoc Ashvale",
+  "player": "Scott",
+  "species": "Hill Dwarf",
+  "background": "Acolyte",
+  "alignment": "Neutral Good",
+  "classes": [{"name": "Cleric", "level": 3, "subclass": "Life Domain"}],
+  "abilities": {"str": 14, "dex": 10, "con": 15, "int": 10, "wis": 16, "cha": 12},
+  "save_proficiencies": ["wis", "cha"],
+  "skill_proficiencies": ["insight", "medicine", "religion", "persuasion"],
+  "ac": 18,
+  "speed": 25,
+  "hp": {"max": 27, "current": 27, "temp": 0},
+  "attacks": [{"name": "Warhammer", "to_hit": "+4", "damage": "1d8+2 bludgeoning"}],
+  "resources": [
+    {"name": "Spell slots (1st)", "max": 4, "recharge": "long rest"},
+    {"name": "Spell slots (2nd)", "max": 2, "recharge": "long rest"},
+    {"name": "Channel Divinity", "max": 1, "recharge": "short rest"},
+    {"name": "Hit dice (d8)", "max": 3, "recharge": "long rest"}
+  ],
+  "spellcasting_ability": "wis",
+  "spells": [
+    {"name": "Sacred Flame", "level": 0},
+    {"name": "Guidance", "level": 0},
+    {"name": "Bless", "level": 1},
+    {"name": "Cure Wounds", "level": 1},
+    {"name": "Healing Word", "level": 1},
+    {"name": "Lesser Restoration", "level": 2},
+    {"name": "Spiritual Weapon", "level": 2}
+  ],
+  "inventory": [
+    {"name": "Warhammer", "equipped": true},
+    {"name": "Chain mail", "equipped": true},
+    {"name": "Shield", "equipped": true},
+    {"name": "Holy symbol (amulet)", "equipped": true},
+    {"name": "Potion of healing", "qty": 2}
+  ],
+  "currency": {"cp": 0, "sp": 14, "ep": 0, "gp": 38, "pp": 0},
+  "features": ["Darkvision 60 ft", "Dwarven Resilience", "Disciple of Life", "Channel Divinity: Preserve Life"],
+  "proficiencies": ["All armor", "Shields", "Simple weapons", "Common", "Dwarvish"]
+}

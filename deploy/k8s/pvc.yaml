@@ -1,0 +1,11 @@
+# The database, original uploads and pre-migration backups (CAMPAIGN_HOME=/data).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: campaign-data
+  namespace: campaign
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 5Gi
