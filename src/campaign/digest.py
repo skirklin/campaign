@@ -742,11 +742,19 @@ class Reconciler:
     """
 
     IDLE_SECONDS = 30
+    LEASE = "digest-loop"
+    LEASE_SECONDS = 300  # how long a loop that died without letting go blocks the others
+    BUSY_RETRY_SECONDS = 10  # how soon to try again when another server holds the lease
 
     def __init__(self, db: Path | str, client_factory: Callable[[], Any] | None = None, workers: int = 4):
+        import os
+        import uuid
+
         self.db = db
         self.client_factory = client_factory or (lambda: anthropic.Anthropic())
         self.workers = workers
+        # Which copy of the server this is. While two overlap in a deploy, only the lease holder digests.
+        self.holder = f"{os.uname().nodename}:{os.getpid()}:{uuid.uuid4().hex[:6]}"
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -758,11 +766,28 @@ class Reconciler:
         self._thread = threading.Thread(target=self._loop, name="digest-reconciler", daemon=True)
         self._thread.start()
 
-    def stop(self, timeout: float | None = 10) -> None:
+    def stop(self, timeout: float | None = 20) -> None:
+        """Stop, and hand the lease over at once rather than leaving the next server to wait it out.
+
+        Calls still in flight after `timeout` are abandoned (the process is
+        going away anyway); the next loop simply does those sections again.
+        """
         self._stop.set()
         self._wake.set()
         if self._thread:
             self._thread.join(timeout)
+        s = Store(self.db)
+        try:
+            s.release_lease(self.LEASE, self.holder)
+        finally:
+            s.close()
+
+    def _lease(self) -> bool:
+        s = Store(self.db)
+        try:
+            return s.take_lease(self.LEASE, self.holder, self.LEASE_SECONDS, int(time.time()))
+        finally:
+            s.close()
 
     def wake(self) -> None:
         """Look again now (a target changed), rather than at the next idle tick."""
@@ -774,6 +799,9 @@ class Reconciler:
         while not self._stop.is_set():
             self._wake.clear()
             try:
+                if not self._lease():  # another server is digesting; wait our turn
+                    self._wake.wait(self.BUSY_RETRY_SECONDS)
+                    continue
                 busy = self.reconcile_once()
             except Exception:  # keep the loop alive; the next pass starts from the database again
                 traceback.print_exc()
@@ -802,7 +830,8 @@ class Reconciler:
             stats = run(
                 self.db, t["id"], client=self.client_factory(), workers=self.workers,
                 model=t["model"], effort=t["effort"] or EFFORT,
-                keep_going=lambda t=t: not self._stop.is_set() and self._wanted(t["id"], t["model"]),
+                # Before each call: still running, still wanted, and still ours (renewing the lease).
+                keep_going=lambda t=t: not self._stop.is_set() and self._wanted(t["id"], t["model"]) and self._lease(),
             )
             busy = busy or stats["digested"] > 0
         return busy

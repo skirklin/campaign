@@ -347,13 +347,31 @@ CREATE TABLE digest_failures (
 );
 """
 
-# Append only, for changes small enough to migrate. Each step runs in its
+# v8: leases, so that when two copies of the server overlap (a rolling
+# deploy), only one runs a background loop at a time. See Store.take_lease.
+V8_LEASES = """
+CREATE TABLE leases (
+    name        TEXT PRIMARY KEY,
+    holder      TEXT NOT NULL,
+    expires_at  INTEGER NOT NULL
+);
+"""
+
+# Append only, for changes small enough to migrate.
+#
+# Deploys are rolling: the new server starts, and runs these, while the old
+# one is still serving on the same database. So every step must leave the
+# old code working: add tables and nullable columns, backfill, start using
+# them; stop using something in one release and drop it in a later one
+# ("expand, then contract"). Rebuilding a table the old code reads, as v5
+# did, would break the old server for the seconds the two overlap. Each step runs in its
 # own transaction and then sets user_version to its number.
 MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (BASELINE, SCHEMA),
     (5, V5_CHARACTERS),
     (6, V6_OAUTH),
     (7, V7_DIGEST_TARGET),
+    (8, V8_LEASES),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 
@@ -768,6 +786,24 @@ class Store:
                 "UPDATE digest_nodes SET digest_key = coalesce(?, digest_key), error = ? WHERE id = ?",
                 (key, error, node_id),
             )
+
+    # -- leases ----------------------------------------------------------------------
+
+    def take_lease(self, name: str, holder: str, seconds: int, at: int) -> bool:
+        """Take or renew the lease `name` for `seconds`. False if someone else holds an unexpired one."""
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO leases (name, holder, expires_at) VALUES (?, ?, ?)"
+                " ON CONFLICT(name) DO UPDATE SET holder = excluded.holder, expires_at = excluded.expires_at"
+                " WHERE leases.holder = excluded.holder OR leases.expires_at <= ?",
+                (name, holder, at + seconds, at),
+            )
+            row = self.conn.execute("SELECT holder FROM leases WHERE name = ?", (name,)).fetchone()
+        return row is not None and row["holder"] == holder
+
+    def release_lease(self, name: str, holder: str) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM leases WHERE name = ? AND holder = ?", (name, holder))
 
     # -- digest targets (desired state) ------------------------------------------
 

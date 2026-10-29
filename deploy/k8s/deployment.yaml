@@ -5,9 +5,16 @@ metadata:
   namespace: campaign
   labels: {app: campaign}
 spec:
-  replicas: 1  # SQLite on a ReadWriteOnce volume: exactly one writer
+  replicas: 1
+  # Zero-downtime deploys: the new pod starts beside the old one and takes
+  # traffic once it's ready; then the old one shuts down gracefully. Both
+  # share the SQLite database on the volume for those seconds, which is fine:
+  # SQLite locks across processes, migrations are additive (see db.py), and
+  # background loops take a lease so only one runs at a time. The volume is
+  # ReadWriteOnce, which is per node, and this cluster has one node.
   strategy:
-    type: Recreate  # never two pods on the volume at once
+    type: RollingUpdate
+    rollingUpdate: {maxSurge: 1, maxUnavailable: 0}
   selector:
     matchLabels: {app: campaign}
   template:
@@ -15,6 +22,9 @@ spec:
       labels: {app: campaign}
     spec:
       automountServiceAccountToken: false
+      # preStop's pause lets the Service stop routing here before the server
+      # gets SIGTERM; then uvicorn finishes requests in flight (20 s).
+      terminationGracePeriodSeconds: 40
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -51,7 +61,10 @@ spec:
             capabilities: {drop: [ALL]}
           readinessProbe:
             httpGet: {path: /healthz, port: http}
-            periodSeconds: 10
+            periodSeconds: 2  # the new pod takes traffic as soon as it can
+          lifecycle:
+            preStop:
+              exec: {command: ["sleep", "5"]}
           livenessProbe:
             httpGet: {path: /healthz, port: http}
             initialDelaySeconds: 20
