@@ -40,7 +40,7 @@ ATTRIBUTES = ("status", "location", "holder", "disposition", "leader", "allegian
 SUMMARY_VERSION = 1
 # How a book's catalog is matched onto the world. Bump it when that changes,
 # and every digested book is applied again (from the cache: no API calls).
-APPLY_VERSION = 3
+APPLY_VERSION = 4
 
 # Aliases that describe rather than name ("the Titan", "her father") or are a
 # map's keys ("M1"): kept for finding things, never used to decide that two
@@ -57,6 +57,19 @@ def _naming(alias: str) -> bool:
     """Whether an alias names one thing, rather than describing it."""
     a = alias.strip()
     return len(a) > 2 and not _DESCRIPTIVE.match(a) and not _MAP_KEY.match(a)
+
+
+def _name_keys(name: str) -> set[str]:
+    """What a name is called with its punctuation and any epithet after a comma dropped:
+    "Sydon, Lord of Storms" and "Sydon, The Lord of Storms" are both "sydon",
+    "Versi, the Oracle" is also "versi the oracle"."""
+    def norm(s: str) -> str:
+        return " ".join(re.sub(r"[^\w\s]", " ", s.lower()).split())
+
+    keys = {norm(name)}
+    if "," in name and _naming(base := name.split(",", 1)[0]):
+        keys.add(norm(base))
+    return {k for k in keys if k}
 
 
 def _family(kind: str) -> str:
@@ -561,6 +574,14 @@ class World:
             ):
                 if _family(r["kind"]) == family:
                     return self.entity(r["id"])
+        keys = _name_keys(item["name"])
+        prefix = min(keys, key=len).split()[0] if keys else ""
+        same = [r for r in self.conn.execute(
+            "SELECT id, kind, name FROM entities WHERE campaign_id = ? AND name LIKE ? ORDER BY id",
+            (self.campaign.id, f"{prefix}%"),
+        ) if _family(r["kind"]) == family and _name_keys(r["name"]) & keys] if prefix else []
+        if same:  # the same name with another epithet, or other punctuation
+            return self.entity(same[0]["id"])
         if _naming(item["name"]):
             rows = [r for r in self.conn.execute(
                 "SELECT DISTINCT e.id, e.kind FROM entities e JOIN aliases a ON a.entity_id = e.id"
@@ -645,12 +666,17 @@ def _origin(f: dict[str, Any]) -> str:
     return {"ingest": f"session {f['run_session']}", "chat": "chat", "manual": "edited by hand"}.get(f["origin"], f["origin"])
 
 
+def _page_list(pages: list[int], most: int = 6) -> str:
+    shown = ", ".join(map(str, pages[:most]))
+    return shown if len(pages) <= most else f"{shown} (+{len(pages) - most} more)"
+
+
 def _brief(f: dict[str, Any]) -> dict[str, Any]:
     out = {
         "fact_id": f["id"],
         "statement": f["statement"],
         "sessions": f"{f['valid_from']}-{'' if f['valid_to'] is None else f['valid_to']}",
-        "source": _origin(f) + (f" p. {', '.join(map(str, f['pages']))}" if f["pages"] else ""),
+        "source": _origin(f) + (f" p. {_page_list(f['pages'])}" if f["pages"] else ""),
     }
     if f["attribute"]:
         out["attribute"] = f["attribute"]
