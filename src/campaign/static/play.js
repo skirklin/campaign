@@ -7,7 +7,8 @@
 // writes into `this.sheet` and the debounced save sends it; HP and rests go
 // through the server's endpoints, which apply the rules there.
 
-import { api, h, toast, sign } from "./util.js";
+import { api, h, toast, sign, bottomSheet, keypad, askQty } from "./util.js";
+import { StashView } from "./stash.js";
 import { SheetView, ABILITIES, ABILITY_NAMES, SKILLS, CONDITIONS, COINS } from "./sheet.js";
 
 const TABS = [
@@ -222,12 +223,39 @@ export class PlayView extends SheetView {
       }, h("strong", s.currency[c] || 0), h("span", c))))),
       block("Inventory", s.inventory.length === 0 ? h("p.empty", "Nothing carried.") : h("div.play-list", s.inventory.map((item) =>
         h("div.play-row.item",
-          h("span.row-main", h("span", item.name || "Item", item.equipped && h("small.equipped", " equipped"), item.attuned && h("small.equipped", " attuned")),
+          h("button.link.row-main", { onclick: () => this.itemSheet(item), "aria-label": `${item.name}: more` },
+            h("span", item.name || "Item", item.equipped && h("small.equipped", " equipped"), item.attuned && h("small.equipped", " attuned")),
             item.notes && h("small.muted", item.notes)),
           this.stepper(item.qty, (n) => { item.qty = Math.max(0, n); this.changed(`${item.name} ×${item.qty}`); }))))),
+      this.stash().el,
       s.features.length > 0 && block("Features & traits", h("ul.play-bullets", s.features.map((f) => h("li", f)))),
       s.proficiencies.length > 0 && block("Proficiencies & languages", h("p", s.proficiencies.join(", "))),
     ];
+  }
+
+  // The party stash, taking into and putting in from this character. Kept across redraws.
+  stash() {
+    if (!this.canEdit) return { el: null };
+    return (this.stashView ||= new StashView(this.campaign.slug, {
+      character: this.id,
+      beforeMove: () => this.flush(),
+      onCharacter: (r) => {
+        Object.assign(this, { sheet: r.sheet, derived: r.derived, log: r.log });
+        this.renderPanel();
+      },
+    }));
+  }
+
+  itemSheet(item) {
+    const dialog = bottomSheet(item.name || "Item",
+      item.notes ? h("p", item.notes) : h("p.muted", "No notes. Add them in Edit."),
+      this.canEdit && h("button.wide", {
+        onclick: async () => {
+          dialog.close();
+          const n = await askQty(`Put ${item.name} in the party stash`, item.qty, "Put in the stash");
+          if (n) this.stash().move("stash", { [item.name]: n });
+        },
+      }, "Put in the party stash"));
   }
 
   notesTab() {
@@ -301,39 +329,13 @@ export class PlayView extends SheetView {
 
   // -- bottom sheets ---------------------------------------------------------
 
-  sheetDialog(title, ...body) {
-    const dialog = h("dialog.bottom-sheet",
-      h("div.sheet-grip"),
-      h("div.sheet-title", h("h2", title), h("button.icon", { onclick: () => dialog.close(), "aria-label": "Close" }, "×")),
-      ...body);
-    dialog.addEventListener("close", () => dialog.remove());
-    // Tapping the backdrop closes it.
-    dialog.addEventListener("click", (e) => { if (e.target === dialog) dialog.close(); });
-    document.body.append(dialog);
-    dialog.showModal();
-    return dialog;
-  }
-
-  // A keypad, so the phone's keyboard doesn't cover the sheet.
-  keypad(onAmount) {
-    let amount = "";
-    const display = h("div.keypad-display", "0");
-    const press = (k) => {
-      amount = k === "⌫" ? amount.slice(0, -1) : k === "C" ? "" : (amount + k).replace(/^0+/, "").slice(0, 4);
-      display.textContent = amount || "0";
-      onAmount(Number(amount) || 0);
-    };
-    return [display, h("div.keypad", ["1", "2", "3", "4", "5", "6", "7", "8", "9", "C", "0", "⌫"].map((k) =>
-      h("button", { onclick: () => press(k) }, k)))];
-  }
-
   hpSheet() {
     const hp = this.sheet.hp;
     let amount = 0;
     const go = (fn) => () => { if (!amount) return; dialog.close(); fn(amount); };
-    const dialog = this.sheetDialog("Hit points",
+    const dialog = bottomSheet("Hit points",
       h("p.hp-summary", h("strong", hp.current), ` / ${hp.max}`, hp.temp ? h("span.hp-temp", ` +${hp.temp} temp`) : ""),
-      ...this.keypad((n) => (amount = n)),
+      ...keypad((n) => (amount = n)),
       h("div.hp-buttons",
         h("button.danger-solid", { onclick: go((n) => this.action("POST", `/api/characters/${this.id}/hp`, { delta: -n })) }, "Damage"),
         h("button.ok-solid", { onclick: go((n) => this.action("POST", `/api/characters/${this.id}/hp`, { delta: n })) }, "Heal"),
@@ -353,11 +355,12 @@ export class PlayView extends SheetView {
       this.changed(`${dir > 0 ? "+" : "−"}${amount} ${coin}`);
       this.renderPanel();
     };
-    const dialog = this.sheetDialog(`${coin.toUpperCase()}: ${cur[coin] || 0}`,
-      ...this.keypad((n) => (amount = n)),
+    const dialog = bottomSheet(`${coin.toUpperCase()}: ${cur[coin] || 0}`,
+      ...keypad((n) => (amount = n)),
       h("div.hp-buttons",
         h("button.danger-solid", { onclick: go(-1) }, "Spend"),
-        h("button.ok-solid", { onclick: go(1) }, "Gain")));
+        h("button.ok-solid", { onclick: go(1) }, "Gain"),
+        h("button", { onclick: () => { if (!amount) return; dialog.close(); this.stash().move("stash", {}, { [coin]: amount }); } }, "To stash")));
   }
 
   conditionSheet() {
@@ -374,7 +377,7 @@ export class PlayView extends SheetView {
         this.renderHead();
       },
     }, c)));
-    this.sheetDialog("Conditions", grid);
+    bottomSheet("Conditions", grid);
   }
 
   rest(long) {

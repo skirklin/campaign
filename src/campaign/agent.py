@@ -35,6 +35,8 @@ sources:
   overviews, timeline for how something changed, and recent_journal and
   list_sessions for what happened when.
 - Player character sheets: get_character, update_character.
+- The party stash, what the party holds in common (loot nobody has
+  claimed, the shared purse): get_party_stash, update_party_stash.
 
 Answer from the tools, not from memory of the published adventure: this
 table may have changed things, and editions differ. Say "now" vs "before"
@@ -99,7 +101,8 @@ Work in this order:
    5-20 entries, naming the entities involved.
 6. Update a character sheet only if it already exists and the transcript
    states the change outright (gold found, items gained, a level up). Say
-   in `reason` where it came from.
+   in `reason` where it came from. Loot the party takes without anyone
+   claiming it goes in the party stash (update_party_stash) instead.
 7. Finish by calling finish_session exactly once with a short title and a
    recap a player could read before the next session.
 

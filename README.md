@@ -113,6 +113,17 @@ localhost without it, unless you pass `--no-auth`. With sign-in on:
   with **Copy to campaign…**: the copy changes on its own and links back
   to the original. The top-level **Characters** page lists yours across
   campaigns.
+- **The party stash** is on the Party tab and on the Play view's Gear tab:
+  the shared purse, plus loot nobody has claimed yet. It's the party's
+  shared bag, so anyone in the campaign can change it, whatever their
+  access, and its history shows who did what. **Take** moves an item or
+  coin into a character's inventory, and an item's **Put in the party
+  stash** moves it back. Both need the right to change that character, and
+  both are logged on the stash and the sheet. Coin is added and spent as
+  changes, so two people at once both count. Other edits are refused if
+  someone changed the stash in the meantime, rather than overwriting it.
+  Session ingests and chat record unclaimed loot there
+  (`get_party_stash`, `update_party_stash`).
 - **Paper sheets can be scanned in.** On the Party tab, **From a scan or
   PDF…** takes a photo or PDF of a filled-in sheet; Claude reads it into a
   new character (`CAMPAIGN_SHEET_MODEL`, default `CAMPAIGN_MODEL`) and lists

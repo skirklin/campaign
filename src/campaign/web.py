@@ -39,7 +39,7 @@ from .auth import install as install_auth
 from .mcp_server import remote_server
 from .oauth import Provider
 from .oauth import install as install_oauth
-from .charsheet import CharacterSheet, apply_hp, rest
+from .charsheet import CharacterSheet, PartyStash, apply_hp, move, rest
 from .db import Campaign, Store
 from .jobs import JobLoop
 from .library import add_reference, reindex
@@ -78,6 +78,23 @@ class HpChange(BaseModel):
 
 class RestRequest(BaseModel):
     long: bool = True
+
+
+class StashUpdate(BaseModel):
+    stash: dict[str, Any]
+    reason: str = "edited"
+    version: int | None = None  # the version it was edited from; refused if the stash has moved on
+
+
+class CoinChange(BaseModel):
+    currency: dict[str, int]  # gains positive, spending negative
+
+
+class StashMove(BaseModel):
+    character: int
+    to: str  # "character": take from the stash; "stash": put in
+    items: dict[str, int] = {}
+    currency: dict[str, int] = {}
 
 
 class NewFact(BaseModel):
@@ -968,6 +985,76 @@ def create_app(
         sheet = CharacterSheet.model_validate(ch["sheet"])
         rest(sheet, body.long)
         return save(s, request, ch, sheet, "long rest" if body.long else "short rest")
+
+    # -- the party stash -----------------------------------------------------------
+    # What the party holds in common. It's the party's shared bag, so anyone
+    # in the campaign can change it, whatever their access; every change is
+    # logged with who made it. Moving things between it and a character also
+    # needs the right to change that character.
+
+    def stash_payload(s: Store, request: Request, c: Campaign) -> dict[str, Any]:
+        party = s.characters(campaign_ids=[c.id])
+        return {
+            "stash": PartyStash.model_validate(s.party_stash(c.id)).model_dump(),
+            "version": s.party_stash_version(c.id),
+            "log": s.party_stash_log(c.id),
+            "characters": [{"id": ch["id"], "name": ch["name"], "can_edit": character_rights(s, request, ch)[1]}
+                           for ch in party],
+        }
+
+    def user_id(request: Request) -> int | None:
+        return None if local else user_of(request)["id"]
+
+    @app.get("/api/campaigns/{slug}/stash")
+    def get_stash(request: Request, c: Campaign = Depends(reader), s: Store = Depends(store)) -> dict[str, Any]:
+        return stash_payload(s, request, c)
+
+    @app.put("/api/campaigns/{slug}/stash")
+    def put_stash(body: StashUpdate, request: Request, c: Campaign = Depends(reader), s: Store = Depends(store)) -> dict:
+        try:
+            stash = PartyStash.model_validate(body.stash)
+        except ValidationError as err:
+            raise HTTPException(422, err.errors(include_url=False, include_context=False))
+        if body.version is not None and body.version != s.party_stash_version(c.id):
+            raise HTTPException(409, "someone else changed the party stash just now; here it is as it stands")
+        s.update_party_stash(c.id, stash.model_dump(), reason=body.reason, user_id=user_id(request))
+        return stash_payload(s, request, c)
+
+    @app.post("/api/campaigns/{slug}/stash/coin")
+    def stash_coin(body: CoinChange, request: Request, c: Campaign = Depends(reader), s: Store = Depends(store)) -> dict:
+        """Add to or spend from the shared purse. A change, not a total, so two at once both count."""
+        stash = PartyStash.model_validate(s.party_stash(c.id))
+        purse = dict(stash.currency)
+        for coin, delta in body.currency.items():
+            if purse.get(coin, 0) + delta < 0:
+                raise HTTPException(422, f"the party only has {purse.get(coin, 0)} {coin}")
+            purse[coin] = purse.get(coin, 0) + delta
+        stash.currency = purse
+        what = ", ".join(f"{'+' if d > 0 else '−'}{abs(d)} {coin}" for coin, d in body.currency.items() if d)
+        if not what:
+            raise HTTPException(422, "nothing to change")
+        s.update_party_stash(c.id, stash.model_dump(), reason=what, user_id=user_id(request))
+        return stash_payload(s, request, c)
+
+    @app.post("/api/campaigns/{slug}/stash/move")
+    def move_stash(body: StashMove, request: Request, c: Campaign = Depends(reader), s: Store = Depends(store)) -> dict:
+        """Take things from the stash into a character's inventory, or put them in."""
+        ch = character_or_404(s, request, body.character, write=True)
+        if ch["campaign_id"] != c.id:
+            raise HTTPException(404, "no such character in this campaign")
+        sheet = CharacterSheet.model_validate(ch["sheet"])
+        stash = PartyStash.model_validate(s.party_stash(c.id))
+        try:
+            what = move(sheet, stash, body.to, body.items, body.currency)
+        except ValueError as err:
+            raise HTTPException(422, str(err))
+        took = body.to == "character"
+        s.update_party_stash(
+            c.id, stash.model_dump(), user_id=user_id(request),
+            reason=f"{sheet.name} {'took' if took else 'put in'} {what}",
+            character=(ch["id"], sheet.model_dump(), f"{'took' if took else 'put'} {what} {'from' if took else 'in'} the party stash"),
+        )
+        return {"stash": stash_payload(s, request, c), "character": sheet_payload(s, request, character_or_404(s, request, ch["id"]))}
 
     # -- static app ------------------------------------------------------------------
 

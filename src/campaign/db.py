@@ -455,6 +455,26 @@ FROM ingests;
 INSERT INTO job_log (job_id, seq, kind, text) SELECT ingest_id, seq, kind, text FROM ingest_log;
 """
 
+# v12: the party stash, what the party holds in common (charsheet.PartyStash),
+# with a log of changes like a character's. One row per campaign, made on
+# first write; a campaign without one has an empty stash.
+V12_PARTY_STASH = """
+CREATE TABLE party_stash (
+    campaign_id  INTEGER PRIMARY KEY REFERENCES campaigns(id) ON DELETE CASCADE,
+    stash        TEXT NOT NULL,             -- JSON: charsheet.PartyStash
+    updated_at   TEXT NOT NULL
+);
+CREATE TABLE party_stash_log (
+    id           INTEGER PRIMARY KEY,
+    campaign_id  INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    change       TEXT NOT NULL,             -- the stash after this change
+    reason       TEXT NOT NULL DEFAULT '',
+    user_id      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at   TEXT NOT NULL
+);
+CREATE INDEX party_stash_log_campaign ON party_stash_log(campaign_id, id);
+"""
+
 # Append only, for changes small enough to migrate.
 #
 # Deploys are rolling: the new server starts, and runs these, while the old
@@ -473,6 +493,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (9, V9_INGESTS),
     (10, V10_CONVERSATIONS),
     (11, V11_JOBS),
+    (12, V12_PARTY_STASH),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 
@@ -619,6 +640,9 @@ class Store:
             for r in old.execute("SELECT l.id, l.character_id, l.change, l.reason, l.created_at FROM character_log l"
                                  " JOIN characters c ON c.id = l.character_id WHERE c.campaign_id IS NOT NULL"):
                 self.conn.execute("INSERT INTO character_log VALUES (?, ?, ?, ?, ?)", tuple(r))
+            if "party_stash" in tables:
+                for r in old.execute("SELECT campaign_id, stash, updated_at FROM party_stash"):
+                    self.conn.execute("INSERT INTO party_stash VALUES (?, ?, ?)", tuple(r))
             if "digests" in tables:
                 for r in old.execute("SELECT * FROM digests"):
                     self.conn.execute("INSERT INTO digests VALUES (?, ?, ?, ?, ?, ?, ?)", tuple(r))
@@ -1392,6 +1416,48 @@ class Store:
     def delete_character(self, character_id: int) -> bool:
         with self.conn:
             return self.conn.execute("DELETE FROM characters WHERE id = ?", (character_id,)).rowcount > 0
+
+    # -- the party stash -----------------------------------------------------
+
+    def party_stash(self, campaign_id: int) -> dict[str, Any]:
+        """The campaign's party stash as stored ({} if nothing's been put in it yet)."""
+        row = self.conn.execute("SELECT stash FROM party_stash WHERE campaign_id = ?", (campaign_id,)).fetchone()
+        return json.loads(row[0]) if row else {}
+
+    def update_party_stash(
+        self, campaign_id: int, stash: dict[str, Any], reason: str = "", user_id: int | None = None,
+        character: tuple[int, dict[str, Any], str] | None = None,
+    ) -> None:
+        """Save the stash; with `character` (id, sheet, reason), save that sheet in the same transaction."""
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO party_stash (campaign_id, stash, updated_at) VALUES (?, ?, ?)"
+                " ON CONFLICT (campaign_id) DO UPDATE SET stash = excluded.stash, updated_at = excluded.updated_at",
+                (campaign_id, json.dumps(stash), now()),
+            )
+            self.conn.execute(
+                "INSERT INTO party_stash_log (campaign_id, change, reason, user_id, created_at) VALUES (?, ?, ?, ?, ?)",
+                (campaign_id, json.dumps(stash), reason, user_id, now()),
+            )
+            if character is not None:
+                character_id, sheet, why = character
+                self.conn.execute(
+                    "UPDATE characters SET sheet = ?, updated_at = ? WHERE id = ?", (json.dumps(sheet), now(), character_id)
+                )
+                self._log_character(character_id, sheet, why)
+
+    def party_stash_version(self, campaign_id: int) -> int:
+        """Changes on each save, so an edit made against an older stash can be refused."""
+        row = self.conn.execute("SELECT MAX(id) FROM party_stash_log WHERE campaign_id = ?", (campaign_id,)).fetchone()
+        return row[0] or 0
+
+    def party_stash_log(self, campaign_id: int, limit: int = 30) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT l.created_at, l.reason, u.email AS who FROM party_stash_log l"
+            " LEFT JOIN users u ON u.id = l.user_id WHERE l.campaign_id = ? ORDER BY l.id DESC LIMIT ?",
+            (campaign_id, limit),
+        )
+        return [dict(r) for r in rows]
 
     def character_log(self, character_id: int, limit: int = 20) -> list[dict[str, Any]]:
         rows = self.conn.execute(

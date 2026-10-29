@@ -4,6 +4,7 @@
 import { api, h, toast, enc, whoami, canEdit, live, streamPost } from "./util.js";
 import { membersTab } from "./people.js";
 import { characterCard, newCharacterForm } from "./sheet.js";
+import { StashView } from "./stash.js";
 
 export async function campaignList() {
   const [campaigns, info] = await Promise.all([api("GET", "/api/campaigns"), api("GET", "/api/info").catch(() => null)]);
@@ -181,8 +182,10 @@ async function partyTab(c) {
   const elsewhere = mine.filter((x) => x.mine && x.campaign.slug !== c.slug);
   const pick = h("select", { "aria-label": "Character to copy" },
     elsewhere.map((x) => h("option", { value: x.id }, `${x.name} (${x.campaign.name})`)));
+  const stash = new StashView(c.slug);
   return h("div",
     cards,
+    h("div.stash-wrap", stash.el),
     h("h2.section-title", "Add a character"),
     newCharacterForm([], c),
     scanForm(c, jobs),

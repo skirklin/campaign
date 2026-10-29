@@ -231,3 +231,40 @@ def test_character_from_a_scan(client, monkeypatch):
                                          files={"file": ("ireth.png", b"png")}).json()["job"])
     assert again["state"] == "failed" and "already has a character called Ireth" in again["error"]
     assert client.post(f"/api/campaigns/strahd/jobs/{again['id']}/retry").status_code == 202
+
+
+def test_party_stash(client):
+    client.post("/api/campaigns", json={"name": "Strahd"})
+    cid = client.post("/api/characters/import", files={"file": ("c.json", EXAMPLE.read_bytes())},
+                      data={"campaign": "strahd"}).json()["id"]
+    r = client.get("/api/campaigns/strahd/stash").json()
+    assert r["stash"]["items"] == [] and r["version"] == 0
+    assert r["characters"] == [{"id": cid, "name": "Brannoc Ashvale", "can_edit": True}]
+
+    r = client.put("/api/campaigns/strahd/stash", json={
+        "stash": {"items": [{"name": "Potion of healing", "qty": 3}]}, "reason": "added potions", "version": 0})
+    assert r.status_code == 200
+    version = r.json()["version"]
+    # An edit made against an older stash is refused rather than undoing the newer one.
+    stale = client.put("/api/campaigns/strahd/stash", json={"stash": {"items": []}, "version": 0})
+    assert stale.status_code == 409
+    assert client.put("/api/campaigns/strahd/stash", json={"stash": {"items": [{"qty": 1}]}}).status_code == 422
+
+    # Coin goes in and out as changes, never below zero.
+    assert client.post("/api/campaigns/strahd/stash/coin", json={"currency": {"gp": 50}}).json()["stash"]["currency"]["gp"] == 50
+    assert client.post("/api/campaigns/strahd/stash/coin", json={"currency": {"gp": -60}}).status_code == 422
+
+    # Taking moves it into the character's inventory, logged on both.
+    r = client.post("/api/campaigns/strahd/stash/move",
+                    json={"character": cid, "to": "character", "items": {"Potion of healing": 2}, "currency": {"gp": 20}})
+    assert r.status_code == 200
+    assert r.json()["stash"]["stash"]["items"] == [{"name": "Potion of healing", "qty": 1, "notes": ""}]
+    assert r.json()["stash"]["version"] > version
+    sheet = r.json()["character"]["sheet"]
+    assert next(i for i in sheet["inventory"] if i["name"] == "Potion of healing")["qty"] == 4
+    assert sheet["currency"]["gp"] == 58
+    assert r.json()["character"]["log"][0]["reason"] == "took Potion of healing ×2, 20 gp from the party stash"
+    assert r.json()["stash"]["log"][0]["reason"] == "Brannoc Ashvale took Potion of healing ×2, 20 gp"
+    bad = client.post("/api/campaigns/strahd/stash/move", json={"character": cid, "to": "stash", "items": {"Lute": 1}})
+    assert bad.status_code == 422 and "only 0" in bad.json()["detail"]
+

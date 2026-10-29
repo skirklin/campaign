@@ -153,6 +153,75 @@ class CharacterSheet(Model):
         return out
 
 
+class StashItem(Model):
+    name: str
+    qty: int = Field(default=1, ge=0)
+    notes: str = ""
+
+
+class PartyStash(Model):
+    """What the party holds in common: loot nobody has claimed, the shared purse."""
+
+    items: list[StashItem] = []
+    currency: dict[str, int] = Field(
+        default_factory=lambda: {"cp": 0, "sp": 0, "ep": 0, "gp": 0, "pp": 0}
+    )
+
+
+def move(
+    sheet: CharacterSheet, stash: PartyStash, to: str,
+    items: dict[str, int] | None = None, currency: dict[str, int] | None = None,
+) -> str:
+    """Move items (by name) and coin between a character and the party stash.
+
+    `to` is "character" (taking from the stash) or "stash" (putting in).
+    Items stack by name, case-insensitively. Raises ValueError, changing
+    nothing, if the giver doesn't have enough. Returns what moved, in words.
+    """
+    if to not in ("character", "stash"):
+        raise ValueError("to must be 'character' or 'stash'")
+    src_items, dst_items = (stash.items, sheet.inventory) if to == "character" else (sheet.inventory, stash.items)
+    src_coin, dst_coin = (stash.currency, sheet.currency) if to == "character" else (sheet.currency, stash.currency)
+    src_items = [i.model_copy() for i in src_items]
+    dst_items = [i.model_copy() for i in dst_items]
+    src_coin, dst_coin = dict(src_coin), dict(dst_coin)
+    dst_type = Item if to == "character" else StashItem
+    moved = []
+
+    def find(lst: list[Any], name: str) -> Any:
+        return next((i for i in lst if i.name.strip().lower() == name.strip().lower()), None)
+
+    for name, qty in (items or {}).items():
+        if qty <= 0:
+            continue
+        have = find(src_items, name)
+        if have is None or have.qty < qty:
+            raise ValueError(f"only {have.qty if have else 0} × {name} to give")
+        have.qty -= qty
+        if have.qty == 0:
+            src_items.remove(have)
+        if (there := find(dst_items, name)) is not None:
+            there.qty += qty
+        else:
+            dst_items.append(dst_type(name=have.name, qty=qty, notes=have.notes))
+        moved.append(f"{have.name}{f' ×{qty}' if qty != 1 else ''}")
+    for coin, n in (currency or {}).items():
+        if n <= 0:
+            continue
+        if src_coin.get(coin, 0) < n:
+            raise ValueError(f"only {src_coin.get(coin, 0)} {coin} to give")
+        src_coin[coin] -= n
+        dst_coin[coin] = dst_coin.get(coin, 0) + n
+        moved.append(f"{n} {coin}")
+    if not moved:
+        raise ValueError("nothing to move")
+    if to == "character":
+        stash.items, sheet.inventory, stash.currency, sheet.currency = src_items, dst_items, src_coin, dst_coin
+    else:
+        sheet.inventory, stash.items, sheet.currency, stash.currency = src_items, dst_items, src_coin, dst_coin
+    return ", ".join(moved)
+
+
 def apply_hp(sheet: CharacterSheet, delta: int) -> None:
     """Damage (negative) comes off temp HP first; healing (positive) caps at max."""
     hp = sheet.hp.model_copy()

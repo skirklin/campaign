@@ -155,6 +155,26 @@ def test_character_sheets_belong_to_their_players(site):
     assert bob.get(f"/api/characters/{copy['id']}").status_code == 404
 
 
+def test_the_party_stash_is_the_whole_partys(site):
+    dm, _ = setup_campaign(site)
+    alice, _, _ = join(site, dm, "alice@example.com")  # a player with viewer access
+    bob, _, _ = join(site, dm, "bob@example.com")
+    ireth = alice.post("/api/characters", json={"name": "Ireth", "campaign": "strahd"}).json()["id"]
+    # Anyone in the party can put things in and change it, whatever their access.
+    assert alice.post("/api/campaigns/strahd/stash/coin", json={"currency": {"gp": 30}}).status_code == 200
+    log = bob.get("/api/campaigns/strahd/stash").json()["log"]
+    assert log[0]["who"] == "alice@example.com"
+    # Moving things in and out of a sheet needs the right to change that sheet.
+    take = {"character": ireth, "to": "character", "currency": {"gp": 10}}
+    assert bob.post("/api/campaigns/strahd/stash/move", json=take).status_code == 403
+    assert alice.post("/api/campaigns/strahd/stash/move", json=take).status_code == 200
+    assert dm.post("/api/campaigns/strahd/stash/move", json=take).status_code == 200
+    assert [c["can_edit"] for c in bob.get("/api/campaigns/strahd/stash").json()["characters"]] == [False]
+    # Outsiders can't see it.
+    carol = site.user("carol@example.com")
+    assert carol.get("/api/campaigns/strahd/stash").status_code == 404
+
+
 def test_admin_pages(site):
     dm, _ = setup_campaign(site)
     player, _, _ = join(site, dm, "pc@example.com")
