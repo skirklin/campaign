@@ -208,7 +208,8 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         """
         overview = kind is None and query is None and not in_play_only
         rows = world.list(kind=kind, q=query, in_play=in_play_only or overview)
-        if overview:
+        if overview:  # the party, whether or not anything has happened to them yet
+            rows = world.list(kind="pc") + [r for r in rows if r["kind"] != "pc"]
             counts: dict[str, int] = {}
             for r in world.list():
                 counts[r["kind"]] = counts.get(r["kind"], 0) + 1

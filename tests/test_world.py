@@ -275,6 +275,8 @@ def test_a_shared_title_doesnt_snowball_entities_together():
     ], key="v1")
     names = {r["name"] for r in w.list()}
     assert names == {"Gaius", "Sydon", "Heleka", "boar", "Dread Boar", "Lutheria", "Lutherian guard"}
+    from campaign.world import _page_list
+    assert _page_list(list(range(1, 11))) == "1, 2, 3, 4, 5, 6 (+4 more)"
     assert w.resolve("Lutheria")["kind"] == "location"  # its own name wins over someone's alias
     assert w.resolve("Sydon")["name"] == "Sydon"
 
@@ -334,3 +336,20 @@ def test_table_rolls_land_on_the_printed_rows():
     assert covers("18+", 20, 20) and not covers("18+", 17, 20)
     assert covers("1, 2", 2, 6) and covers("3–4", 4, 6) and not covers("5", 6, 6)
     assert 2 <= roll("2d6") <= 12 and 1 <= roll("d%") <= 100
+
+
+def test_the_same_name_with_another_epithet_is_one_entity():
+    store = Store(":memory:")
+    camp = store.create_campaign("Titans", "dm")
+    src = store.add_source(camp, "Book", "module", [{"heading": "", "text": "x", "page": 1}])
+    w = World(store, camp)
+    w.apply_book(src, [
+        _entry("Sydon, Lord of Storms"), _entry("Sydon, The Lord of Storms"),
+        _entry("Versi the Oracle"), _entry("Versi, the Oracle"),
+        _entry("Mytros, the Goddess of Dawn"), _entry("Mytros", "location"),
+        _entry("Estor Arkelander"), _entry("Telamok Arkelander"),
+    ], key="v1")
+    assert sorted(r["name"] for r in w.list()) == [
+        "Estor Arkelander", "Mytros", "Mytros, the Goddess of Dawn", "Sydon, Lord of Storms",
+        "Telamok Arkelander", "Versi the Oracle",
+    ]
