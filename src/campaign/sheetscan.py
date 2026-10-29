@@ -1,21 +1,22 @@
 """Read a character sheet from a scan or a filled-in PDF.
 
-Claude reads the document and returns the sheet in a fixed shape
-(structured output), which is then turned into a CharacterSheet. The scan
-schema spells out abilities and coins as fields, since structured outputs
-can't take open-ended maps; anything Claude couldn't make out is listed
+Claude reads the document and answers with the sheet as JSON in a fixed
+shape (ScannedSheet, checked on arrival), which is then turned into a
+CharacterSheet. The scan schema spells out abilities and coins as fields
+rather than open-ended maps; anything Claude couldn't make out is listed
 rather than guessed.
 """
 
 from __future__ import annotations
 
 import base64
+import json
 import os
 from pathlib import Path
 from typing import Any, Callable
 
 import anthropic
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from .charsheet import ABILITIES, SKILLS, Attack, CharacterSheet, ClassLevel, HitPoints, Item, Resource, Spell
 from .digest import fallback_params
@@ -96,6 +97,12 @@ class ScannedSheet(Model):
     unreadable: list[str]
 
 
+# The answer's shape, spelled out for Claude (it's checked against ScannedSheet when it arrives).
+SYSTEM += (
+    "\nAnswer with only a JSON object matching this JSON Schema, with no other text:\n"
+    + json.dumps(ScannedSheet.model_json_schema(), separators=(",", ":"))
+)
+
 ABILITY_NAMES = dict(zip(("strength", "dexterity", "constitution", "intelligence", "wisdom", "charisma"), ABILITIES))
 
 
@@ -151,38 +158,61 @@ def check_upload(data: bytes, filename: str) -> str:
     return media_type
 
 
+def _json_object(text: str) -> str:
+    """The JSON object in a reply, without any fence or words around it."""
+    start, end = text.find("{"), text.rfind("}")
+    return text[start:end + 1] if start >= 0 and end > start else text
+
+
 def read_sheet(
     data: bytes, filename: str, client: Any = None, model: str = MODEL,
     check: Callable[[], None] | None = None, on_thinking: Callable[[str], None] | None = None,
 ) -> tuple[CharacterSheet, list[str]]:
     """Read the sheet. `check` is called as the answer streams in and may raise to stop;
-    `on_thinking` gets Claude's thinking as it goes, to show progress."""
+    `on_thinking` gets Claude's thinking as it goes, to show progress.
+
+    The answer is plain JSON checked against ScannedSheet, not a constrained
+    structured output: the sheet's schema is too big for the API to compile
+    into a grammar. A reply that doesn't fit gets one chance to be corrected.
+    """
     media_type = check_upload(data, filename)
     block_type = "document" if media_type == "application/pdf" else "image"
     source = {"type": "base64", "media_type": media_type, "data": base64.standard_b64encode(data).decode()}
     client = client or anthropic.Anthropic()
-    with client.beta.messages.stream(
-        model=model,
-        max_tokens=32000,
-        system=SYSTEM,
-        messages=[{"role": "user", "content": [
-            {"type": block_type, "source": source},
-            {"type": "text", "text": "Read this character sheet."},
-        ]}],
-        output_format=ScannedSheet,
-        thinking={"type": "adaptive"},
-        output_config={"effort": "medium"},
-        **fallback_params(model),
-    ) as stream:
-        for event in stream:
-            if check:
-                check()
-            delta = getattr(event, "delta", None)
-            if on_thinking and getattr(delta, "type", None) == "thinking_delta":
-                on_thinking(delta.thinking)
-        msg = stream.get_final_message()
-    if msg.stop_reason == "refusal":
-        raise ScanError("Claude declined to read this file")
-    if msg.stop_reason == "max_tokens" or msg.parsed_output is None:
-        raise ScanError("couldn't read a character sheet from this file")
-    return to_sheet(msg.parsed_output)
+    messages: list[dict[str, Any]] = [{"role": "user", "content": [
+        {"type": block_type, "source": source},
+        {"type": "text", "text": "Read this character sheet."},
+    ]}]
+    for attempt in range(2):
+        with client.beta.messages.stream(
+            model=model,
+            max_tokens=32000,
+            system=SYSTEM,
+            messages=messages,
+            thinking={"type": "adaptive", "display": "summarized"},
+            output_config={"effort": "medium"},
+            **fallback_params(model),
+        ) as stream:
+            for event in stream:
+                if check:
+                    check()
+                delta = getattr(event, "delta", None)
+                if on_thinking and getattr(delta, "type", None) == "thinking_delta" and delta.thinking:
+                    on_thinking(delta.thinking)
+            msg = stream.get_final_message()
+        if msg.stop_reason == "refusal":
+            raise ScanError("Claude declined to read this file")
+        if msg.stop_reason == "max_tokens":
+            raise ScanError("the sheet's answer ran too long to finish")
+        text = "".join(b.text for b in msg.content if b.type == "text")
+        try:
+            return to_sheet(ScannedSheet.model_validate_json(_json_object(text)))
+        except ValidationError as err:
+            if attempt:
+                raise ScanError(f"couldn't read a character sheet from this file ({err.error_count()} problems)") from err
+            messages += [
+                {"role": "assistant", "content": msg.content},
+                {"role": "user", "content": f"That doesn't match the schema:\n{err}\n"
+                                            "Reply again with only the corrected JSON object."},
+            ]
+    raise AssertionError("unreachable")

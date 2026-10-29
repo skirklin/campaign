@@ -168,6 +168,8 @@ def run_scan(run: Run) -> dict[str, Any]:
             )
         except sheetscan.ScanError as err:
             raise Permanent(str(err)) from err
+        except sheetscan.anthropic.BadRequestError as err:  # the same request would be refused again
+            raise Permanent(f"Claude's API refused the request: {err.message}") from err
         run.save_input(sheet=sheet.model_dump(), unreadable=unreadable)
     sheet = CharacterSheet.model_validate(run.input["sheet"])
     unreadable = run.input["unreadable"]

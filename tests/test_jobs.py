@@ -1,7 +1,9 @@
 """Jobs (session ingests, sheet scans): worked through by a loop that can be interrupted, retried and cancelled."""
 
+import json
 import time
 
+import httpx2 as httpx
 import pytest
 
 from campaign import agent as agent_mod
@@ -154,11 +156,16 @@ class Delta:
         self.delta = type("D", (), {"type": "thinking_delta", "thinking": thinking})()
 
 
-def scan_client(monkeypatch, scan=SCAN, events=("Looking at the sheet. ", "Wizard 3.")):
-    """A fake Claude that streams some thinking, then returns `scan`. Returns the list of calls made."""
+def scan_client(monkeypatch, *replies, events=("Looking at the sheet. ", "Wizard 3.")):
+    """A fake Claude that streams some thinking, then answers with each of `replies` in turn
+    (default: SCAN as JSON, wrapped in a few words). Returns the list of calls made."""
+    replies = list(replies) or [f"Here it is:\n```json\n{SCAN.model_dump_json()}\n```"]
     calls = []
 
     class Stream:
+        def __init__(self, reply):
+            self.reply = reply
+
         def __enter__(self):
             return self
 
@@ -169,15 +176,16 @@ def scan_client(monkeypatch, scan=SCAN, events=("Looking at the sheet. ", "Wizar
             return iter([Delta(t) for t in events])
 
         def get_final_message(self):
-            return type("M", (), {"stop_reason": "end_turn", "parsed_output": scan})()
+            content = [type("B", (), {"type": "text", "text": self.reply})()]
+            return type("M", (), {"stop_reason": "end_turn", "content": content})()
 
     class Client:
         class beta:
             class messages:
                 @staticmethod
                 def stream(**kw):
-                    calls.append(kw)
-                    return Stream()
+                    calls.append({**kw, "messages": list(kw["messages"])})
+                    return Stream(replies[min(len(calls), len(replies)) - 1])
 
     monkeypatch.setattr(sheetscan.anthropic, "Anthropic", lambda: Client())
     return calls
@@ -206,6 +214,8 @@ def test_a_scan_becomes_a_character(scan_job, monkeypatch):
     assert sheet["skill_proficiencies"] == ["arcana", "history"] and sheet["currency"]["gp"] == 12
     assert sheet["notes"].startswith("Has a cat.") and "Wisdom score; skill: Basket weaving" in sheet["notes"]
     assert calls[0]["messages"][0]["content"][0]["type"] == "document"
+    assert calls[0]["thinking"]["display"] == "summarized"  # else the thinking shown as progress is empty
+    assert "output_format" not in calls[0] and '"unreadable"' in calls[0]["system"]  # plain JSON, schema in the prompt
     assert [(e["kind"], e["text"]) for e in s.job_log(job_id)] == [
         ("status", "Claude is reading ireth.pdf…"), ("text", "Looking at the sheet. Wizard 3."), ("status", "Made Ireth."),
     ]
@@ -245,6 +255,44 @@ def test_an_interrupted_scan_is_redone_without_doubling_anything(scan_job, monke
     job = s.job(job_id)
     assert job["state"] == "done" and len(calls) == 2
     assert [c["name"] for c in s.characters([camp.id])] == ["Ireth"] == [job["result"]["name"]]
+
+
+def test_an_answer_that_does_not_fit_gets_one_chance_to_be_corrected(scan_job, monkeypatch):
+    s, camp, db, job_id, _ = scan_job
+    bad = SCAN.model_dump()
+    del bad["abilities"]
+    calls = scan_client(monkeypatch, json.dumps(bad), SCAN.model_dump_json())
+    loop = JobLoop(db)
+    assert loop.pass_once() and s.job(job_id)["state"] == "done"
+    assert len(calls) == 2
+    second = calls[1]["messages"]
+    assert second[1]["role"] == "assistant" and "abilities" in second[2]["content"]
+
+    # Wrong twice: that's not a sheet Claude can read, and asking again won't change it.
+    job_id = s.add_job(camp, "scan", {"blob": s.blobs.put(b"%PDF-1.7"), "name": "doodle.pdf"}, None)
+    scan_client(monkeypatch, "I see a drawing of a dragon.")
+    assert loop.pass_once()
+    job = s.job(job_id)
+    assert job["state"] == "failed" and job["attempts"] == 1 and "couldn't read a character sheet" in job["error"]
+
+
+def test_a_request_the_api_refuses_fails_at_once(scan_job, monkeypatch):
+    s, camp, db, job_id, _ = scan_job
+    response = httpx.Response(400, request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"))
+
+    class Client:
+        class beta:
+            class messages:
+                @staticmethod
+                def stream(**kw):
+                    raise sheetscan.anthropic.BadRequestError("The compiled grammar is too large", response=response,
+                                                              body=None)
+
+    monkeypatch.setattr(sheetscan.anthropic, "Anthropic", lambda: Client())
+    assert JobLoop(db).pass_once()
+    job = s.job(job_id)
+    assert job["state"] == "failed" and job["attempts"] == 1 and job["retry_at"] is None
+    assert "compiled grammar is too large" in job["error"]
 
 
 def test_scan_failures_that_retrying_cannot_fix_fail_at_once(scan_job, monkeypatch):
