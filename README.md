@@ -96,6 +96,10 @@ localhost without it, unless you pass `--no-auth`. With sign-in on:
   with **Copy to campaign…**: the copy changes on its own and links back
   to the original. The top-level **Characters** page lists yours across
   campaigns.
+- **Paper sheets can be scanned in.** On the Party tab, **From a scan or
+  PDF…** takes a photo or PDF of a filled-in sheet; Claude reads it into a
+  new character (`CAMPAIGN_SHEET_MODEL`, default `CAMPAIGN_MODEL`) and lists
+  anything it couldn't make out, so you can correct those by hand.
 - **An admin page** manages users and app-wide invites.
 [docs/deploy.md](docs/deploy.md) covers running it on the homelab cluster:
 the container image, Kubernetes manifests, the Caddy route, and the

@@ -74,6 +74,7 @@ async function partyTab(c) {
       party.map((x) => characterCard(x))),
     h("h2.section-title", "Add a character"),
     newCharacterForm([], c),
+    scanForm(c),
     elsewhere.length > 0 && h("form.inline-form", {
       onsubmit: async (e) => {
         e.preventDefault();
@@ -87,6 +88,30 @@ async function partyTab(c) {
     }, h("span.muted", "Or bring one of yours from another campaign:"), pick, h("button", { type: "submit" }, "Copy here")),
     elsewhere.length > 0 && h("p.muted.small", "A copy is a separate sheet: changes here don't touch the original."),
   );
+}
+
+// Upload a scan or PDF of a paper sheet; Claude reads it into a new character.
+function scanForm(c) {
+  const file = h("input", { type: "file", accept: ".pdf,.png,.jpg,.jpeg,.webp", hidden: true });
+  const btn = h("button", { type: "button", onclick: () => file.click() }, "From a scan or PDF…");
+  file.addEventListener("change", async () => {
+    const fd = new FormData();
+    fd.append("file", file.files[0]);
+    btn.disabled = true;
+    btn.textContent = "Reading the sheet…";
+    try {
+      const r = await api("POST", `/api/campaigns/${c.slug}/characters/from-scan`, fd);
+      if (r.unreadable.length) toast(`Check these, they weren't clear: ${r.unreadable.join("; ")}`);
+      location.hash = `#/characters/${r.id}`;
+    } catch (err) {
+      toast(err.message, true);
+      btn.disabled = false;
+      btn.textContent = "From a scan or PDF…";
+    }
+    file.value = "";
+  });
+  return h("p.inline-form", btn, file,
+    h("span.muted.small", "A photo or PDF of a paper sheet. Claude reads it into a new character you can then correct."));
 }
 
 // -- sessions & ingest ---------------------------------------------------------

@@ -29,7 +29,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
-from . import digest
+from . import digest, sheetscan
 from .accounts import Accounts, at_least
 from .auth import AuthConfig
 from .auth import install as install_auth
@@ -709,6 +709,17 @@ def create_app(db: Path | str, auth: AuthConfig | None = None, exchange: Callabl
             raise HTTPException(422, str(err))
         campaign_id = campaign_for_new_character(s, request, campaign or None)
         return create(s, request, sheet, campaign_id, f"imported {file.filename}")
+
+    @app.post("/api/campaigns/{slug}/characters/from-scan", status_code=201)
+    def character_from_scan(
+        request: Request, file: UploadFile = File(...), c: Campaign = Depends(reader), s: Store = Depends(store),
+    ) -> dict[str, Any]:
+        """Make a character from a scan or PDF of a paper sheet. Claude reads it; takes a few seconds."""
+        try:
+            sheet, unreadable = sheetscan.read_sheet(file.file.read(sheetscan.MAX_BYTES + 1), file.filename or "")
+        except sheetscan.ScanError as err:
+            raise HTTPException(422, str(err))
+        return create(s, request, sheet, c.id, f"read from {file.filename}") | {"unreadable": unreadable}
 
     @app.post("/api/characters/{character_id}/copy", status_code=201)
     def copy_character(character_id: int, body: CopyCharacter, request: Request, s: Store = Depends(store)) -> dict:
