@@ -312,3 +312,25 @@ def test_lookup_and_find_entities_stay_a_readable_size():
     assert page["total"] == 100 and len(page["entities"]) == PAGE and page["next_offset"] == PAGE
     rest = json.loads(tools["find_entities"](kind="monster", offset=PAGE))
     assert len(rest["entities"]) == 100 - PAGE and "next_offset" not in rest
+
+
+def test_stat_block_tool_prints_the_book_block():
+    from campaign.tools import ToolContext, build_tools
+
+    store, camp, w, src = setup()
+    tools = {t.__name__: t for t in build_tools(ToolContext(store, camp))}
+    text = tools["stat_block"]("the windmill hag")
+    assert text.startswith("Morgantha\nAC 17 · HP 112 · Speed 30 ft. · CR 5")
+    assert "STR 18 (+4)" in text and "DEX 15 (+2)" in text
+    assert "no stat block" in tools["stat_block"]("Ireena")
+
+
+def test_table_rolls_land_on_the_printed_rows():
+    from campaign.tables import covers, roll, row_for
+
+    t = {"dice": "d100", "rows": [{"roll": "01-50", "result": "a"}, {"roll": "51-99", "result": "b"},
+                                  {"roll": "00", "result": "c"}]}
+    assert row_for(t, 1)["result"] == "a" and row_for(t, 99)["result"] == "b" and row_for(t, 100)["result"] == "c"
+    assert covers("18+", 20, 20) and not covers("18+", 17, 20)
+    assert covers("1, 2", 2, 6) and covers("3–4", 4, 6) and not covers("5", 6, 6)
+    assert 2 <= roll("2d6") <= 12 and 1 <= roll("d%") <= 100

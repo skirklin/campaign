@@ -238,9 +238,17 @@ The digest turns a module into two things the assistant can use:
   system prompt. The `outline` tool drills into deeper sections.
 - **A catalog** of NPCs, monsters, locations, items, quests, factions and
   lore. Each entry has aliases ("the hag", "the burgomaster"), pages, key
-  facts with exact numbers, and a stat block where there is one. The catalog
-  becomes the world model's starting state (session 0; see
-  [The world model](#the-world-model)).
+  facts with exact numbers, and a stat block where there is one. Keyed
+  areas carry their map key ("C3", which works as a name), read-aloud text,
+  and traps and checks with their DCs; anything of value is listed as
+  treasure where it lies. The catalog becomes the world model's starting
+  state (session 0; see [The world model](#the-world-model)).
+- **The tables** to roll on: random encounters, treasure, rumors, each row
+  as printed.
+
+For running a session, the chat and MCP tools `stat_block`, `treasure`
+(what's at a place, and what the party has already taken) and `roll_table`
+work from these.
 
 See [How the digest works](#how-the-digest-works) for the caching rules.
 
@@ -384,7 +392,7 @@ that tree bottom-up (`digest.py`):
 
 - **Leaves** are sections' own text, split into parts above ~40k characters.
   Runs of small sibling sections are packed into one call. Claude returns a
-  summary plus the entities in that text.
+  summary, the entities in that text, and its tables.
 - **Branches** see only their children's digests, never raw text. Claude
   returns a summary of the section and says which children's entities are
   the same thing under different names. The merge itself is done in code,
@@ -398,7 +406,8 @@ that tree bottom-up (`digest.py`):
   rules (`world.APPLY_VERSION`), or of the digest, takes effect when a
   server starts: it plans every source again, digests what changed, and
   applies cached catalogs again.
-- **The root's** entities become the source's catalog.
+- **The root's** entities become the source's catalog. Tables are passed up
+  unchanged.
 
 Each node's output is cached under a hash of exactly what produced it:
 

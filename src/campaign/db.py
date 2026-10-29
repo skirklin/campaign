@@ -1203,6 +1203,17 @@ class Store:
         ).fetchone()
         return json.loads(row["output"])["entities"] if row else []
 
+    def roll_tables(self, campaign: Campaign) -> list[dict[str, Any]]:
+        """The tables to roll on that the digest found in the campaign's visible sources."""
+        out = []
+        for r in self.conn.execute(
+            "SELECT s.title, d.output FROM sources s JOIN digest_nodes n ON n.source_id = s.id AND n.parent_id IS NULL"
+            f" JOIN digests d ON d.key = n.digest_key WHERE {self._visible_sources_clause(campaign)} ORDER BY s.id",
+            (campaign.id,),
+        ):
+            out += [t | {"source": r["title"]} for t in json.loads(r["output"]).get("tables", [])]
+        return out
+
     def source_overviews(self, campaign: Campaign) -> list[dict[str, Any]]:
         """Root and top-level summaries for each digested, visible source."""
         out = []
