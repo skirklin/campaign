@@ -59,6 +59,15 @@ stopped being true, add_journal_entry for the event itself. Say what you
 recorded. Writes are dated to the latest session played.
 {spoiler_rules}
 Keep answers tight and table-ready: the user is often mid-session.
+
+Write in Markdown; the app renders it. Lead with the answer, then the
+detail: short paragraphs, **bold** for the things to act on (DCs, damage,
+names), lists for steps and options, a table to compare several things.
+Use ### headings only when an answer has distinct parts. The app turns
+dice like 3d8+5 and "+8 to hit" into buttons that roll, so write dice out
+plainly. Put read-aloud text from the book in a > quote. To show a
+creature's stat block, call stat_block and paste its text unchanged in a
+```statblock fenced block; it's shown as a stat block card.
 {overview}"""
 
 DM_ROLE = "The user is the Dungeon Master and may see everything, including module secrets."
@@ -353,6 +362,41 @@ def ingest_session(
     return result
 
 
+_DESCRIBE: dict[str, Callable[[dict[str, Any]], str]] = {
+    "lookup": lambda a: f"Looked up “{a.get('name', '')}”"
+              + (f" as of session {a['as_of_session']}" if a.get("as_of_session") is not None else ""),
+    "find_entities": lambda a: "Listed " + (f"{a['kind']}s" if a.get("kind") else "the world")
+                     + (f" matching “{a['query']}”" if a.get("query") else ""),
+    "timeline": lambda a: f"Timeline of “{a.get('name', '')}”",
+    "stat_block": lambda a: f"Stat block for “{a.get('name', '')}”",
+    "treasure": lambda a: f"Treasure at “{a.get('place', '')}”",
+    "roll_table": lambda a: (f"Rolled on “{a['name']}”" if a.get("name") else "Listed the tables to roll on")
+                  + (f" (a {a['roll']})" if a.get("roll") is not None else ""),
+    "search_reference": lambda a: f"Searched the books for “{a.get('query', '')}”",
+    "read_reference": lambda a: "Read a passage of the book",
+    "read_pages": lambda a: f"Read {a.get('source', 'the book')}, p. {a.get('first_page')}"
+                  + (f"–{a['last_page']}" if a.get("last_page") not in (None, a.get("first_page")) else ""),
+    "outline": lambda a: "Read the outline",
+    "list_sources": lambda a: "Listed the reference material",
+    "list_sessions": lambda a: "Listed the sessions",
+    "recent_journal": lambda a: "Read the journal" + (f" for session {a['session']}" if a.get("session") else ""),
+    "record_fact": lambda a: f"Recorded: {a.get('statement', '')}",
+    "end_fact": lambda a: "Marked a fact no longer true",
+    "party_learned": lambda a: "Marked a fact as known to the party",
+    "add_journal_entry": lambda a: f"Journal: {a.get('text', '')}",
+    "get_character": lambda a: f"Read {a.get('name', '')}'s sheet",
+    "update_character": lambda a: f"Updated {a.get('name', '')}'s sheet" + (f": {a['reason']}" if a.get("reason") else ""),
+    "create_character": lambda a: "Created a character",
+    "get_party_stash": lambda a: "Checked the party stash",
+    "update_party_stash": lambda a: "Updated the party stash" + (f": {a['reason']}" if a.get("reason") else ""),
+}
+
+
 def describe_tool_call(name: str, args: dict[str, Any]) -> str:
-    brief = json.dumps(args, ensure_ascii=False)
-    return f"  · {name} {brief[:120] + '…' if len(brief) > 120 else brief}"
+    """A line saying what a tool call does, for people watching: "  · Looked up “the hag”"."""
+    try:
+        text = _DESCRIBE[name](args)
+    except (KeyError, TypeError):
+        brief = json.dumps(args, ensure_ascii=False)
+        text = f"{name} {brief}"
+    return f"  · {text[:140] + '…' if len(text) > 140 else text}"

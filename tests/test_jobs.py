@@ -353,7 +353,7 @@ def test_a_scan_looks_up_what_it_cannot_place_in_the_campaign_books(scan_job, mo
     # The lookup ran against the campaign's books, and the job's log shows it.
     result = calls[1]["messages"][-1]["content"][0]
     assert result["type"] == "tool_result" and "Herculean" in result["content"]
-    assert any(e["kind"] == "tool" and "search_reference" in e["text"] for e in s.job_log(job_id))
+    assert any(e["kind"] == "tool" and "Searched the books" in e["text"] for e in s.job_log(job_id))
 
 
 def test_a_players_scan_cannot_see_dm_only_material(scan_job, monkeypatch):

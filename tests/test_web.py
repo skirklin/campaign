@@ -142,7 +142,7 @@ def test_ingest_job_runs_in_background(client, monkeypatch):
     job = wait_for(client, r.json()["job"])
     assert job["state"] == "done" and job["kind"] == "ingest" and job["name"] == "s1.txt", job
     assert job["result"]["title"] == "Blood on the Vine"
-    assert any(e["kind"] == "tool" and "record_fact" in e["text"] for e in job["log"])
+    assert any(e["kind"] == "tool" and "Recorded:" in e["text"] for e in job["log"])
     assert client.get("/api/campaigns/strahd/sessions").json()["ingests"] == []  # finished: it's a session now
 
     sessions = client.get("/api/campaigns/strahd/sessions").json()
