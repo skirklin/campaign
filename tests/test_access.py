@@ -136,6 +136,10 @@ def test_character_sheets_belong_to_their_players(site):
     # Party members can read it, but only its owner and the DM can change it.
     assert bob.get(f"/api/characters/{cid}").json()["can_edit"] is False
     assert bob.post(f"/api/characters/{cid}/hp", json={"delta": -3}).status_code == 403
+    # Files kept with it: the party can look, only those who can change the sheet can attach.
+    assert bob.post(f"/api/characters/{cid}/files", files={"file": ("x.pdf", b"%PDF")}).status_code == 403
+    url = alice.post(f"/api/characters/{cid}/files", files={"file": ("x.pdf", b"%PDF")}).json()["files"][0]["url"]
+    assert bob.get(url).status_code == 200 and bob.delete(url).status_code == 403
     assert dm.post(f"/api/characters/{cid}/hp", json={"delta": -3}).status_code == 200
     assert alice.post(f"/api/characters/{cid}/rest", json={"long": True}).status_code == 200
     # A player sees their own character in the world, even before anything has happened to it.

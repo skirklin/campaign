@@ -696,6 +696,7 @@ li.roll-fumble .roll-line strong { color: var(--danger); }
 /* Situational damage offered on an attack roll. */
 .attack-top { grid-template-columns: minmax(8rem, 1fr) minmax(0, 1.3fr) auto; }
 .attack-total { white-space: normal; font-size: .9rem; }
+.files-line { margin: -.2rem 0 .6rem; } .files-line button.icon.link { padding: 0 .2rem; }
 
 /* -- roll screen: checks and attacks take over the screen ------------------------- */
 

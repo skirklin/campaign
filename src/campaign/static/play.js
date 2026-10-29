@@ -72,7 +72,7 @@ export class PlayView extends SheetView {
     await this.flush();
     try {
       const r = await api(method, url, body);
-      Object.assign(this, { sheet: r.sheet, derived: r.derived, log: r.log });
+      Object.assign(this, { sheet: r.sheet, derived: r.derived, log: r.log, files: r.files || this.files });
       this.rerender();
     } catch (err) {
       toast(err.message, true);
@@ -252,7 +252,7 @@ export class PlayView extends SheetView {
       character: this.id,
       beforeMove: () => this.flush(),
       onCharacter: (r) => {
-        Object.assign(this, { sheet: r.sheet, derived: r.derived, log: r.log });
+        Object.assign(this, { sheet: r.sheet, derived: r.derived, log: r.log, files: r.files || this.files });
         this.rerender();  // what's equipped changes AC and the rest
       },
     }));
@@ -295,6 +295,8 @@ export class PlayView extends SheetView {
     return [
       note("notes", "Notes", 10),
       note("personality", "Personality", 4),
+      this.files.length > 0 && block("Paper sheet", h("ul.files", this.files.map((f) =>
+        h("li", h("a", { href: f.url, target: "_blank", rel: "noopener" }, f.name))))),
       block("Rolls", this.historyBox(ROLLS_KEPT),
         h("button.link.muted.small", { onclick: () => this.clearRolls() }, "Clear")),
       block("In the world", this.worldBox),

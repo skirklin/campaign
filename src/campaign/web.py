@@ -865,6 +865,8 @@ def create_app(
             "id": ch["id"], "campaign": campaign_label(s, ch["campaign_id"]), "can_edit": ch["can_edit"],
             "entity_id": s.link_character(ch["id"]), "copied_from": copied_from,
             "sheet": sheet.model_dump(), "derived": sheet.derived(), "log": s.character_log(ch["id"], limit=30),
+            "files": [{"id": f["id"], "name": f["name"], "created_at": f["created_at"],
+                       "url": f"/api/characters/{ch['id']}/files/{f['id']}"} for f in s.character_files(ch["id"])],
         }
 
     def save(s: Store, request: Request, ch: dict[str, Any], sheet: CharacterSheet, reason: str) -> dict[str, Any]:
@@ -952,7 +954,39 @@ def create_app(
             raise HTTPException(422, "the character is already in that campaign")
         origin = s.campaign_by_id(ch["campaign_id"]).name
         sheet = CharacterSheet.model_validate(ch["sheet"])
-        return create(s, request, sheet, campaign_id, f"copied from {origin}", copied_from=ch["id"])
+        made = create(s, request, sheet, campaign_id, f"copied from {origin}", copied_from=ch["id"])
+        for f in s.character_files(ch["id"]):  # the scan goes with it
+            s.add_character_file(made["id"], f["blob"], f["name"])
+        return sheet_payload(s, request, character_or_404(s, request, made["id"]))
+
+    # Files kept with a character: the scan it was read from, or anything its owner attaches.
+    @app.get("/api/characters/{character_id}/files/{file_id}")
+    def character_file(character_id: int, file_id: int, request: Request, s: Store = Depends(store)) -> FileResponse:
+        character_or_404(s, request, character_id)
+        f = s.character_file(character_id, file_id)
+        if f is None or not s.blobs.exists(f["blob"]):
+            raise HTTPException(404, "no such file")
+        # Inline, so a PDF or photo opens in the browser to check the sheet against.
+        return FileResponse(s.blobs.path(f["blob"]), filename=f["name"], content_disposition_type="inline",
+                            media_type=sheetscan.MEDIA_TYPES.get(Path(f["name"]).suffix.lower()))
+
+    @app.post("/api/characters/{character_id}/files", status_code=201)
+    def attach_file(character_id: int, request: Request, file: UploadFile = File(...),
+                    s: Store = Depends(store)) -> dict[str, Any]:
+        ch = character_or_404(s, request, character_id, write=True)
+        data, name = file.file.read(sheetscan.MAX_BYTES + 1), file.filename or "file"
+        try:
+            sheetscan.check_upload(data, name)
+        except sheetscan.ScanError as err:
+            raise HTTPException(422, str(err))
+        s.add_character_file(character_id, s.blobs.put(data), name)
+        return sheet_payload(s, request, ch)
+
+    @app.delete("/api/characters/{character_id}/files/{file_id}", status_code=204)
+    def remove_file(character_id: int, file_id: int, request: Request, s: Store = Depends(store)) -> None:
+        character_or_404(s, request, character_id, write=True)
+        if not s.delete_character_file(character_id, file_id):
+            raise HTTPException(404, "no such file")
 
     @app.get("/api/characters/{character_id}")
     def get_character(character_id: int, request: Request, s: Store = Depends(store)) -> dict[str, Any]:

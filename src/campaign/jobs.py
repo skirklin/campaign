@@ -201,6 +201,7 @@ def run_scan(run: Run) -> dict[str, Any]:
                 f"this campaign already has a character called {sheet.name}: rename or remove that one, then retry"
             ) from None
         character_id = same["id"]  # made by an earlier try of this job, which stopped before it could say so
+    s.add_character_file(character_id, run.input["blob"], name)  # kept with the sheet, to check it against
     run.log.emit("status", f"Made {sheet.name}.")
     return {"character": character_id, "name": sheet.name, "unreadable": unreadable}
 
