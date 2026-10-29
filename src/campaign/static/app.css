@@ -422,3 +422,32 @@ ol.steps { padding-left: 1.3rem; display: grid; gap: .4rem; max-width: 62ch; }
 .chat-tool { align-self: flex-start; font-size: .8rem; color: var(--muted); padding: 0 .7rem; }
 .chat-error { color: var(--danger); font-size: .9rem; }
 .chat-form textarea { width: 100%; }
+
+/* Numbers made of parts: click (or hover) one to see what it adds up from. */
+.derived.explained { cursor: help; text-decoration: underline dotted var(--border); text-underline-offset: 3px; }
+.parts-pop {
+  position: absolute; z-index: 20; min-width: 11rem; padding: .4rem .6rem; font-size: .85rem;
+  background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 6px; box-shadow: var(--shadow);
+}
+.parts-pop div { display: flex; justify-content: space-between; gap: 1rem; }
+.parts-pop .parts-total { border-top: 1px solid var(--border); margin-top: .25rem; padding-top: .25rem; }
+.parts-line { margin: .4rem 0; }
+.ac-abilities { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin-top: .4rem; }
+.attack { padding: .45rem 0; border-bottom: 1px dotted var(--border); display: flex; flex-direction: column; gap: .3rem; }
+.attack-top { display: grid; grid-template-columns: 1fr auto auto; gap: .4rem; align-items: center; }
+.attack-total { font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.attack-parts, .damage-part { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; }
+.attack-parts select { width: auto; }
+.attack-parts input[type=number], .damage-part input[type=number] { width: 3.5rem; }
+.attack-parts input:not([type]), .attack-parts input[type=text] { flex: 1 1 5rem; }
+.damage-part { padding-left: .8rem; }
+.damage-part input:not([type=number]):not([type=checkbox]) { flex: 1 1 5rem; }
+.attack-bottom { display: flex; gap: .4rem; align-items: center; }
+.attack-bottom input { flex: 1; }
+.item-tags { margin: 0 0 .2rem; }
+.item-details { padding: .3rem 0 .5rem .8rem; display: flex; flex-direction: column; gap: .3rem; border-left: 2px solid var(--border); }
+.item-flags { display: flex; gap: 1rem; flex-wrap: wrap; }
+.bonuses select { min-width: 0; }
+.mini input[type=checkbox] { width: auto !important; }
+.attack-bottom .add { width: auto; flex: 0 0 auto; }
+.damage-part input[placeholder="1d8"] { flex: 0 0 4.5rem; }

@@ -7,9 +7,10 @@ bonus, skill totals) are computed rather than stored so they can't drift.
 
 from __future__ import annotations
 
-from typing import Any
+import re
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
 ABILITIES = ("str", "dex", "con", "int", "wis", "cha")
 
@@ -45,10 +46,67 @@ class ClassLevel(Model):
     subclass: str = ""
 
 
+# Numbers on the sheet are built from parts and summed when shown, so they
+# follow the character: raise Strength and every Strength attack, check and
+# save goes up; level up and everything proficient does. An amount is a
+# number, or a reference to something on the sheet ("str".."cha" for that
+# ability's modifier, "prof", "half_prof", "level"), optionally times a whole
+# number ("2*level") or negated ("-dex").
+REFS = (*ABILITIES, "prof", "half_prof", "level")
+_AMOUNT = re.compile(r"^(?:(-?\d+)\*)?(-?)([a-z_]+)$")
+
+
+def _check_amount(v: int | str) -> int | str:
+    if isinstance(v, str):
+        m = _AMOUNT.match(v.strip().lower())
+        if not m or m.group(3) not in REFS:
+            try:
+                return int(v)
+            except ValueError:
+                raise ValueError(f"{v!r} isn't a number or one of {', '.join(REFS)} (like 2*level or -dex)") from None
+        return v.strip().lower()
+    return v
+
+
+Amount = Annotated[int | str, AfterValidator(_check_amount)]
+
+# Where a bonus applies. "attack:str" and "damage:str" apply to attacks made
+# with Strength; "check:dex" to every Dexterity check (its skills, initiative).
+BONUS_TARGETS = (
+    "ac", "initiative", "speed", "hp_max", "attack", *(f"attack:{a}" for a in ABILITIES),
+    "damage", *(f"damage:{a}" for a in ABILITIES), "save", *(f"save:{a}" for a in ABILITIES),
+    "skill", *(f"skill:{k}" for k in SKILLS), *(f"check:{a}" for a in ABILITIES),
+    "passive_perception", "spell_dc", "spell_attack",
+)
+
+
+class Bonus(Model):
+    """A modifier from a feature, an item or an effect, added wherever `target` is worked out."""
+
+    target: Literal[BONUS_TARGETS]  # type: ignore[valid-type]
+    amount: Amount = 0
+    source: str = ""  # shown in breakdowns: "Ring of protection", "Rage"
+    active: bool = True  # switch off what only applies sometimes (Rage, while raging)
+
+
 class HitPoints(Model):
-    max: int = 0
+    base: int = 0  # from hit dice (rolled or averaged), without Constitution: max adds CON x level
     current: int = 0
     temp: int = 0
+
+
+class ArmorClass(Model):
+    """AC = base + the listed abilities' modifiers (Dexterity capped at max_dex) + bonuses.
+
+    Unarmored: base 10 with dex. Leather: 11 with dex. Half plate: 15 with dex,
+    max_dex 2. Plate: 18, no abilities. Barbarian unarmored defense: 10 with
+    dex and con. Shields and magic armor are item bonuses to "ac".
+    """
+
+    label: str = ""  # "Chain mail", "Unarmored defense"
+    base: int = 10
+    abilities: list[str] = ["dex"]
+    max_dex: int | None = None
 
 
 class Item(Model):
@@ -56,13 +114,41 @@ class Item(Model):
     qty: int = 1
     equipped: bool = False
     attuned: bool = False
+    requires_attunement: bool = False
+    bonuses: list[Bonus] = []  # count while equipped (and attuned, if it needs it)
     notes: str = ""
+
+    @property
+    def active(self) -> bool:
+        return self.equipped and (self.attuned or not self.requires_attunement)
+
+
+class Damage(Model):
+    dice: str = ""  # "1d12", "2d6"; empty for a flat amount
+    type: str = ""  # "slashing", "fire"
+    add_ability: bool = False  # a weapon's main damage adds the attack's ability modifier
+    bonus: int = 0
+
+
+ATTACK_ABILITIES = (*ABILITIES, "finesse", "spell", "none")
 
 
 class Attack(Model):
+    """To hit = ability modifier + proficiency (if proficient) + bonus + attack bonuses.
+
+    `ability` is an ability, "finesse" (the better of Strength and Dexterity),
+    "spell" (the spellcasting ability) or "none". `bonus` is a magic weapon's
+    +N: it adds to the hit and to the main damage. `hit_bonus` adds to the
+    hit only.
+    """
+
     name: str
-    to_hit: str = ""  # "+7"
-    damage: str = ""  # "1d8+4 slashing"
+    ability: Literal[ATTACK_ABILITIES] = "str"  # type: ignore[valid-type]
+    proficient: bool = True
+    bonus: int = 0
+    hit_bonus: int = 0
+    damage: list[Damage] = []
+    range: str = ""  # "5 ft", "20/60 ft"
     notes: str = ""
 
 
@@ -82,6 +168,51 @@ class Spell(Model):
     notes: str = ""
 
 
+_DAMAGE_PART = re.compile(r"^\s*(\d+d\d+)?\s*([+-]?\s*\d+)?\s*(.*?)\s*$")
+
+
+def parse_damage(text: str) -> list[dict[str, Any]]:
+    """Free-text damage ("1d8+4 slashing + 1d6 fire") as flat parts, for sheets from before parts."""
+    parts = []
+    for piece in re.split(r"\s*\+\s*(?=\d+d\d+)", text.strip()):
+        m = _DAMAGE_PART.match(piece)
+        if piece and m:
+            dice, bonus, kind = m.groups()
+            parts.append({"dice": dice or "", "bonus": int(bonus.replace(" ", "")) if bonus else 0, "type": kind})
+    return parts
+
+
+def _upgrade(data: dict[str, Any]) -> dict[str, Any]:
+    """Sheets saved before numbers had parts: keep every number as it was.
+
+    A flat AC becomes a formula with that base and no abilities; HP max becomes
+    the hit-dice total less CON x level; a free-text attack becomes one with
+    its numbers as flat bonuses. They follow the character once edited.
+    """
+    data = dict(data)
+    if isinstance(data.get("ac"), int):
+        data["ac"] = {"base": data["ac"], "abilities": []}
+    hp = data.get("hp")
+    if isinstance(hp, dict) and "max" in hp:
+        con = (int(data.get("abilities", {}).get("con", 10)) - 10) // 2
+        level = sum(int(c.get("level", 0)) for c in data.get("classes", []) if isinstance(c, dict))
+        hp = {k: v for k, v in hp.items() if k != "max"}
+        data["hp"] = hp | {"base": int(data["hp"]["max"]) - con * level}
+    attacks = []
+    for a in data.get("attacks", []):
+        if isinstance(a, dict) and (isinstance(a.get("to_hit"), str) or isinstance(a.get("damage"), str)):
+            a = dict(a)
+            to_hit = str(a.pop("to_hit", "") or "").replace(" ", "")
+            a.update(ability="none", proficient=False,
+                     hit_bonus=int(to_hit) if re.fullmatch(r"[+-]?\d+", to_hit) else 0)
+            if isinstance(a.get("damage"), str):
+                a["damage"] = parse_damage(a["damage"])
+        attacks.append(a)
+    if "attacks" in data:
+        data["attacks"] = attacks
+    return data
+
+
 class CharacterSheet(Model):
     name: str
     player: str = ""
@@ -94,12 +225,13 @@ class CharacterSheet(Model):
     save_proficiencies: list[str] = []
     skill_proficiencies: list[str] = []
     skill_expertise: list[str] = []
-    ac: int = 10
+    ac: ArmorClass = ArmorClass()
     speed: int = 30
     hp: HitPoints = HitPoints()
     conditions: list[str] = []
     death_saves: dict[str, int] = Field(default_factory=lambda: {"successes": 0, "failures": 0})
     attacks: list[Attack] = []
+    bonuses: list[Bonus] = []  # from features and effects; items carry their own
     resources: list[Resource] = []
     spellcasting_ability: str = ""
     spells: list[Spell] = []
@@ -113,6 +245,11 @@ class CharacterSheet(Model):
     notes: str = ""
     extra: dict[str, Any] = {}
 
+    @model_validator(mode="before")
+    @classmethod
+    def _from_older_sheets(cls, data: Any) -> Any:
+        return _upgrade(data) if isinstance(data, dict) else data
+
     @property
     def level(self) -> int:
         return sum(c.level for c in self.classes)
@@ -124,33 +261,136 @@ class CharacterSheet(Model):
     def mod(self, ability: str) -> int:
         return (self.abilities.get(ability, 10) - 10) // 2
 
+    def amount(self, amount: int | str) -> int:
+        """What an amount comes to on this sheet now."""
+        if isinstance(amount, int):
+            return amount
+        m = _AMOUNT.match(amount)
+        times, negate, ref = int(m.group(1) or 1), m.group(2), m.group(3)
+        pb = self.proficiency_bonus
+        value = {"prof": pb, "half_prof": pb // 2, "level": self.level}.get(ref)
+        value = self.mod(ref) if value is None else value
+        return -times * value if negate else times * value
+
+    def active_bonuses(self) -> list[Bonus]:
+        """The sheet's switched-on bonuses, and those of items equipped (and attuned, where needed)."""
+        out = [b for b in self.bonuses if b.active]
+        for item in self.inventory:
+            if item.active:
+                out += [b.model_copy(update={"source": b.source or item.name}) for b in item.bonuses if b.active]
+        return out
+
+    def _bonuses(self, *targets: str) -> list[tuple[str, int]]:
+        return [(b.source or b.target, self.amount(b.amount)) for b in self.active_bonuses() if b.target in targets]
+
+    def save_parts(self, ability: str) -> list[tuple[str, int]]:
+        parts = [(ability.upper(), self.mod(ability))]
+        if ability in self.save_proficiencies:
+            parts.append(("Proficiency", self.proficiency_bonus))
+        return parts + self._bonuses("save", f"save:{ability}")
+
+    def skill_parts(self, skill: str) -> list[tuple[str, int]]:
+        ability = SKILLS[skill]
+        parts = [(ability.upper(), self.mod(ability))]
+        if skill in self.skill_expertise:
+            parts.append(("Expertise", 2 * self.proficiency_bonus))
+        elif skill in self.skill_proficiencies:
+            parts.append(("Proficiency", self.proficiency_bonus))
+        return parts + self._bonuses("skill", f"skill:{skill}", f"check:{ability}")
+
     def save(self, ability: str) -> int:
-        bonus = self.proficiency_bonus if ability in self.save_proficiencies else 0
-        return self.mod(ability) + bonus
+        return sum(v for _, v in self.save_parts(ability))
 
     def skill(self, skill: str) -> int:
-        total = self.mod(SKILLS[skill])
-        if skill in self.skill_expertise:
-            total += 2 * self.proficiency_bonus
-        elif skill in self.skill_proficiencies:
-            total += self.proficiency_bonus
-        return total
+        return sum(v for _, v in self.skill_parts(skill))
+
+    def ac_parts(self) -> list[tuple[str, int]]:
+        ac = self.ac
+        parts = [(ac.label or "Base", ac.base)]
+        for a in ac.abilities:
+            m = self.mod(a)
+            if a == "dex" and ac.max_dex is not None and m > ac.max_dex:
+                parts.append((f"DEX (max {ac.max_dex})", ac.max_dex))
+            else:
+                parts.append((a.upper(), m))
+        return parts + self._bonuses("ac")
+
+    def hp_max_parts(self) -> list[tuple[str, int]]:
+        return [("Hit dice", self.hp.base), (f"CON x {self.level}", self.mod("con") * self.level),
+                *self._bonuses("hp_max")]
+
+    @property
+    def hp_max(self) -> int:
+        return max(0, sum(v for _, v in self.hp_max_parts()))
+
+    def attack_ability(self, attack: Attack) -> str | None:
+        """The ability an attack uses, resolving finesse and spell; None for "none"."""
+        if attack.ability == "finesse":
+            return "str" if self.mod("str") >= self.mod("dex") else "dex"
+        if attack.ability == "spell":
+            return self.spellcasting_ability or None
+        return None if attack.ability == "none" else attack.ability
+
+    def attack_parts(self, attack: Attack) -> dict[str, Any]:
+        ability = self.attack_ability(attack)
+        hit = [(ability.upper(), self.mod(ability))] if ability else []
+        if attack.proficient:
+            hit.append(("Proficiency", self.proficiency_bonus))
+        if attack.bonus:
+            hit.append(("Magic", attack.bonus))
+        if attack.hit_bonus:
+            hit.append(("Bonus", attack.hit_bonus))
+        hit += self._bonuses("attack", *([f"attack:{ability}"] if ability else []))
+        damage = []
+        # Ability, magic and damage bonuses go on the main part: the one adding the ability, else the first.
+        main = next((i for i, d in enumerate(attack.damage) if d.add_ability), 0)
+        for i, d in enumerate(attack.damage):
+            parts = [("Bonus", d.bonus)] if d.bonus else []
+            if i == main:
+                if d.add_ability and ability:
+                    parts.insert(0, (ability.upper(), self.mod(ability)))
+                if attack.bonus:
+                    parts.append(("Magic", attack.bonus))
+                parts += self._bonuses("damage", *([f"damage:{ability}"] if ability else []))
+            damage.append({"dice": d.dice, "type": d.type, "bonus": _total(parts)})
+        return {"to_hit": _total(hit), "damage": damage, "text": _damage_text(damage)}
 
     def derived(self) -> dict[str, Any]:
+        """Every computed number, as {"total", "parts": [{"label", "value"}]} so it can be explained."""
+        perception = self.skill("perception")
         out: dict[str, Any] = {
             "level": self.level,
             "proficiency_bonus": self.proficiency_bonus,
             "modifiers": {a: self.mod(a) for a in ABILITIES},
-            "saves": {a: self.save(a) for a in ABILITIES},
-            "skills": {s: self.skill(s) for s in SKILLS},
-            "passive_perception": 10 + self.skill("perception"),
-            "initiative": self.mod("dex"),
+            "saves": {a: _total(self.save_parts(a)) for a in ABILITIES},
+            "skills": {k: _total(self.skill_parts(k)) for k in SKILLS},
+            "passive_perception": _total([("Base", 10), ("Perception", perception),
+                                          *self._bonuses("passive_perception")]),
+            "initiative": _total([("DEX", self.mod("dex")), *self._bonuses("initiative", "check:dex")]),
+            "ac": _total(self.ac_parts()),
+            "speed": _total([("Base", self.speed), *self._bonuses("speed")]),
+            "hp_max": _total(self.hp_max_parts()),
+            "attacks": [self.attack_parts(a) for a in self.attacks],
         }
         if self.spellcasting_ability:
-            m = self.mod(self.spellcasting_ability) + self.proficiency_bonus
-            out["spell_save_dc"] = 8 + m
-            out["spell_attack"] = m
+            a = self.spellcasting_ability
+            core = [(a.upper(), self.mod(a)), ("Proficiency", self.proficiency_bonus)]
+            out["spell_save_dc"] = _total([("Base", 8), *core, *self._bonuses("spell_dc")])
+            out["spell_attack"] = _total([*core, *self._bonuses("spell_attack")])
         return out
+
+
+def _total(parts: list[tuple[str, int]]) -> dict[str, Any]:
+    return {"total": sum(v for _, v in parts), "parts": [{"label": k, "value": v} for k, v in parts if v or k == "Base"]}
+
+
+def _damage_text(damage: list[dict[str, Any]]) -> str:
+    out = []
+    for d in damage:
+        n = d["bonus"]["total"]
+        amount = (d["dice"] + (f"{n:+d}" if n else "")) if d["dice"] else str(n)
+        out.append(f"{amount} {d['type']}".strip())
+    return " + ".join(out)
 
 
 def apply_hp(sheet: CharacterSheet, delta: int) -> None:
@@ -161,7 +401,7 @@ def apply_hp(sheet: CharacterSheet, delta: int) -> None:
         hp.temp -= absorbed
         hp.current = max(0, hp.current + delta + absorbed)
     else:
-        hp.current = min(hp.max, hp.current + delta)
+        hp.current = min(sheet.hp_max, hp.current + delta)
     sheet.hp = hp
 
 
@@ -172,7 +412,7 @@ def rest(sheet: CharacterSheet, long: bool) -> None:
         r.model_copy(update={"used": 0}) if r.recharge in kinds else r for r in sheet.resources
     ]
     if long:
-        sheet.hp = sheet.hp.model_copy(update={"current": sheet.hp.max, "temp": 0})
+        sheet.hp = sheet.hp.model_copy(update={"current": sheet.hp_max, "temp": 0})
         sheet.death_saves = {"successes": 0, "failures": 0}
 
 
@@ -201,20 +441,21 @@ def render(sheet: CharacterSheet) -> str:
     )
     lines = [
         f"{sheet.name} — {sheet.species} {classes}".strip(),
-        f"Level {d['level']}  Prof {sign(d['proficiency_bonus'])}  AC {sheet.ac}  "
-        f"HP {sheet.hp.current}/{sheet.hp.max}" + (f" (+{sheet.hp.temp} temp)" if sheet.hp.temp else "")
-        + f"  Speed {sheet.speed}  Init {sign(d['initiative'])}  PP {d['passive_perception']}",
+        f"Level {d['level']}  Prof {sign(d['proficiency_bonus'])}  AC {d['ac']['total']}  "
+        f"HP {sheet.hp.current}/{sheet.hp_max}" + (f" (+{sheet.hp.temp} temp)" if sheet.hp.temp else "")
+        + f"  Speed {d['speed']['total']}  Init {sign(d['initiative']['total'])}"
+        f"  PP {d['passive_perception']['total']}",
         "  ".join(
             f"{a.upper()} {sheet.abilities.get(a, 10)} ({sign(d['modifiers'][a])})" for a in ABILITIES
         ),
         "Saves: "
         + ", ".join(
-            f"{a.upper()}{'*' if a in sheet.save_proficiencies else ''} {sign(d['saves'][a])}"
+            f"{a.upper()}{'*' if a in sheet.save_proficiencies else ''} {sign(d['saves'][a]['total'])}"
             for a in ABILITIES
         ),
         "Skills: "
         + ", ".join(
-            f"{s} {sign(d['skills'][s])}"
+            f"{s} {sign(d['skills'][s]['total'])}"
             for s in SKILLS
             if s in sheet.skill_proficiencies or s in sheet.skill_expertise
         ),
@@ -222,7 +463,8 @@ def render(sheet: CharacterSheet) -> str:
     if sheet.conditions:
         lines.append("Conditions: " + ", ".join(sheet.conditions))
     if sheet.attacks:
-        lines.append("Attacks: " + "; ".join(f"{a.name} {a.to_hit} {a.damage}".strip() for a in sheet.attacks))
+        lines.append("Attacks: " + "; ".join(
+            f"{a.name} {sign(x['to_hit']['total'])} {x['text']}".strip() for a, x in zip(sheet.attacks, d["attacks"])))
     if sheet.resources:
         lines.append(
             "Resources: "
@@ -230,7 +472,7 @@ def render(sheet: CharacterSheet) -> str:
         )
     if sheet.spells:
         if "spell_save_dc" in d:
-            lines.append(f"Spell DC {d['spell_save_dc']}  Spell attack {sign(d['spell_attack'])}")
+            lines.append(f"Spell DC {d['spell_save_dc']['total']}  Spell attack {sign(d['spell_attack']['total'])}")
         by_level: dict[int, list[str]] = {}
         for s in sheet.spells:
             by_level.setdefault(s.level, []).append(s.name + ("" if s.prepared else " (unprepared)"))

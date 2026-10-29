@@ -309,6 +309,19 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         Examples: {"hp": {"current": 17}}, {"currency": {"gp": 245}},
         {"conditions": ["poisoned"]}.
 
+        Numbers are built from parts and summed when shown, so record the
+        parts, never a total: ability scores (not modifiers); each attack's
+        ability ("str", "dex", "finesse", "spell" or "none"), proficient,
+        magic bonus and damage parts (dice, type, add_ability for the part
+        that adds the ability modifier); AC as a formula (base, abilities,
+        max_dex); HP as hp.base, the hit-dice total without Constitution.
+        Anything else that adds to a number is a bonus {target, amount,
+        source}: on the sheet for features and effects (switch one off with
+        active: false, e.g. Rage between fights), or on the item that grants
+        it (it counts while equipped, and attuned if requires_attunement).
+        An amount can be a number or "prof", "level", an ability ("cha"),
+        or a multiple like "2*level".
+
         Args:
             name: Character name.
             patch: Merge patch against the current sheet.
@@ -335,6 +348,19 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         "sleight of hand"; spell slots and other limited uses as resources).
         The sheet becomes a character in the party, owned by whoever is
         using this tool, and the world model's player character of that name.
+
+        Numbers are built from parts and summed when shown, so record the
+        parts, never a total: ability scores (not modifiers); each attack's
+        ability ("str", "dex", "finesse", "spell" or "none"), proficient,
+        magic bonus and damage parts (dice, type, add_ability for the part
+        that adds the ability modifier); AC as a formula (base, abilities,
+        max_dex); HP as hp.base, the hit-dice total without Constitution.
+        Anything else that adds to a number is a bonus {target, amount,
+        source}: on the sheet for features and effects (switch one off with
+        active: false, e.g. Rage between fights), or on the item that grants
+        it (it counts while equipped, and attuned if requires_attunement).
+        An amount can be a number or "prof", "level", an ability ("cha"),
+        or a multiple like "2*level".
 
         Args:
             sheet: The whole character sheet.

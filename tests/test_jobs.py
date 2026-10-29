@@ -10,7 +10,8 @@ import pytest
 from campaign import agent as agent_mod
 from campaign import jobs, sheetscan
 from campaign.accounts import Accounts
-from campaign.charsheet import ClassLevel, HitPoints
+from campaign.charsheet import ArmorClass, Bonus, ClassLevel
+from campaign.charsheet import CharacterSheet
 from campaign.db import Store
 from campaign.jobs import JobLoop, Log
 from campaign.world import World
@@ -147,7 +148,8 @@ SCAN = sheetscan.ScannedSheet(
     classes=[ClassLevel(name="Wizard", level=3)], xp=900,
     abilities=sheetscan.Abilities(strength=8, dexterity=14, constitution=12, intelligence=17, wisdom=12, charisma=10),
     save_proficiencies=["Intelligence", "wis"], skill_proficiencies=["Arcana", "History", "Basket weaving"],
-    skill_expertise=[], ac=12, speed=30, hp=HitPoints(max=17, current=17), attacks=[], resources=[],
+    skill_expertise=[], ac=ArmorClass(base=10, abilities=["dex"]), printed_ac=12, speed=30,
+    hp=sheetscan.ScannedHitPoints(max=17, current=17, temp=0), attacks=[], bonuses=[], resources=[],
     spellcasting_ability="Intelligence", spells=[], inventory=[], currency=sheetscan.Coins(gp=12),
     features=["Arcane Recovery"], proficiencies=["Daggers"], personality="", notes="Has a cat.",
     unreadable=["Wisdom score"],
@@ -369,3 +371,38 @@ def test_a_players_scan_cannot_see_dm_only_material(scan_job, monkeypatch):
     )
     assert JobLoop(db).pass_once() and s.job(job_id)["state"] == "done"
     assert "villain" not in calls[1]["messages"][-1]["content"][0]["content"]
+
+
+def test_a_scan_records_parts_and_flags_totals_that_do_not_add_up(scan_job, monkeypatch):
+    s, camp, db, job_id, _ = scan_job
+    axe = sheetscan.ScannedAttack(
+        name="Greataxe", ability="str", proficient=True, printed_to_hit="+6", printed_damage="1d12 + 3 slashing",
+        damage=[{"dice": "1d12", "type": "slashing", "add_ability": True}],
+    )
+    bow = sheetscan.ScannedAttack(  # printed +9: more than its parts (DEX +2, proficiency +3)
+        name="Longbow", ability="dex", printed_to_hit="+9", printed_damage="1d8+2 piercing",
+        damage=[{"dice": "1d8", "type": "piercing", "add_ability": True}],
+    )
+    barbarian = SCAN.model_copy(update={
+        "abilities": sheetscan.Abilities(strength=16, dexterity=14, constitution=14, intelligence=8, wisdom=10, charisma=10),
+        "classes": [ClassLevel(name="Barbarian", level=5)],
+        "ac": ArmorClass(label="Unarmored defense", base=10, abilities=["dex", "con"]), "printed_ac": 15,
+        "hp": sheetscan.ScannedHitPoints(max=55, current=55, temp=0), "attacks": [axe, bow],
+        "bonuses": [Bonus(target="damage:str", amount=2, source="Rage", active=False)],
+        "spellcasting_ability": "",
+    })
+    scan_client(monkeypatch, barbarian.model_dump_json())
+    assert JobLoop(db).pass_once()
+    job = s.job(job_id)
+    sheet = CharacterSheet.model_validate(s.character(job["result"]["character"])["sheet"])
+    d = sheet.derived()
+    assert sheet.hp.base == 45 and d["hp_max"]["total"] == 55  # 55 printed = 45 from hit dice + CON 2 x 5
+    assert d["attacks"][0]["to_hit"]["total"] == 6 and d["attacks"][0]["text"] == "1d12+3 slashing"
+    assert job["result"]["unreadable"] == [
+        "Wisdom score", "skill: Basket weaving",
+        "AC: the sheet says 15, its parts add up to 14",
+        "Longbow: the sheet says +9 to hit, its parts add up to +5",
+    ]
+    # Rage is recorded but off until switched on; then Strength attacks gain it.
+    sheet.bonuses[0].active = True
+    assert sheet.derived()["attacks"][0]["text"] == "1d12+5 slashing"
