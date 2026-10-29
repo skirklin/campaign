@@ -25,12 +25,12 @@ import time
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Iterator
+from typing import Any, AsyncIterator, Callable, Iterator, Literal
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from . import digest, sheetscan
 from .accounts import Accounts, at_least
@@ -84,6 +84,13 @@ class StashUpdate(BaseModel):
     stash: dict[str, Any]
     reason: str = "edited"
     version: int | None = None  # the version it was edited from; refused if the stash has moved on
+
+
+class NewRoll(BaseModel):
+    label: str = Field(max_length=200)
+    summary: str = Field(max_length=200)
+    detail: str = Field(default="", max_length=1000)
+    flag: Literal["", "crit", "fumble"] = ""
 
 
 class CoinChange(BaseModel):
@@ -1055,6 +1062,20 @@ def create_app(
             character=(ch["id"], sheet.model_dump(), f"{'took' if took else 'put'} {what} {'from' if took else 'in'} the party stash"),
         )
         return {"stash": stash_payload(s, request, c), "character": sheet_payload(s, request, character_or_404(s, request, ch["id"]))}
+
+    # -- dice rolls ------------------------------------------------------------------
+    # Rolled in the browser (so a roll works the moment it's tapped); this is
+    # the history. Anyone who can read the character can read its rolls.
+
+    @app.get("/api/characters/{character_id}/rolls")
+    def get_rolls(character_id: int, request: Request, limit: int = 50, s: Store = Depends(store)) -> list[dict]:
+        character_or_404(s, request, character_id)
+        return s.rolls(character_id, limit=max(1, min(limit, 200)))
+
+    @app.post("/api/characters/{character_id}/rolls", status_code=201)
+    def add_roll(character_id: int, body: NewRoll, request: Request, s: Store = Depends(store)) -> dict[str, Any]:
+        character_or_404(s, request, character_id, write=True)
+        return s.add_roll(character_id, body.label, body.summary, body.detail, body.flag, user_id=user_id(request))
 
     # -- static app ------------------------------------------------------------------
 

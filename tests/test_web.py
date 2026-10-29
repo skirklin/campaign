@@ -268,3 +268,31 @@ def test_party_stash(client):
     bad = client.post("/api/campaigns/strahd/stash/move", json={"character": cid, "to": "stash", "items": {"Lute": 1}})
     assert bad.status_code == 422 and "only 0" in bad.json()["detail"]
 
+
+def test_roll_history(client):
+    client.post("/api/campaigns", json={"name": "Strahd"})
+    cid = client.post("/api/characters/import", files={"file": ("c.json", EXAMPLE.read_bytes())},
+                      data={"campaign": "strahd"}).json()["id"]
+    assert client.get(f"/api/characters/{cid}/rolls").json() == []
+    r = client.post(f"/api/characters/{cid}/rolls",
+                    json={"label": "Warhammer", "summary": "to hit 24 · 13 bludgeoning", "detail": "d20: 20 + 4", "flag": "crit"})
+    assert r.status_code == 201 and r.json()["flag"] == "crit"
+    client.post(f"/api/characters/{cid}/rolls", json={"label": "8d6", "summary": "31"})
+    assert [x["label"] for x in client.get(f"/api/characters/{cid}/rolls").json()] == ["8d6", "Warhammer"]
+    assert client.post(f"/api/characters/{cid}/rolls", json={"label": "x", "summary": "1", "flag": "lucky"}).status_code == 422
+    # Rolls are history, not changes to the sheet.
+    assert client.get(f"/api/characters/{cid}").json()["log"][0]["reason"].startswith("imported")
+    assert client.get("/api/characters/999/rolls").status_code == 404
+
+
+def test_only_the_latest_rolls_are_kept(tmp_path):
+    from campaign.db import ROLLS_KEPT, Store
+
+    s = Store(tmp_path / "r.db")
+    c = s.create_campaign("Strahd", "dm")
+    cid = s.create_character({"name": "Brannoc"}, c.id)
+    for i in range(ROLLS_KEPT + 5):
+        s.add_roll(cid, f"roll {i}", str(i))
+    kept = s.rolls(cid, limit=1000)
+    assert len(kept) == ROLLS_KEPT and kept[0]["label"] == f"roll {ROLLS_KEPT + 4}"
+

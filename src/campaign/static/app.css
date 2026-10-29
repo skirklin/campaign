@@ -635,3 +635,31 @@ button.ok-solid { background: var(--ok); border-color: var(--ok); color: #fff; }
 .qty-pick .stepper button { width: 3rem; height: 3rem; }
 .qty-pick .step-value { min-width: 3rem; font-size: 1.4rem; }
 .play-row.item .row-main { background: none; border: 0; padding: 0; }
+
+/* -- dice tray and roll history --------------------------------------------------- */
+
+.tray-dice { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .4rem; }
+.tray-dice button { padding: .7rem 0; font: 600 1.05rem var(--serif); border-radius: 10px; }
+.tray-row { display: flex; gap: .4rem; margin-top: .45rem; }
+.tray-row button { flex: 1; padding: .55rem .3rem; border-radius: 10px; }
+.tray-row button.on { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+.tray-row .tray-expr { flex: 3; font: 600 1.15rem ui-monospace, SFMono-Regular, Menlo, monospace; text-align: center; }
+button.tray-roll { margin-top: .6rem; padding: .8rem; font-size: 1.1rem; border-radius: 10px; }
+.tray-result { text-align: center; padding: .6rem 0 .2rem; min-height: 5rem; }
+.tray-result.pop { animation: tray-pop .18s ease-out; }
+@keyframes tray-pop { from { transform: scale(.94); opacity: 0; } }
+.tray-result .roll-label { color: var(--muted); }
+.tray-result .roll-total.crit { color: var(--ok); }
+.tray-result .roll-total.fumble { color: var(--danger); }
+.tray-result .roll-detail { color: var(--muted); word-break: break-word; }
+dialog.bottom-sheet h3 { margin-top: .4rem; }
+
+ul.rolls { list-style: none; margin: 0; padding: 0; }
+ul.rolls li { padding: .35rem 0; border-bottom: 1px dotted var(--border); }
+ul.rolls li:last-child { border-bottom: 0; }
+.roll-line { display: flex; justify-content: space-between; gap: .6rem; }
+.roll-line strong { font-variant-numeric: tabular-nums; text-align: right; }
+.roll-meta { font-size: .78rem; color: var(--muted); font-variant-numeric: tabular-nums; word-break: break-word; }
+li.roll-crit .roll-line strong { color: var(--ok); }
+li.roll-fumble .roll-line strong { color: var(--danger); }
+.unsaved { color: var(--danger); }

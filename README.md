@@ -68,7 +68,13 @@ uv run campaign web            # http://127.0.0.1:8765
   phone's keyboard doesn't cover the sheet; resources, death saves and
   conditions are taps. Tapping a modifier or an attack rolls it, with a
   second d20 shown for advantage or disadvantage and dice doubled on a
-  crit. The screen stays on while it's open, and the app can be added to
+  crit. The 🎲 button opens a dice tray: tap dice to build an expression or
+  type one (`8d6 fire`, `2d20kh1+5` for advantage, `4d6kh3` for a stat),
+  with Adv/Dis toggles. Every roll is kept on the server against the
+  character (the latest 200), so the history follows the player between
+  devices and the party can see it: the tray shows the recent ones, the
+  Notes tab the rest. Rolls made on someone else's sheet stay on your
+  screen. The screen stays on while it's open, and the app can be added to
   the home screen.
 - **Campaigns**: create DM or player campaigns, then use the tabs:
   - **Ask**: chat with the campaign assistant. Answers stream in as

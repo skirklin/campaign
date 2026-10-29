@@ -9,6 +9,7 @@
 
 import { api, h, toast, sign, bottomSheet, keypad, askQty } from "./util.js";
 import { StashView } from "./stash.js";
+import { d, fmtMod, parseExpr, formatExpr, rollExpr } from "./dice.js";
 import { SheetView, ABILITIES, ABILITY_NAMES, SKILLS, CONDITIONS, COINS } from "./sheet.js";
 
 const TABS = [
@@ -94,6 +95,7 @@ export class PlayView extends SheetView {
           h("strong", s.name),
           h("span.muted", [s.species, classes].filter(Boolean).join(" · ") || `Level ${d.level}`)),
         this.status,
+        h("button.icon.keep-enabled", { title: "Dice", "aria-label": "Dice tray", onclick: () => this.tray() }, "🎲"),
         h("button.icon.keep-enabled", { title: "Edit the full sheet", "aria-label": "Edit the full sheet", onclick: () => this.edit() }, "✎"),
       ),
       h("div.play-vitals",
@@ -269,6 +271,7 @@ export class PlayView extends SheetView {
     return [
       note("notes", "Notes", 10),
       note("personality", "Personality", 4),
+      block("Rolls", this.historyBox(50)),
       block("In the world", this.worldBox),
       block("History", h("ul.log", this.log.map((l) => h("li", h("time", l.created_at.replace("T", " ").slice(0, 16)), " ", l.reason)))),
     ];
@@ -391,33 +394,139 @@ export class PlayView extends SheetView {
   // A d20 roll. A second d20 is shown alongside for advantage or disadvantage.
   roll(label, mod) {
     const a = d(20), b = d(20);
+    const flag = a === 20 ? "crit" : a === 1 ? "fumble" : "";
+    const detail = `d20: ${a} ${fmtMod(mod)}`.trim();
     this.showRoll(label, [
-      h("div.roll-total", { className: `roll-total${a === 20 ? " crit" : a === 1 ? " fumble" : ""}` }, a + mod),
-      h("div.roll-detail", `d20: ${a} ${fmtMod(mod)}`),
+      h("div.roll-total", { className: `roll-total${flag ? ` ${flag}` : ""}` }, a + mod),
+      h("div.roll-detail", detail),
       h("div.roll-detail.muted", `2nd d20: ${b} → ${b + mod} · adv ${Math.max(a, b) + mod} · dis ${Math.min(a, b) + mod}`),
     ]);
+    this.record({ label, summary: String(a + mod), detail: `${detail} · 2nd d20: ${b} → ${b + mod}`, flag });
   }
 
   attack(a) {
     const toHit = parseInt(a.to_hit, 10);
-    const dmg = parseDice(a.damage);
+    const dmg = parseExpr(a.damage);
     const first = d(20);
     const crit = first === 20;
-    const parts = [];
+    const flag = crit ? "crit" : first === 1 ? "fumble" : "";
+    const parts = [], summary = [], detail = [];
     if (!Number.isNaN(toHit)) {
       const second = d(20);
       parts.push(
-        h("div.roll-total", { className: `roll-total${crit ? " crit" : first === 1 ? " fumble" : ""}` }, first + toHit, h("small", " to hit")),
+        h("div.roll-total", { className: `roll-total${flag ? ` ${flag}` : ""}` }, first + toHit, h("small", " to hit")),
         h("div.roll-detail", `d20: ${first} ${fmtMod(toHit)}${crit ? " · critical!" : ""}`),
         h("div.roll-detail.muted", `2nd d20: ${second} → ${second + toHit}`));
+      summary.push(`to hit ${first + toHit}`);
+      detail.push(`d20: ${first} ${fmtMod(toHit)} · 2nd d20: ${second} → ${second + toHit}`);
     }
-    if (dmg) {
-      const r = rollDice(dmg, crit);
-      parts.push(h("div.roll-total.damage", r.total, h("small", ` ${dmg.rest || "damage"}`)),
+    if (dmg?.dice.length) {
+      const r = rollExpr(dmg, { crit });
+      const total = Math.max(0, r.total);
+      parts.push(h("div.roll-total.damage", total, h("small", ` ${dmg.rest || "damage"}`)),
         h("div.roll-detail", r.detail + (crit ? " (crit: dice doubled)" : "")));
+      summary.push(`${total} ${dmg.rest || "damage"}`);
+      detail.push(r.detail + (crit ? " (crit)" : ""));
     }
     if (!parts.length) return toast("Add a to-hit bonus or damage dice to this attack in Edit.");
     this.showRoll(a.name || "Attack", parts);
+    this.record({ label: a.name || "Attack", summary: summary.join(" · "), detail: detail.join(" · "), flag: Number.isNaN(toHit) ? "" : flag });
+  }
+
+  // -- roll history ---------------------------------------------------------------
+  // Kept on the server against the character (for its owner and DM; anyone
+  // else's rolls on this sheet stay on their screen).
+
+  async loadRolls() {
+    if (!this.rollsLoading) {
+      this.rollsLoading = api("GET", `/api/characters/${this.id}/rolls`)
+        .then((list) => { this.rolls = [...(this.rolls || []).filter((r) => r.pending), ...list]; this.showHistory(); })
+        .catch(() => { this.rollsLoading = null; });
+    }
+    return this.rollsLoading;
+  }
+
+  record(roll) {
+    const entry = { ...roll, created_at: new Date().toISOString(), pending: true };
+    this.rolls = [entry, ...(this.rolls || [])];
+    this.showHistory();
+    if (!this.canEdit) return;
+    api("POST", `/api/characters/${this.id}/rolls`, roll)
+      .then((saved) => { Object.assign(entry, saved, { pending: false }); })
+      .catch(() => { entry.unsaved = true; this.showHistory(); });
+  }
+
+  // Redraw every open roll list (the tray's, the Notes tab's).
+  showHistory() {
+    for (const el of document.querySelectorAll(".roll-history")) {
+      el.replaceChildren(rollList(this.rolls || [], Number(el.dataset.limit) || 50));
+    }
+  }
+
+  historyBox(limit) {
+    const el = h("div.roll-history", { dataset: { limit: String(limit) } }, h("p.muted", "Loading…"));
+    if (this.rolls) el.replaceChildren(rollList(this.rolls, limit));
+    this.loadRolls();
+    return el;
+  }
+
+  // The dice tray: build an expression with the buttons, or type one.
+  tray() {
+    let advantage = "";
+    const input = h("input.tray-expr", {
+      value: this.trayExpr || "1d20", "aria-label": "Dice to roll", autocomplete: "off", autocapitalize: "off", spellcheck: false,
+      // Typing makes the expression whatever's typed: advantage is only what it says.
+      oninput: () => { this.trayExpr = input.value; advantage = ""; advBtn.classList.remove("on"); disBtn.classList.remove("on"); },
+    });
+    const result = h("div.tray-result", h("p.muted", "Tap dice to add them, then Roll. Or type, like 2d6+3 or 4d6kh3."));
+    const set = (expr) => { input.value = this.trayExpr = expr; };
+    const parsed = () => parseExpr(input.value) || { dice: [], mod: 0, rest: "" };
+    const addDie = (sides) => {
+      const p = parsed();
+      const same = p.dice.find((t) => t.sides === sides && t.n > 0 && !t.keep);
+      if (same) same.n += 1; else p.dice.push({ n: 1, sides });
+      set(formatExpr(p));
+    };
+    const addMod = (by) => { const p = parsed(); p.mod += by; set(formatExpr(p)); };
+    // Advantage and disadvantage turn the d20 into 2d20 keeping the higher or lower.
+    const adv = (kind) => {
+      const p = parsed();
+      advantage = advantage === kind ? "" : kind;
+      let t = p.dice.find((x) => x.sides === 20);
+      if (!t) p.dice.unshift((t = { n: 1, sides: 20 }));
+      Object.assign(t, advantage ? { n: 2, keep: [kind === "adv" ? "h" : "l", 1] } : { n: 1, keep: undefined });
+      set(formatExpr(p));
+      advBtn.classList.toggle("on", advantage === "adv");
+      disBtn.classList.toggle("on", advantage === "dis");
+    };
+    const advBtn = h("button", { onclick: () => adv("adv") }, "Adv");
+    const disBtn = h("button", { onclick: () => adv("dis") }, "Dis");
+    const roll = () => {
+      const p = parseExpr(input.value);
+      if (!p || !p.dice.length) return toast("Try something like 2d6+3, 8d6 or 2d20kh1+5.", true);
+      const r = rollExpr(p);
+      const flag = r.natural === 20 ? "crit" : r.natural === 1 ? "fumble" : "";
+      const label = p.rest || formatExpr(p);
+      result.replaceChildren(
+        h("div.roll-label", label),
+        h("div", { className: `roll-total${flag ? ` ${flag}` : ""}` }, r.total),
+        h("div.roll-detail", r.detail));
+      result.classList.remove("pop");
+      void result.offsetWidth;
+      result.classList.add("pop");
+      this.record({ label, summary: String(r.total), detail: r.detail, flag });
+    };
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); roll(); } });
+    bottomSheet("Dice",
+      h("div.tray-dice", [4, 6, 8, 10, 12, 20, 100].map((n) => h("button", { onclick: () => addDie(n) }, `d${n}`))),
+      h("div.tray-row", input,
+        h("button", { onclick: () => addMod(-1), "aria-label": "Minus one" }, "−1"),
+        h("button", { onclick: () => addMod(1), "aria-label": "Plus one" }, "+1")),
+      h("div.tray-row", advBtn, disBtn, h("button", { onclick: () => { advantage = ""; advBtn.classList.remove("on"); disBtn.classList.remove("on"); set(""); input.focus(); } }, "Clear")),
+      h("button.primary.wide.tray-roll", { onclick: roll }, "Roll"),
+      result,
+      h("h3", "Recent rolls"),
+      this.historyBox(8));
   }
 
   showRoll(label, body) {
@@ -434,43 +543,18 @@ export class PlayView extends SheetView {
 // -- helpers -----------------------------------------------------------------
 
 const cap = (s) => s.replace(/\b\w/g, (c) => c.toUpperCase());
-const fmtMod = (m) => (m ? `${m > 0 ? "+" : "−"} ${Math.abs(m)}` : "");
-
-function d(sides) {
-  const buf = new Uint32Array(1);
-  crypto.getRandomValues(buf);
-  return 1 + (buf[0] % sides);
+function rollList(rolls, limit) {
+  if (!rolls.length) return h("p.empty", "No rolls yet.");
+  return h("ul.rolls", rolls.slice(0, limit).map((r) => h("li", { className: r.flag ? `roll-${r.flag}` : "" },
+    h("div.roll-line", h("span.roll-what", r.label), h("strong", r.summary)),
+    h("div.roll-meta", r.detail, " · ", when(r.created_at), r.unsaved && h("span.unsaved", " · not saved")))));
 }
 
-// "2d6+1d4+3 fire" -> {dice: [[2,6],[1,4]], mod: 3, rest: "fire"}; null if there are no dice.
-export function parseDice(text) {
-  const m = String(text || "").match(/^\s*((?:[+-]?\s*(?:\d*d\d+|\d+)\s*)+)(.*)$/i);
-  if (!m || !/d\d/i.test(m[1])) return null;
-  const dice = [];
-  let mod = 0;
-  for (const [, sgn, term] of m[1].replace(/\s+/g, "").matchAll(/([+-]?)(\d*d\d+|\d+)/gi)) {
-    const s = sgn === "-" ? -1 : 1;
-    if (/d/i.test(term)) {
-      const [n, sides] = term.toLowerCase().split("d");
-      dice.push([s * (Number(n) || 1), Number(sides)]);
-    } else {
-      mod += s * Number(term);
-    }
-  }
-  return { dice, mod, rest: m[2].trim() };
-}
-
-function rollDice({ dice, mod }, crit) {
-  let total = mod;
-  const shown = [];
-  for (const [n, sides] of dice) {
-    const count = Math.abs(n) * (crit ? 2 : 1);
-    const rolls = Array.from({ length: count }, () => d(sides));
-    const sum = rolls.reduce((a, b) => a + b, 0);
-    total += Math.sign(n) * sum;
-    shown.push(`${n < 0 ? "−" : ""}${count}d${sides} [${rolls.join(", ")}]`);
-  }
-  return { total: Math.max(0, total), detail: shown.join(" + ") + (mod ? ` ${fmtMod(mod)}` : "") };
+// "14:05" today, else "Oct 27 14:05".
+function when(iso) {
+  const t = new Date(iso.endsWith("Z") || iso.includes("+") ? iso : `${iso}Z`);
+  const time = t.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return t.toDateString() === new Date().toDateString() ? time : `${t.toLocaleDateString([], { month: "short", day: "numeric" })} ${time}`;
 }
 
 // "Spell slots (1st)", "2nd level slots", "Pact slots" -> a resource that's a spell slot.
