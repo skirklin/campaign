@@ -17,14 +17,18 @@ A campaign you don't belong to answers 404, as if it didn't exist.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import sqlite3
+import threading
+import time
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Iterator
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
@@ -57,6 +61,10 @@ class NewCharacter(BaseModel):
 
 class CopyCharacter(BaseModel):
     campaign: str
+
+
+class ChatMessage(BaseModel):
+    text: str
 
 
 class SheetUpdate(BaseModel):
@@ -103,9 +111,15 @@ class AdminUpdate(BaseModel):
 
 def create_app(
     db: Path | str, auth: AuthConfig | None = None, exchange: Callable | None = None,
-    digest_client: Callable[[], Any] | None = None,
+    digest_client: Callable[[], Any] | None = None, shutting_down: threading.Event | None = None,
 ) -> FastAPI:
-    """`exchange` replaces the call to Google's token endpoint, `digest_client` the Claude client (for tests)."""
+    """`exchange` replaces the call to Google's token endpoint, `digest_client` the Claude client (for tests).
+
+    `shutting_down` is set when the server has been told to stop, so live
+    streams end at once (and browsers reconnect to the next server) instead
+    of holding a deploy up.
+    """
+    shutting_down = shutting_down or threading.Event()
     # Migrate now, once, before anything else (the digest loop, the first
     # requests) opens the database and races to create the schema.
     Store(db).close()
@@ -127,6 +141,7 @@ def create_app(
                 async with mcp[0].session_manager.run():
                     yield
         finally:
+            shutting_down.set()
             reconciler.stop()
             ingest_loop.stop()
 
@@ -368,6 +383,10 @@ def create_app(
 
     @app.get("/api/campaigns/{slug}/sources")
     def sources(c: Campaign = Depends(reader), s: Store = Depends(store)) -> list[dict[str, Any]]:
+        return list_sources(s, c)
+
+    def list_sources(s: Store, c: Campaign) -> list[dict[str, Any]]:
+        """The campaign's sources with their digest status, as this viewer may see them."""
         out = []
         for src in s.sources(c):
             # Players see DM-only material listed (so editors can manage it) but never its contents.
@@ -619,6 +638,148 @@ def create_app(
         if ing["state"] in ("wanted", "running"):
             s.update_ingest(ingest_id, state="cancelled")
 
+    # -- live updates ----------------------------------------------------------------
+    # One Server-Sent Events stream per open campaign page. It reads the
+    # database (the only state there is) every second and sends what changed:
+    # the sources' digest status, and each recent ingest's state and new log
+    # lines. A browser's EventSource reconnects by itself, so when a deploy
+    # ends a stream the page carries on against the next server.
+
+    def sse(event: str, data: Any) -> str:
+        return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+    @app.get("/api/campaigns/{slug}/events")
+    async def events(request: Request, c: Campaign = Depends(reader), seconds: float = 300) -> StreamingResponse:
+        """Live campaign updates. Each stream ends after `seconds` (the browser then reconnects)."""
+        def snapshot(sent: dict[int, tuple[str, int, int, str]]) -> list[str]:
+            """Messages for what changed since the last snapshot. `sent` remembers, per ingest,
+            the state, the attempt, and the last log line (seq and text) this stream has sent."""
+            s = Store(db)
+            try:
+                out = [sse("sources", list_sources(s, c))]
+                for ing in s.ingests(c, limit=10):
+                    state, attempt, seq, text = sent.get(ing["id"], (None, -1, -1, ""))
+                    if ing["attempts"] != attempt:  # a new attempt starts its log over
+                        seq, text = -1, ""
+                    # From the last line sent: streamed text grows in place.
+                    fresh = [e for e in s.ingest_log(ing["id"], since=max(seq, 0))
+                             if e["seq"] > seq or e["text"] != text]
+                    if ing["state"] == state and ing["attempts"] == attempt and not fresh:
+                        continue
+                    out.append(sse("ingest", ingest_view(ing) | {"log": fresh}))
+                    last = fresh[-1] if fresh else {"seq": seq, "text": text}
+                    sent[ing["id"]] = (ing["state"], ing["attempts"], last["seq"], last["text"])
+                return out
+            finally:
+                s.close()
+
+        async def stream() -> AsyncIterator[str]:
+            sent: dict[int, tuple[str, int, int, str]] = {}
+            last_sources = None
+            deadline = time.monotonic() + seconds
+            yield "retry: 2000\n\n"  # how soon the browser reconnects after a stream ends
+            while True:
+                for message in await asyncio.to_thread(snapshot, sent):
+                    if message.startswith("event: sources"):
+                        if message == last_sources:
+                            continue
+                        last_sources = message
+                    yield message
+                if time.monotonic() >= deadline or shutting_down.is_set() or await request.is_disconnected():
+                    return
+                await asyncio.sleep(1)
+
+        return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-store"})
+
+    # -- chat ------------------------------------------------------------------------
+    # Conversations with the campaign assistant, stored so any server can carry
+    # one on. Each is private to the person having it.
+
+    def my_conversation(s: Store, request: Request, c: Campaign, conversation_id: int) -> dict[str, Any]:
+        conv = s.conversation(conversation_id)
+        user = None if local else user_of(request)["id"]
+        if conv is None or conv["campaign_id"] != c.id or conv["user_id"] != user:
+            raise HTTPException(404, "no such conversation")
+        return conv
+
+    @app.get("/api/campaigns/{slug}/chats")
+    def chats(request: Request, c: Campaign = Depends(reader), s: Store = Depends(store)) -> list[dict[str, Any]]:
+        return s.conversations(c, None if local else user_of(request)["id"])
+
+    @app.post("/api/campaigns/{slug}/chats", status_code=201)
+    def new_chat(request: Request, c: Campaign = Depends(reader), s: Store = Depends(store)) -> dict[str, Any]:
+        return s.conversation(s.create_conversation(c, None if local else user_of(request)["id"]))
+
+    @app.get("/api/campaigns/{slug}/chats/{conversation_id}")
+    def chat_history(conversation_id: int, request: Request, c: Campaign = Depends(reader),
+                     s: Store = Depends(store)) -> dict[str, Any]:
+        """The conversation as the page shows it: what each side said, and the tools the assistant used."""
+        from .agent import describe_tool_call
+
+        conv = my_conversation(s, request, c, conversation_id)
+        turns: list[dict[str, Any]] = []
+        for m in s.conversation_messages(conversation_id):
+            blocks = [{"type": "text", "text": m["content"]}] if isinstance(m["content"], str) else m["content"]
+            for b in blocks:
+                if b.get("type") == "text" and b.get("text", "").strip():
+                    turns.append({"role": m["role"], "kind": "text", "text": b["text"]})
+                elif b.get("type") == "tool_use":
+                    turns.append({"role": "assistant", "kind": "tool",
+                                  "text": describe_tool_call(b["name"], b.get("input", {})).strip(" ·")})
+        return conv | {"turns": turns}
+
+    @app.delete("/api/campaigns/{slug}/chats/{conversation_id}", status_code=204)
+    def delete_chat(conversation_id: int, request: Request, c: Campaign = Depends(reader), s: Store = Depends(store)) -> None:
+        my_conversation(s, request, c, conversation_id)
+        s.delete_conversation(conversation_id)
+
+    @app.post("/api/campaigns/{slug}/chats/{conversation_id}/messages")
+    async def chat_message(conversation_id: int, body: ChatMessage, request: Request,
+                           c: Campaign = Depends(reader)) -> StreamingResponse:
+        """Ask the assistant; the answer streams back as Server-Sent Events.
+
+        Events: `text` (a piece of the answer), `tool` (a tool it's using),
+        `done`, `error`. The turn runs to the end and is saved even if the
+        page goes away mid-answer.
+        """
+        from .agent import chat_turn, describe_tool_call
+
+        question = body.text.strip()
+        if not question:
+            raise HTTPException(422, "say something")
+        s = Store(db)
+        try:
+            my_conversation(s, request, c, conversation_id)
+        finally:
+            s.close()
+        user = None if local else user_of(request)["id"]
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[str | None] = asyncio.Queue()
+        put = lambda item: loop.call_soon_threadsafe(queue.put_nowait, item)  # noqa: E731
+
+        def run() -> None:
+            ts = Store(db)
+            try:
+                chat_turn(
+                    ts, c, conversation_id, question, user_id=user, writable=at_least(c.access, "editor"),
+                    on_text=lambda t: put(sse("text", t)),
+                    on_tool=lambda n, a: put(sse("tool", describe_tool_call(n, a).strip(" ·"))),
+                )
+                put(sse("done", {}))
+            except Exception as err:
+                put(sse("error", str(err) or type(err).__name__))
+            finally:
+                ts.close()
+                put(None)
+
+        threading.Thread(target=run, name=f"chat-{conversation_id}", daemon=True).start()
+
+        async def stream() -> AsyncIterator[str]:
+            while (item := await queue.get()) is not None:
+                yield item
+
+        return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-store"})
+
     # -- characters ----------------------------------------------------------------
     # A sheet belongs to one campaign and to the person who made it. Its owner
     # can edit it; so can the campaign's DMs who have editor access. Anyone in
@@ -837,6 +998,16 @@ def serve(db: Path | str, host: str = "127.0.0.1", port: int = 8765, allow_no_au
     else:
         print("Sign-in: off")
     s.close()
+    shutting_down = threading.Event()
+
+    class Server(uvicorn.Server):
+        def handle_exit(self, sig: int, frame: Any) -> None:
+            shutting_down.set()  # end live streams now; uvicorn then waits for the rest
+            super().handle_exit(sig, frame)
+
     # Behind a reverse proxy (Caddy) only the proxy's X-Forwarded-* headers are trusted.
     # On SIGTERM (a deploy), finish requests in flight for up to 20 s, then stop the background loops.
-    uvicorn.run(create_app(db, auth), host=host, port=port, proxy_headers=True, timeout_graceful_shutdown=20)
+    Server(uvicorn.Config(
+        create_app(db, auth, shutting_down=shutting_down), host=host, port=port,
+        proxy_headers=True, timeout_graceful_shutdown=20,
+    )).run()

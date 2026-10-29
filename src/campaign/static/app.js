@@ -9,7 +9,7 @@ const routes = [
   [/^#\/account$/, () => accountView(), "account"],
   [/^#\/campaigns\/([^/]+)\/source\/(\d+)$/, (m) => sourceView(m[1], m[2]), "campaigns"],
   [/^#\/campaigns\/([^/]+)\/entity\/(\d+)$/, (m) => entityView(m[1], m[2]), "campaigns"],
-  [/^#\/campaigns\/([^/]+)(?:\/(\w+))?$/, (m) => campaignView(m[1], m[2] || "ingest"), "campaigns"],
+  [/^#\/campaigns\/([^/]+)(?:\/(\w+))?$/, (m) => campaignView(m[1], m[2] || "ask"), "campaigns"],
   [/^#\/campaigns\/?$/, () => campaignList(), "campaigns"],
   [/^.*$/, () => characterList(), "characters"],
 ];

@@ -90,3 +90,57 @@ export function whoami() {
 
 // Viewers can look but not change; editors and owners can change content.
 export const canEdit = (campaign) => campaign.access !== "viewer";
+
+// Live updates for a campaign over Server-Sent Events: handlers[type](data)
+// for each event. The browser reconnects by itself (after a deploy, say), and
+// the stream closes once `owner` has been on the page and left it.
+export function live(slug, owner, handlers) {
+  const es = new EventSource(`/api/campaigns/${slug}/events`);
+  let seen = false;
+  const gone = () => {
+    if (owner.isConnected) seen = true;
+    if (seen && !owner.isConnected) {
+      es.close();
+      clearInterval(timer);
+      return true;
+    }
+    return false;
+  };
+  const timer = setInterval(gone, 2000);
+  for (const [type, fn] of Object.entries(handlers)) {
+    es.addEventListener(type, (e) => {
+      if (!gone()) fn(JSON.parse(e.data));
+    });
+  }
+  return () => { es.close(); clearInterval(timer); };
+}
+
+// POST JSON and read the response as Server-Sent Events: onEvent(type, data) for each.
+export async function streamPost(url, body, onEvent) {
+  const res = await fetch(url, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const detail = (await res.json().catch(() => null))?.detail;
+    throw new Error(typeof detail === "string" ? detail : res.statusText);
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let end;
+    while ((end = buffer.indexOf("\n\n")) >= 0) {
+      const chunk = buffer.slice(0, end);
+      buffer = buffer.slice(end + 2);
+      let type = "message", data = "";
+      for (const line of chunk.split("\n")) {
+        if (line.startsWith("event: ")) type = line.slice(7);
+        else if (line.startsWith("data: ")) data += line.slice(6);
+      }
+      if (data) onEvent(type, JSON.parse(data));
+    }
+  }
+}

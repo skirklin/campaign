@@ -391,6 +391,28 @@ CREATE TABLE ingest_log (
 );
 """
 
+# v10: chat conversations, kept so any server can continue one. Messages
+# are stored exactly as the API returned them (thinking blocks included,
+# which must be passed back unchanged on later turns).
+V10_CONVERSATIONS = """
+CREATE TABLE conversations (
+    id           INTEGER PRIMARY KEY,
+    campaign_id  INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    user_id      INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    title        TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+);
+CREATE INDEX conversations_campaign ON conversations(campaign_id, user_id, updated_at);
+CREATE TABLE conversation_messages (
+    conversation_id  INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    seq              INTEGER NOT NULL,
+    role             TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+    content          TEXT NOT NULL,   -- JSON: a string or a list of content blocks
+    PRIMARY KEY (conversation_id, seq)
+);
+"""
+
 # Append only, for changes small enough to migrate.
 #
 # Deploys are rolling: the new server starts, and runs these, while the old
@@ -407,6 +429,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (7, V7_DIGEST_TARGET),
     (8, V8_LEASES),
     (9, V9_INGESTS),
+    (10, V10_CONVERSATIONS),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 
@@ -900,6 +923,52 @@ class Store:
     def clear_ingest_log(self, ingest_id: int) -> None:
         with self.conn:
             self.conn.execute("DELETE FROM ingest_log WHERE ingest_id = ?", (ingest_id,))
+
+    # -- chat conversations ----------------------------------------------------------
+
+    def create_conversation(self, campaign: Campaign, user_id: int | None, title: str = "") -> int:
+        with self.conn:
+            return self.conn.execute(
+                "INSERT INTO conversations (campaign_id, user_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                (campaign.id, user_id, title, now(), now()),
+            ).lastrowid
+
+    def conversation(self, conversation_id: int) -> dict[str, Any] | None:
+        row = self.conn.execute("SELECT * FROM conversations WHERE id = ?", (conversation_id,)).fetchone()
+        return None if row is None else dict(row)
+
+    def conversations(self, campaign: Campaign, user_id: int | None, limit: int = 50) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT * FROM conversations WHERE campaign_id = ? AND user_id IS ? ORDER BY updated_at DESC, id DESC LIMIT ?",
+            (campaign.id, user_id, limit),
+        )
+        return [dict(r) for r in rows]
+
+    def conversation_messages(self, conversation_id: int) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT role, content FROM conversation_messages WHERE conversation_id = ? ORDER BY seq", (conversation_id,)
+        )
+        return [{"role": r["role"], "content": json.loads(r["content"])} for r in rows]
+
+    def append_conversation(self, conversation_id: int, messages: list[dict[str, Any]], title: str | None = None) -> None:
+        with self.conn:
+            seq = self.conn.execute(
+                "SELECT coalesce(max(seq), -1) FROM conversation_messages WHERE conversation_id = ?", (conversation_id,)
+            ).fetchone()[0]
+            for m in messages:
+                seq += 1
+                self.conn.execute(
+                    "INSERT INTO conversation_messages (conversation_id, seq, role, content) VALUES (?, ?, ?, ?)",
+                    (conversation_id, seq, m["role"], json.dumps(m["content"], ensure_ascii=False)),
+                )
+            self.conn.execute(
+                "UPDATE conversations SET updated_at = ?, title = CASE WHEN title = '' AND ? IS NOT NULL THEN ? ELSE title END"
+                " WHERE id = ?", (now(), title, title, conversation_id),
+            )
+
+    def delete_conversation(self, conversation_id: int) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
 
     # -- leases ----------------------------------------------------------------------
 

@@ -235,10 +235,38 @@ def catalog(store: Store, campaign: Any) -> str:
     return "\n## Names in the reference material\nkind | name | aliases\n" + "\n".join(lines) + "\n"
 
 
-def chat_agent(store: Store, campaign_slug: str, **kw: Any) -> Agent:
-    campaign = store.campaign(campaign_slug)
+def chat_agent(store: Store, campaign_slug: str | Campaign, user_id: int | None = None, **kw: Any) -> Agent:
+    """A conversation over one campaign. Pass a Campaign to talk as a particular viewer (their role)."""
+    campaign = store.campaign(campaign_slug) if isinstance(campaign_slug, str) else campaign_slug
     system = ASK_SYSTEM.format(name=campaign.name, overview=overview(store, campaign), **_role_parts(campaign))
-    return Agent(store=store, ctx=ToolContext(store, campaign), system=system, **kw)
+    return Agent(store=store, ctx=ToolContext(store, campaign, user_id=user_id), system=system, **kw)
+
+
+def _plain(content: Any) -> Any:
+    """A message's content as JSON-ready data, exactly as the API returned it (thinking blocks included)."""
+    if isinstance(content, str):
+        return content
+    return [b.model_dump(mode="json", exclude_none=True) if hasattr(b, "model_dump") else b for b in content]
+
+
+def chat_turn(
+    store: Store, campaign: Campaign, conversation_id: int, text: str, user_id: int | None = None,
+    writable: bool = True, **kw: Any,
+) -> str:
+    """One turn of a stored conversation: load its history, answer, and append what was said.
+
+    Only what this turn added is written, after the turn finishes, so the
+    stored history is always a whole number of turns and only ever grows,
+    as replaying thinking blocks requires.
+    """
+    history = store.conversation_messages(conversation_id)
+    first = not history
+    agent = chat_agent(store, campaign, user_id=user_id, messages=list(history), writable=writable, **kw)
+    start = len(agent.messages)
+    answer = agent.send(text)
+    new = [{"role": m["role"], "content": _plain(m["content"])} for m in agent.messages[start:]]
+    store.append_conversation(conversation_id, new, title=text.strip()[:80] if first else None)
+    return answer
 
 
 def ingest_session(

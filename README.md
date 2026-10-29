@@ -61,6 +61,11 @@ uv run campaign web            # http://127.0.0.1:8765
   death saves, short and long rests, export to JSON, and a change history.
   It works at phone width for use at the table.
 - **Campaigns**: create DM or player campaigns, then use the tabs:
+  - **Ask**: chat with the campaign assistant. Answers stream in as
+    they're written, with the lookups it makes shown along the way.
+    Conversations are kept (per person), so you can come back to one; in
+    a player campaign it only knows what the party knows. With editor
+    access it can also record what you tell it happened.
   - **Sessions**: paste a transcript, or upload a text file or a recording,
     to run an ingest. A live log shows what Claude is reading and
     recording. Each past session has its recap and a **Revert** button.
