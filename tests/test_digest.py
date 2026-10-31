@@ -523,3 +523,50 @@ def test_keyed_areas_treasure_and_tables_reach_the_tools(env):
     assert rolled["result"] == "Strahd himself" and rolled["source"] == "Book"
     assert json.loads(tools["roll_table"](name="night", roll=2))["result"] == "2d4 wolves"
     assert 1 <= json.loads(tools["roll_table"](name="night encounters"))["roll"] <= 6
+
+
+def test_a_section_starts_as_soon_as_its_own_subsections_are_done(env):
+    """A slow section in Chapter 2 doesn't hold up Chapter 1's summary."""
+    import threading
+
+    store, camp, db = env
+    r = upload(store, camp)
+    fake = FakeDigest()
+    chapter1_started = threading.Event()
+    original = fake.stream
+
+    def stream(**kw):
+        title = kw["messages"][0]["content"].split("\n", 1)[0]
+        if "Chapter 1" in title:
+            chapter1_started.set()
+        if "Windmill" in title:  # held until Chapter 1 has been asked for (or give up)
+            assert chapter1_started.wait(5), "Chapter 1 waited for Chapter 2's slow section"
+        return original(**kw)
+
+    fake.beta.messages.stream = stream
+    stats = digest.run(db, r["id"], client=fake, workers=8)
+    assert stats["failed"] == 0 and stats["digested"] == 8
+
+
+def test_sources_are_digested_side_by_side(env):
+    import threading
+
+    store, camp, db = env
+    a, b = upload(store, camp), library.add_reference(store, camp, b"# Other\n## One\nENTITY npc Zed\n", "other.md", title="Other", kind="module")
+    for src in (a, b):
+        store.set_digest_target(src["id"], digest.MODEL, "medium")
+    both = threading.Barrier(2, timeout=5)
+    seen: set[str] = set()
+
+    class Meeting(FakeDigest):
+        def stream(self, **kw):
+            book = "Other" if "Zed" in kw["messages"][0]["content"] or "One" in kw["messages"][0]["content"].split("\n")[0] else "Book"
+            if book not in seen:
+                seen.add(book)
+                both.wait()  # each source's first call waits for the other's: only works side by side
+            return super().stream(**kw)
+
+    loop = digest.Reconciler(db, client_factory=Meeting)
+    while loop.reconcile_once():
+        pass
+    assert not both.broken and seen == {"Book", "Other"}

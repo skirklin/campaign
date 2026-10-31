@@ -33,9 +33,10 @@ import hashlib
 import json
 import os
 import re
+import threading
 import time
 import traceback
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterator, Literal
@@ -60,6 +61,11 @@ def fallback_params(model: str) -> dict[str, Any]:
     if model.startswith(NO_FALLBACK_PREFIXES):
         return {}
     return {"betas": [FALLBACK_BETA], "fallbacks": "default"}
+
+# Calls in flight at once, per source; sources are digested side by side. The
+# work is waiting on the API, so this is bounded by its rate limits, not by us.
+WORKERS = int(os.environ.get("CAMPAIGN_DIGEST_WORKERS", "8"))
+_MATERIALIZING = threading.Lock()
 
 MAX_LEAF_CHARS = 40_000  # ~10k tokens; longer sections are split into parts
 MIN_LEAF_CHARS = 6_000  # shorter sibling sections are packed into one call
@@ -675,7 +681,7 @@ def run(
     db: Path | str,
     source_id: int,
     client: Any = None,
-    workers: int = 4,
+    workers: int = WORKERS,
     model: str = MODEL,
     effort: str = EFFORT,
     on_progress: Callable[[dict[str, int]], None] | None = None,
@@ -718,14 +724,16 @@ def run(
                 raise _Stopped
             return digest_node(client, n, model, effort)
 
+        # Each section starts as soon as its subsections are done, not when the
+        # whole level is: one slow call holds up only the sections above it.
+        in_flight: dict[Any, DNode] = {}
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            while keep_going():
-                ready = [
-                    n for n in nodes
-                    if n.output is None and n.error is None and all(c.output is not None for c in n.children)
-                ]
-                futures = {}
-                for n in ready:
+            while True:
+                found_cached = False
+                for n in nodes:
+                    if (n.output is not None or n.error is not None or n in in_flight.values()
+                            or any(c.output is None for c in n.children)):
+                        continue
                     if not n.is_leaf:
                         # Children just finished, so the branch's key is knowable now.
                         n.key = branch_key(n, model)
@@ -733,22 +741,26 @@ def run(
                         if n.output is not None:
                             store.set_digest_node(n.row_id, n.key)
                             stats["cached"] += 1
+                            found_cached = True
                             continue
                     if backing_off(n):
                         stats["waiting"] += 1
                         continue
-                    futures[pool.submit(work, n)] = n
-                if not futures:
-                    if not any(n.output is None and n.error is None and not n.is_leaf
-                               and all(c.output is not None for c in n.children) for n in nodes):
+                    if not keep_going():
                         break
-                    continue  # branches became ready from the cache; look again
-                for fut in as_completed(futures):
-                    n = futures[fut]
+                    in_flight[pool.submit(work, n)] = n
+                if not in_flight:
+                    if found_cached:
+                        continue  # a cached section may have made its parent ready; look again
+                    break
+                done, _ = wait(in_flight, return_when=FIRST_COMPLETED)
+                for fut in done:
+                    n = in_flight.pop(fut)
                     try:
                         output, i, o = fut.result()
                     except _Stopped:
-                        continue  # still to do, for whenever it's wanted again
+                        n.error = "stopped"  # not scheduled again this run; still to do next time
+                        continue
                     except Exception as err:  # keep going; the rest of the tree is still useful
                         n.error = str(err) or type(err).__name__
                         f = store.record_digest_failure(n.key, n.error, int(time.time()), MAX_ATTEMPTS, RETRY_SECONDS)
@@ -770,7 +782,8 @@ def run(
             if n.output is None and n.error is None and any(c.output is None for c in n.children):
                 store.set_digest_node(n.row_id, None, "waiting on a failed subsection")
         if root.output is not None:
-            _materialize(store, source_id, root)
+            with _MATERIALIZING:  # sources digested side by side apply one at a time
+                _materialize(store, source_id, root)
         return stats
     finally:
         store.close()
@@ -800,7 +813,7 @@ class Reconciler(LeasedLoop):
 
     LEASE = "digest-loop"
 
-    def __init__(self, db: Path | str, client_factory: Callable[[], Any] | None = None, workers: int = 4):
+    def __init__(self, db: Path | str, client_factory: Callable[[], Any] | None = None, workers: int = WORKERS):
         super().__init__(db)
         self.client_factory = client_factory or (lambda: anthropic.Anthropic())
         self.workers = workers
@@ -847,18 +860,21 @@ class Reconciler(LeasedLoop):
             pending = [t for t in s.digest_targets() if _unfinished(s, t["id"], t["model"])]
         finally:
             s.close()
-        busy = False
-        for t in pending:
-            if self.stopping:
-                break
+        if not pending:
+            return False
+
+        def one(t: dict[str, Any]) -> bool:
             stats = run(
                 self.db, t["id"], client=self.client_factory(), workers=self.workers,
                 model=t["model"], effort=t["effort"] or EFFORT,
                 # Before each call: still running, still wanted, and still ours (renewing the lease).
-                keep_going=lambda t=t: not self.stopping and self._wanted(t["id"], t["model"]) and self.holds_lease(),
+                keep_going=lambda: not self.stopping and self._wanted(t["id"], t["model"]) and self.holds_lease(),
             )
-            busy = busy or stats["digested"] > 0
-        return busy
+            return stats["digested"] > 0
+
+        # All the sources that want work at once, so a big one doesn't hold up the rest.
+        with ThreadPoolExecutor(max_workers=len(pending)) as pool:
+            return any(list(pool.map(one, pending)))
 
 
 def _unfinished(store: Store, source_id: int, model: str) -> bool:
