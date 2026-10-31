@@ -32,7 +32,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
-from . import digest, sheetscan
+from . import digest, encounters, sheetscan
 from .accounts import Accounts, at_least
 from .auth import AuthConfig
 from .auth import install as install_auth
@@ -591,6 +591,11 @@ def create_app(
             return {"summary": w.synthesize(entity_id)}
         except Exception as err:
             raise HTTPException(502, f"couldn't write a summary: {err}")
+
+    @app.post("/api/campaigns/{slug}/encounter")
+    def encounter(spec: encounters.Spec, c: Campaign = Depends(reader), s: Store = Depends(store)) -> dict[str, Any]:
+        """A fight as the encounter card shows it: each creature's stat block, XP and the difficulty."""
+        return encounters.build(s, c, spec)
 
     @app.get("/api/campaigns/{slug}/journal")
     def journal(session: int | None = None, c: Campaign = Depends(reader), s: Store = Depends(store)) -> list[dict]:

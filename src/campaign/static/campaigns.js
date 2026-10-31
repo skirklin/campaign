@@ -6,6 +6,7 @@ import { membersTab } from "./people.js";
 import { characterCard, newCharacterForm } from "./sheet.js";
 import { StashView } from "./stash.js";
 import { renderMarkdown, inline, statBlockFromData } from "./markdown.js";
+import { encounterFence } from "./encounter.js";
 
 export async function campaignList() {
   const [campaigns, info] = await Promise.all([api("GET", "/api/campaigns"), api("GET", "/api/info").catch(() => null)]);
@@ -75,6 +76,7 @@ async function askTab(c) {
     ? "Ask about the campaign: what the party knows, rules, your character…"
     : "Ask about the module, the world, or tell it what happened…", "aria-label": "Message" });
   const send = h("button.primary.send", { type: "submit", title: "Send", "aria-label": "Send" }, "↑");
+  const fences = { encounter: encounterFence(c.slug) };
 
   // What the assistant looked up on the way to an answer: one quiet line per run
   // of tool calls, opened to see each.
@@ -91,7 +93,7 @@ async function askTab(c) {
   };
   const say = (role, text, usage) => (role === "user"
     ? h("div.chat-user", h("div.bubble", text))
-    : h("div.chat-assistant", renderMarkdown(text), usage && costLine(usage)));
+    : h("div.chat-assistant", renderMarkdown(text, fences), usage && costLine(usage)));
   const turnsEls = (turns) => {
     const out = [];
     let act = null;
@@ -156,7 +158,7 @@ async function askTab(c) {
         let frame = 0;
         const paint = () => {
           frame = 0;
-          answer.el.replaceChildren(renderMarkdown(answer.text));
+          answer.el.replaceChildren(renderMarkdown(answer.text, fences));
         };
         await streamPost(`${base}/chats/${current}/messages`, { text }, (type, data) => {
           if (type === "text") {

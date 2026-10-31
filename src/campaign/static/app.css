@@ -1016,3 +1016,33 @@ body:has(.chat-form) #toast { bottom: calc(6.5rem + env(safe-area-inset-bottom))
 .bd-total { border-top: 1px solid var(--border); margin-top: .2rem; padding-top: .35rem; }
 .bd-total .bd-value { font-size: 1.15rem; }
 .chat-cost { margin: .5rem 0 0; font-size: .75rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* -- encounter cards: a fight in an answer ------------------------------------------- */
+
+.encounter-card {
+  margin: 1rem 0; padding: .9rem 1rem; max-width: 44rem;
+  border: 1px solid var(--border); border-left: 4px solid var(--rule); border-radius: var(--radius-sm);
+  background: var(--surface); box-shadow: var(--shadow);
+}
+.encounter-card.pending { color: var(--muted); font-style: italic; }
+.encounter-card > header { display: flex; align-items: baseline; flex-wrap: wrap; gap: .5rem; }
+.encounter-card > header h4 { margin: 0; font: 600 1.15rem var(--serif); }
+.difficulty {
+  font-size: .75rem; font-weight: 700; text-transform: uppercase; letter-spacing: .05em;
+  padding: .1rem .55rem; border-radius: 999px; border: 1px solid currentColor;
+}
+.difficulty.trivial, .difficulty.easy { color: var(--ok); }
+.difficulty.medium { color: var(--warn); }
+.difficulty.hard, .difficulty.deadly { color: var(--danger); }
+.difficulty.deadly { background: color-mix(in srgb, var(--danger) 12%, transparent); }
+.thresholds { margin: .3rem 0 0; }
+.encounter-actions { margin: .7rem 0 .3rem; display: flex; gap: .5rem; }
+ol.initiative { margin: .2rem 0 .6rem; padding-left: 1.4rem; font-variant-numeric: tabular-nums; }
+.encounter-creature { border-top: 1px solid var(--border); padding: .5rem 0; }
+.encounter-creature > summary { cursor: pointer; display: flex; flex-wrap: wrap; align-items: baseline; gap: .2rem .6rem; }
+.encounter-creature.missing strong { color: var(--danger); }
+.encounter-note { color: var(--rule); font-style: italic; }
+.hp-trackers { display: flex; flex-wrap: wrap; gap: .4rem; margin: .5rem 0 0; }
+.hp-tracker { display: flex; align-items: center; gap: .3rem; }
+.hp-tracker input { width: 4.2rem; text-align: center; font-variant-numeric: tabular-nums; }
+.encounter-creature .statblock-card { margin: .6rem 0 .2rem; }
