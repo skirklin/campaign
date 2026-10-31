@@ -323,3 +323,16 @@ def test_sheets_from_when_turns_were_tracked_still_load():
     assert "attacks_per_action" not in dumped and "grapple_bonus_action" not in dumped
     assert "uses" not in dumped["statuses"][0] and all("uses" not in a for a in dumped["attacks"])
     assert dumped["statuses"][0]["duration"] == 10  # what's still a field stays
+
+
+def test_markdown_footnotes_travel_with_what_cites_them():
+    from campaign.ingest import parse_markdown
+
+    doc = parse_markdown(
+        "# Guadaña\n## Hosts\nThey use the _bone knight_[^1] stat block.\n## Games\nA roll[^2] on the table.\n"
+        "## Notes\n[^1]: Source: _Eberron: Rising from the Last War_\n[^2]: A d10,\n    or a d20 for big parties.\n"
+    )
+    text = "\n".join(c["text"] for c in doc.chunks)
+    assert "bone knight_ (Source: _Eberron: Rising from the Last War_) stat block" in text
+    assert "roll (A d10, or a d20 for big parties.) on the table" in text
+    assert "[^" not in text and "]:" not in text
