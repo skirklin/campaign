@@ -45,7 +45,8 @@ class FakeClient:
     def stream(self, **kw):
         self.requests.append({**kw, "messages": list(kw["messages"])})
         content, stop = self.script.pop(0)
-        return FakeStream(NS(content=content, stop_reason=stop))
+        usage = NS(input_tokens=50, output_tokens=20, cache_read_input_tokens=1000, cache_creation_input_tokens=200)
+        return FakeStream(NS(content=content, stop_reason=stop, usage=usage))
 
 
 @pytest.fixture

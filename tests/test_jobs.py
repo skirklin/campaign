@@ -317,7 +317,7 @@ def test_ingests_move_over_to_jobs_keeping_their_ids(tmp_path):
     camp = s.create_campaign("Strahd", "dm")
     # The database as the v10 server left it: an ingest in the ingests table, no jobs.
     s.conn.executescript("DROP TABLE character_files; DROP TABLE job_log; DROP TABLE jobs;"
-                         " DROP TABLE party_stash_log; DROP TABLE party_stash; PRAGMA user_version = 10;")
+                         " DROP TABLE party_stash_log; DROP TABLE party_stash; ALTER TABLE conversation_messages DROP COLUMN usage; PRAGMA user_version = 10;")
     s.conn.execute(
         "INSERT INTO ingests (id, campaign_id, session, input_blob, input_name, transcript_blob, played_on, role,"
         " state, attempts, error, created_at, updated_at)"
@@ -453,7 +453,7 @@ def test_scans_read_before_files_were_kept_get_attached(tmp_path):
     failed = s.add_job(camp, "scan", {"blob": blob, "name": "other.pdf"}, None)
     s.update_job(failed, state="failed")
     # The database as the v12 server left it: no files table.
-    s.conn.executescript("DROP TABLE character_files; PRAGMA user_version = 12;")
+    s.conn.executescript("DROP TABLE character_files; ALTER TABLE conversation_messages DROP COLUMN usage; PRAGMA user_version = 12;")
     s.close()
     s = Store(db)  # migrates
     assert [(f["name"], f["blob"]) for f in s.character_files(character_id)] == [("cid character sheet.pdf", blob)]

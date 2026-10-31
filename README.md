@@ -102,7 +102,9 @@ uv run campaign web            # http://127.0.0.1:8765
     above them. Answers are Markdown, rendered as it arrives (headings,
     lists, tables; the book's read-aloud text as a boxed quote); a stat
     block comes as a card laid out like the books', and dice in any answer
-    or stat block ("3d8+5", "+8 to hit") are buttons that roll.
+    or stat block ("3d8+5", "+8 to hit") are buttons that roll. Under each
+    answer is what it cost: tokens, lookups, seconds and dollars (hover
+    for the breakdown into cached and uncached input).
     Conversations are kept (per person), so you can come back to one; in
     a player campaign it only knows what the party knows. With editor
     access it can also record what you tell it happened.
@@ -309,6 +311,10 @@ app to sign in with Google and asks you to allow it, then acts as you:
   spoiler-filtered world, and changing the world needs editor access.
   Anyone in a campaign can add their own character (`create_character`),
   which is how a photographed or scanned paper sheet gets entered.
+- **The app's own assistant** (`ask_assistant`): asks the Ask tab's chat a
+  question, as you, and returns its answer, the lookups it made and what
+  it cost. The exchange is saved as one of your conversations, so it can
+  be read and continued in the app. Useful for testing how the app answers.
 - **OAuth 2.1** (`oauth.py`): dynamic client registration, PKCE, codes and
   tokens stored as hashes, access tokens for an hour and rotating refresh
   tokens for 30 days, all tied to your user. The Account page lists

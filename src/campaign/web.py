@@ -764,7 +764,7 @@ def create_app(
 
         conv = my_conversation(s, request, c, conversation_id)
         turns: list[dict[str, Any]] = []
-        for m in s.conversation_messages(conversation_id):
+        for m in s.conversation_messages(conversation_id, with_usage=True):
             blocks = [{"type": "text", "text": m["content"]}] if isinstance(m["content"], str) else m["content"]
             for b in blocks:
                 if b.get("type") == "text" and b.get("text", "").strip():
@@ -772,6 +772,8 @@ def create_app(
                 elif b.get("type") == "tool_use":
                     turns.append({"role": "assistant", "kind": "tool",
                                   "text": describe_tool_call(b["name"], b.get("input", {})).strip(" ·")})
+            if m.get("usage") and turns and turns[-1]["role"] == "assistant":
+                turns[-1]["usage"] = m["usage"]  # what the answer this message ends cost
         return conv | {"turns": turns}
 
     @app.delete("/api/campaigns/{slug}/chats/{conversation_id}", status_code=204)
@@ -785,7 +787,7 @@ def create_app(
         """Ask the assistant; the answer streams back as Server-Sent Events.
 
         Events: `text` (a piece of the answer), `tool` (a tool it's using),
-        `done`, `error`. The turn runs to the end and is saved even if the
+        `done` (with what the answer cost: tokens, calls, seconds, dollars), `error`. The turn runs to the end and is saved even if the
         page goes away mid-answer.
         """
         from .agent import chat_turn, describe_tool_call
@@ -806,12 +808,12 @@ def create_app(
         def run() -> None:
             ts = Store(db)
             try:
-                chat_turn(
+                answer = chat_turn(
                     ts, c, conversation_id, question, user_id=user, writable=at_least(c.access, "editor"),
                     on_text=lambda t: put(sse("text", t)),
                     on_tool=lambda n, a: put(sse("tool", describe_tool_call(n, a).strip(" ·"))),
                 )
-                put(sse("done", {}))
+                put(sse("done", {"usage": answer.usage}))
             except Exception as err:
                 put(sse("error", str(err) or type(err).__name__))
             finally:

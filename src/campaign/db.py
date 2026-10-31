@@ -493,6 +493,11 @@ FROM jobs
 WHERE kind = 'scan' AND state = 'done' AND json_extract(result, '$.character') IN (SELECT id FROM characters);
 """
 
+# v14: what each chat answer cost (tokens, calls, time), on the turn's last message.
+V14_CHAT_USAGE = """
+ALTER TABLE conversation_messages ADD COLUMN usage TEXT;  -- JSON, or NULL
+"""
+
 # Append only, for changes small enough to migrate.
 #
 # Deploys are rolling: the new server starts, and runs these, while the old
@@ -513,6 +518,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (11, V11_JOBS),
     (12, V12_PARTY_STASH),
     (13, V13_CHARACTER_FILES),
+    (14, V14_CHAT_USAGE),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 
@@ -1028,22 +1034,34 @@ class Store:
         )
         return [dict(r) for r in rows]
 
-    def conversation_messages(self, conversation_id: int) -> list[dict[str, Any]]:
+    def conversation_messages(self, conversation_id: int, with_usage: bool = False) -> list[dict[str, Any]]:
+        """The stored messages, as the API takes them; `with_usage` adds each turn's cost on its last message."""
         rows = self.conn.execute(
-            "SELECT role, content FROM conversation_messages WHERE conversation_id = ? ORDER BY seq", (conversation_id,)
+            "SELECT role, content, usage FROM conversation_messages WHERE conversation_id = ? ORDER BY seq",
+            (conversation_id,),
         )
-        return [{"role": r["role"], "content": json.loads(r["content"])} for r in rows]
+        out = []
+        for r in rows:
+            m = {"role": r["role"], "content": json.loads(r["content"])}
+            if with_usage and r["usage"]:
+                m["usage"] = json.loads(r["usage"])
+            out.append(m)
+        return out
 
-    def append_conversation(self, conversation_id: int, messages: list[dict[str, Any]], title: str | None = None) -> None:
+    def append_conversation(self, conversation_id: int, messages: list[dict[str, Any]], title: str | None = None,
+                            usage: dict[str, Any] | None = None) -> None:
+        """Add a turn's messages; `usage`, what the turn cost, is kept on the last of them."""
         with self.conn:
             seq = self.conn.execute(
                 "SELECT coalesce(max(seq), -1) FROM conversation_messages WHERE conversation_id = ?", (conversation_id,)
             ).fetchone()[0]
-            for m in messages:
+            for i, m in enumerate(messages):
                 seq += 1
+                last = usage is not None and i == len(messages) - 1
                 self.conn.execute(
-                    "INSERT INTO conversation_messages (conversation_id, seq, role, content) VALUES (?, ?, ?, ?)",
-                    (conversation_id, seq, m["role"], json.dumps(m["content"], ensure_ascii=False)),
+                    "INSERT INTO conversation_messages (conversation_id, seq, role, content, usage) VALUES (?, ?, ?, ?, ?)",
+                    (conversation_id, seq, m["role"], json.dumps(m["content"], ensure_ascii=False),
+                     json.dumps(usage) if last else None),
                 )
             self.conn.execute(
                 "UPDATE conversations SET updated_at = ?, title = CASE WHEN title = '' AND ? IS NOT NULL THEN ? ELSE title END"
