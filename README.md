@@ -433,6 +433,11 @@ So:
   campaign costs nothing.
 - **Interrupted or failed runs resume** where they stopped. A failed section
   doesn't block its siblings.
+- **It runs wide.** Every source waiting for a digest runs at once, each
+  with up to `CAMPAIGN_DIGEST_WORKERS` calls in flight (default 8), and a
+  section starts as soon as its own subsections are done, so a slow one
+  holds up only the sections above it. The calls are just waiting on the
+  API, so the limit is the API's rate limits, not the server.
 - **Bumping `BRANCH_VERSION`** after changing the reduce prompt redoes only
   the branches. **Bumping `LEAF_VERSION`** redoes everything. Changing the
   model (`CAMPAIGN_DIGEST_MODEL`) also gives new keys.
