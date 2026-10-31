@@ -74,23 +74,18 @@ uv run campaign web            # http://127.0.0.1:8765
   with advantage and any reminder an option carries. On a hit it rolls
   damage, doubling dice on a crit, with situational damage to add if it
   applies. "Attack again" keeps the choices for a second swing.
-  **Start combat** switches Main to a layout for the fight that keeps the
-  turn's bookkeeping:
-  - a round tally with **Next turn**, which gives the turn back;
-  - Action, Bonus, Reaction and Movement. Attacks mark them: the first
-    starts the Attack action and the rest come out of it ("1 attack
-    left", from the sheet's attacks per Attack action). A bonus-action
-    attack takes the bonus action, an opportunity attack the reaction,
-    and starting a status that takes one (Rage) its slot. It says when
-    there's none left but never stops a roll, and a tap flips a slot;
-  - **Grapple** and **Shove** roll Athletics in place of an attack (or
-    as a bonus action, if the sheet allows grappling as one), and a grapple
-    shows **Grappling** until released;
+  **Start combat** switches Main to a layout for the fight, which decides
+  nothing:
+  - a round tally with **Next turn**;
+  - **Grapple** and **Shove** (also outside combat) roll Athletics, and a
+    grapple shows **Grappling** until it's released;
   - statuses, attacks and resources first, with how long each status has
     run ("Rage · round 3 of 10"). A status stays on until it's ended.
 
-  **End** switches back. The round and ticks are kept on that device, so a
+  **End** switches back. The round is kept on that device, so a
   reload mid-fight carries on.
+  Rolls show their sums one line per part: the die, then each modifier
+  (STR, proficiency, Magic, Rage), then the total.
   Every change made in the Play view (HP, pips, statuses, coin, rests)
   shows an **Undo** on its toast. The 🎲 button opens a dice tray: tap dice to build an expression or
   type one (`8d6 fire`, `2d20kh1+5` for advantage, `4d6kh3` for a stat),

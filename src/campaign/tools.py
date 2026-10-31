@@ -458,10 +458,7 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         part with situational set to when it applies; it's added when
         rolling, not in the attack's damage (spends names a resource it
         uses up, like a smite's slot). A status's duration is the rounds
-        it lasts (Rage 10), and uses what starting it takes ("bonus" for
-        Rage). attacks_per_action is 2 with Extra Attack; an attack's uses
-        is "bonus" for an off-hand or other bonus-action attack;
-        grapple_bonus_action when a feature allows it. Choices made before an attack roll
+        it lasts (Rage 10). Choices made before an attack roll
         are attack_options {name, applies_to, advantage, to_hit, damage,
         note}: Reckless Attack applies_to ["str", "melee"] with advantage
         "advantage" and the note that attacks against you have advantage;
@@ -518,10 +515,7 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         part with situational set to when it applies; it's added when
         rolling, not in the attack's damage (spends names a resource it
         uses up, like a smite's slot). A status's duration is the rounds
-        it lasts (Rage 10), and uses what starting it takes ("bonus" for
-        Rage). attacks_per_action is 2 with Extra Attack; an attack's uses
-        is "bonus" for an off-hand or other bonus-action attack;
-        grapple_bonus_action when a feature allows it. Choices made before an attack roll
+        it lasts (Rage 10). Choices made before an attack roll
         are attack_options {name, applies_to, advantage, to_hit, damage,
         note}: Reckless Attack applies_to ["str", "melee"] with advantage
         "advantage" and the note that attacks against you have advantage;
