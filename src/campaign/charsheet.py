@@ -107,8 +107,12 @@ class Status(Model):
     active: bool = False
     note: str = ""  # what it's on: the spell being concentrated on
     resource: str = ""  # a resource's name, spent when switched on
-    uses: Literal["", "action", "bonus", "reaction"] = ""  # what starting it takes in a turn (Rage: bonus)
     duration: int = Field(default=0, ge=0)  # rounds it lasts (Rage, Bless: 10), shown in combat; 0 if open-ended
+
+    @model_validator(mode="before")
+    @classmethod
+    def _retired(cls, data: Any) -> Any:
+        return without(data, "uses")  # what starting it took in a turn, since dropped
 
 
 class HitPoints(Model):
@@ -188,10 +192,13 @@ class Attack(Model):
     hit_bonus: int = 0
     damage: list[Damage] = []
     range: str = ""  # "5 ft", "20/60 ft"
-    # "action": one of the attacks an Attack action gives; "bonus": a bonus action (an off-hand attack)
-    uses: Literal["action", "bonus"] = "action"
     properties: list[str] = []  # "finesse", "versatile 1d10", "thrown 20/60", "reach"
     notes: str = ""  # what it does beyond its numbers, in a few words
+
+    @model_validator(mode="before")
+    @classmethod
+    def _retired(cls, data: Any) -> Any:
+        return without(data, "uses")  # the action it took, since dropped
 
 
 class AttackOption(Model):
@@ -241,6 +248,15 @@ def parse_damage(text: str) -> list[dict[str, Any]]:
     return parts
 
 
+# Fields sheets had briefly, for tracking actions in a turn, since dropped: read and ignored.
+RETIRED_SHEET_FIELDS = ("attacks_per_action", "grapple_bonus_action")
+
+
+def without(data: Any, *keys: str) -> Any:
+    """`data` without `keys`, if it's a dict: for reading what older sheets saved."""
+    return {k: v for k, v in data.items() if k not in keys} if isinstance(data, dict) else data
+
+
 def _upgrade(data: dict[str, Any]) -> dict[str, Any]:
     """Sheets saved before numbers had parts: keep every number as it was.
 
@@ -248,7 +264,7 @@ def _upgrade(data: dict[str, Any]) -> dict[str, Any]:
     the hit-dice total less CON x level; a free-text attack becomes one with
     its numbers as flat bonuses. They follow the character once edited.
     """
-    data = dict(data)
+    data = without(data, *RETIRED_SHEET_FIELDS)
     if isinstance(data.get("ac"), int):
         data["ac"] = {"base": data["ac"], "abilities": []}
     hp = data.get("hp")
@@ -294,8 +310,6 @@ class CharacterSheet(Model):
     bonuses: list[Bonus] = []  # from features and effects; items carry their own
     statuses: list[Status] = []  # switched on and off in play: Rage, Concentration…
     attack_options: list[AttackOption] = []  # chosen per attack: Reckless Attack, Great Weapon Master
-    attacks_per_action: int = Field(default=1, ge=1, le=4)  # Extra Attack: 2 (a fighter: up to 4)
-    grapple_bonus_action: bool = False  # can grapple as a bonus action (Precocious Wrestler, Tavern Brawler)
     resources: list[Resource] = []
     spellcasting_ability: str = ""
     spells: list[Spell] = []

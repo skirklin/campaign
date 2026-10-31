@@ -310,18 +310,16 @@ def test_statuses_can_say_how_many_rounds_they_last():
         CharacterSheet(name="X", statuses=[{"name": "Odd", "duration": -1}])
 
 
-def test_what_a_turn_is_spent_on():
-    sheet = CharacterSheet(
-        name="Cid", attacks_per_action=2, grapple_bonus_action=True,
-        statuses=[{"name": "Rage", "resource": "Rage", "uses": "bonus", "duration": 10}],
-        attacks=[Attack(name="Greataxe"), Attack(name="Handaxe (off hand)", uses="bonus")],
-    )
-    assert sheet.attacks_per_action == 2 and sheet.grapple_bonus_action
-    assert [a.uses for a in sheet.attacks] == ["action", "bonus"]
-    assert sheet.statuses[0].uses == "bonus"
-    plain = CharacterSheet(name="X", attacks=[Attack(name="Club")], statuses=[{"name": "Bless"}])
-    assert plain.attacks_per_action == 1 and plain.attacks[0].uses == "action" and plain.statuses[0].uses == ""
-    with pytest.raises(ValueError):
-        CharacterSheet(name="X", attacks_per_action=0)
-    with pytest.raises(ValueError):
-        CharacterSheet(name="X", statuses=[{"name": "Odd", "uses": "free"}])
+def test_sheets_from_when_turns_were_tracked_still_load():
+    """Turn tracking (attacks per action, what an attack or status took) came and went: those
+    fields are read and dropped, so the sheets saved meanwhile load and save without them."""
+    saved = {
+        "name": "Cid", "attacks_per_action": 2, "grapple_bonus_action": True,
+        "statuses": [{"name": "Rage", "resource": "Rage", "uses": "bonus", "duration": 10}],
+        "attacks": [{"name": "Greataxe", "uses": "action"}, {"name": "Handaxe", "uses": "bonus"}],
+    }
+    sheet = CharacterSheet.model_validate(saved)
+    dumped = sheet.model_dump()
+    assert "attacks_per_action" not in dumped and "grapple_bonus_action" not in dumped
+    assert "uses" not in dumped["statuses"][0] and all("uses" not in a for a in dumped["attacks"])
+    assert dumped["statuses"][0]["duration"] == 10  # what's still a field stays

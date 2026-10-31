@@ -458,3 +458,9 @@ def test_scans_read_before_files_were_kept_get_attached(tmp_path):
     s = Store(db)  # migrates
     assert [(f["name"], f["blob"]) for f in s.character_files(character_id)] == [("cid character sheet.pdf", blob)]
     s.close()
+
+
+def test_a_scan_stored_with_retired_fields_still_reads():
+    stored = SCAN.model_dump() | {"attacks_per_action": 2, "grapple_bonus_action": True}
+    stored["attacks"] = [a | {"uses": "action"} for a in stored["attacks"]]
+    assert sheetscan.ScannedSheet.model_validate(stored).model_dump() == SCAN.model_dump()

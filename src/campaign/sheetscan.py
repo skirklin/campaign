@@ -16,11 +16,11 @@ import re
 from pathlib import Path
 from typing import Any, Callable
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
 from .charsheet import (
-    ABILITIES, SKILLS, ArmorClass, Attack, AttackOption, Bonus, CharacterSheet, ClassLevel, HitPoints, Item, Resource,
-    Spell, Status,
+    ABILITIES, RETIRED_SHEET_FIELDS, SKILLS, ArmorClass, Attack, AttackOption, Bonus, CharacterSheet, ClassLevel,
+    HitPoints, Item, Resource, Spell, Status, without,
 )
 from .tools import ToolContext
 
@@ -92,9 +92,6 @@ prints into the printed_ fields, which are only used to check your parts:
   saying when, in a few words: a weapon's "+3d6 force vs giants", Sneak
   Attack (dice "(half_level:rogue)d6", situational "Sneak Attack"), a
   centaur's Charge. Dice that grow with level are written that way.
-- attacks_per_action is how many attacks one Attack action makes (2 with
-  Extra Attack). An attack made as a bonus action (an off-hand weapon)
-  has uses "bonus". Set grapple_bonus_action if a feature allows it.
 - Choices made before an attack roll are attack_options: Reckless Attack
   (applies_to ["str", "melee"], advantage "advantage", note "attacks
   against you have advantage until your next turn"), Great Weapon Master
@@ -112,8 +109,7 @@ prints into the printed_ fields, which are only used to check your parts:
   sets it, like Gauntlets of Ogre Power at 19). Amounts can reference the
   sheet: "prof", "level", "2*level", "cha".
 - Statuses are what the character switches on in play: Rage for a
-  barbarian (resource "Rage", spent when it starts, uses "bonus",
-  duration 10 rounds),
+  barbarian (resource "Rage", spent when it starts, duration 10 rounds),
   and Concentration for anyone who casts concentration spells. A bonus that only counts
   during one names it in during: Rage's damage is a "damage:str" bonus
   during "Rage".
@@ -173,10 +169,7 @@ class ScannedSheet(Model):
     attacks: list[ScannedAttack]
     bonuses: list[Bonus]
     statuses: list[Status]
-    # Optional: scans read before these existed don't have them.
-    attack_options: list[AttackOption] = []
-    attacks_per_action: int = 1
-    grapple_bonus_action: bool = False
+    attack_options: list[AttackOption] = []  # optional: scans read before it existed have none
     resources: list[Resource]
     spellcasting_ability: str
     spells: list[Spell]
@@ -187,6 +180,11 @@ class ScannedSheet(Model):
     personality: str
     notes: str
     unreadable: list[str]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _retired(cls, data: Any) -> Any:
+        return without(data, *RETIRED_SHEET_FIELDS)  # a scan stored while they existed still re-runs
 
 
 # The answer's shape, spelled out for Claude (it's checked against ScannedSheet when it arrives).
@@ -236,8 +234,7 @@ def to_sheet(scan: ScannedSheet) -> tuple[CharacterSheet, list[str]]:
         skill_expertise=known(scan.skill_expertise, set(SKILLS), "expertise"),
         ac=scan.ac, speed=scan.speed, hp=HitPoints(current=scan.hp.current, temp=scan.hp.temp),
         nicknames=scan.nicknames, attacks=attacks, bonuses=scan.bonuses, statuses=scan.statuses,
-        attack_options=scan.attack_options, attacks_per_action=scan.attacks_per_action,
-        grapple_bonus_action=scan.grapple_bonus_action,
+        attack_options=scan.attack_options,
         resources=scan.resources,
         spellcasting_ability=_ability(scan.spellcasting_ability) or "",
         spells=scan.spells, inventory=scan.inventory, currency=scan.currency.model_dump(),

@@ -958,15 +958,6 @@ button.start-combat {
 .combat-round { flex: 1; font-size: 1rem; }
 .combat-round strong { font: 700 1.3rem var(--serif); }
 .combat-bar button { padding: .5rem .9rem; border-radius: 10px; font-weight: 600; }
-.turn-economy { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .4rem; }
-button.turn-slot {
-  display: flex; flex-direction: column; align-items: center; justify-content: center;
-  min-height: 3.2rem; padding: .4rem .2rem; border-radius: 10px; font-weight: 600; white-space: normal;
-  background: var(--surface); border: 2px solid var(--accent); color: var(--text);
-}
-button.turn-slot small { font-weight: 400; font-size: .75rem; color: var(--muted); }
-button.turn-slot.used { border-color: var(--border); color: var(--muted); background: var(--surface-2); text-decoration: line-through; }
-button.turn-slot.used small { text-decoration: none; }
 
 .status-cards { display: flex; flex-direction: column; gap: .45rem; }
 button.status-card { border-style: dashed; }
@@ -994,8 +985,6 @@ button.status-card { border-style: dashed; }
 :root:fullscreen .play-back { display: inline-flex; }
 /* Back to the list, for when the site's bar is hidden. */
 .play-back { display: none; align-items: center; text-decoration: none; font-size: 1.6rem; padding: 0 .3rem 0 0; color: var(--muted); }
-.attack-turn { display: flex; flex-wrap: wrap; gap: .4rem 1.2rem; align-items: center; padding-bottom: .4rem; border-bottom: 1px dotted var(--border); }
-.attack-turn .amount { width: 3.5rem !important; }
 
 /* -- turn bookkeeping, grapple and shove -------------------------------------------------- */
 .maneuvers { display: grid; grid-template-columns: 1fr 1fr; gap: .4rem; margin-top: .5rem; }
@@ -1007,7 +996,6 @@ button.status-card { border-style: dashed; }
   background: color-mix(in srgb, var(--warn) 10%, var(--surface));
 }
 .grappling button { padding: .4rem .8rem; border-radius: 8px; }
-.attack-cost { margin: 0; text-align: left; font-weight: 600; color: var(--accent); }
 
 input[type=file]::file-selector-button {
   font: inherit; font-weight: 500; margin-right: .6rem; padding: .3rem .75rem; cursor: pointer;
@@ -1015,3 +1003,15 @@ input[type=file]::file-selector-button {
 }
 /* On the Ask page, toasts (dice results) sit above the message box. */
 body:has(.chat-form) #toast { bottom: calc(6.5rem + env(safe-area-inset-bottom)); }
+
+/* -- a roll as a receipt: one line per part, then the total -------------------------------- */
+.breakdown {
+  width: 100%; max-width: 22rem; margin: .2rem auto 0; text-align: left;
+  font-variant-numeric: tabular-nums;
+}
+.bd-row { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; padding: .18rem 0; }
+.bd-label { color: var(--muted); }
+.bd-label small { font-size: .82rem; }
+.bd-value { font-weight: 600; white-space: nowrap; }
+.bd-total { border-top: 1px solid var(--border); margin-top: .2rem; padding-top: .35rem; }
+.bd-total .bd-value { font-size: 1.15rem; }
