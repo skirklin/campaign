@@ -570,3 +570,33 @@ def test_sources_are_digested_side_by_side(env):
     while loop.reconcile_once():
         pass
     assert not both.broken and seen == {"Book", "Other"}
+
+
+def test_one_limit_on_calls_in_flight_across_sources(env, monkeypatch):
+    import threading
+    import time as _time
+
+    store, camp, db = env
+    a = upload(store, camp)
+    b = library.add_reference(store, camp, b"# Other\n## One\nENTITY npc Zed\n## Two\nENTITY npc Yan\n", "other.md",
+                              title="Other", kind="module")
+    for src in (a, b):
+        store.set_digest_target(src["id"], digest.MODEL, "medium")
+    monkeypatch.setattr(digest, "_IN_FLIGHT", threading.BoundedSemaphore(2))
+    now, most, lock = 0, 0, threading.Lock()
+
+    class Counting(FakeDigest):
+        def stream(self, **kw):
+            nonlocal now, most
+            with lock:
+                now += 1
+                most = max(most, now)
+            _time.sleep(0.02)
+            with lock:
+                now -= 1
+            return super().stream(**kw)
+
+    loop = digest.Reconciler(db, client_factory=Counting, workers=8)
+    while loop.reconcile_once():
+        pass
+    assert most == 2 and store.digest_status(a["id"])["done"] == 8

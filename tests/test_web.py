@@ -163,7 +163,7 @@ def test_digest_endpoints_and_original_kept(client, monkeypatch):
 
     monkeypatch.setattr(digest, "MIN_LEAF_CHARS", 1)
     fake = FakeDigest()
-    monkeypatch.setattr(digest.anthropic, "Anthropic", lambda: fake)
+    monkeypatch.setattr(digest.anthropic, "Anthropic", lambda **kw: fake)
     client.post("/api/campaigns", json={"name": "Strahd", "role": "dm"})
     book = BOOK.format(intro="", church="Donavich prays.").encode()
     r = client.post("/api/campaigns/strahd/sources", files={"file": ("book.md", book)},

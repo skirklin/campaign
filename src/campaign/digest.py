@@ -62,10 +62,18 @@ def fallback_params(model: str) -> dict[str, Any]:
         return {}
     return {"betas": [FALLBACK_BETA], "fallbacks": "default"}
 
-# Calls in flight at once, per source; sources are digested side by side. The
-# work is waiting on the API, so this is bounded by its rate limits, not by us.
-WORKERS = int(os.environ.get("CAMPAIGN_DIGEST_WORKERS", "8"))
+# Calls in flight at once, across every source being digested. The work is
+# waiting on the API, so what bounds it is the account's rate limits, not
+# this server: past them the API answers 429, and the client waits as long as
+# it says (retry-after) and tries again, so a burst slows down rather than fails.
+CONCURRENCY = int(os.environ.get("CAMPAIGN_DIGEST_CONCURRENCY", "32"))
+RATE_LIMIT_RETRIES = 10
+_IN_FLIGHT = threading.BoundedSemaphore(CONCURRENCY)
 _MATERIALIZING = threading.Lock()
+
+
+def _client() -> anthropic.Anthropic:
+    return anthropic.Anthropic(max_retries=RATE_LIMIT_RETRIES)
 
 MAX_LEAF_CHARS = 40_000  # ~10k tokens; longer sections are split into parts
 MIN_LEAF_CHARS = 6_000  # shorter sibling sections are packed into one call
@@ -681,7 +689,7 @@ def run(
     db: Path | str,
     source_id: int,
     client: Any = None,
-    workers: int = WORKERS,
+    workers: int = CONCURRENCY,
     model: str = MODEL,
     effort: str = EFFORT,
     on_progress: Callable[[dict[str, int]], None] | None = None,
@@ -717,12 +725,13 @@ def run(
                 return True
             return False
 
-        client = client or anthropic.Anthropic()
+        client = client or _client()
 
         def work(n: DNode) -> tuple[dict[str, Any], int, int]:
-            if not keep_going():  # checked when the call's turn comes, not just when it was queued
-                raise _Stopped
-            return digest_node(client, n, model, effort)
+            with _IN_FLIGHT:  # shared by every source, so together they stay under the limit
+                if not keep_going():  # checked when the call's turn comes, not just when it was queued
+                    raise _Stopped
+                return digest_node(client, n, model, effort)
 
         # Each section starts as soon as its subsections are done, not when the
         # whole level is: one slow call holds up only the sections above it.
@@ -813,9 +822,9 @@ class Reconciler(LeasedLoop):
 
     LEASE = "digest-loop"
 
-    def __init__(self, db: Path | str, client_factory: Callable[[], Any] | None = None, workers: int = WORKERS):
+    def __init__(self, db: Path | str, client_factory: Callable[[], Any] | None = None, workers: int = CONCURRENCY):
         super().__init__(db)
-        self.client_factory = client_factory or (lambda: anthropic.Anthropic())
+        self.client_factory = client_factory or _client
         self.workers = workers
 
     def _wanted(self, source_id: int, model: str) -> bool:
