@@ -1068,6 +1068,10 @@ class Store:
                 " WHERE id = ?", (now(), title, title, conversation_id),
             )
 
+    def set_conversation_title(self, conversation_id: int, title: str) -> None:
+        with self.conn:
+            self.conn.execute("UPDATE conversations SET title = ? WHERE id = ?", (title, conversation_id))
+
     def delete_conversation(self, conversation_id: int) -> None:
         with self.conn:
             self.conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))

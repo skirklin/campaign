@@ -30,7 +30,7 @@ from typing import Any, AsyncIterator, Callable, Iterator
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from . import digest, encounters, sheetscan
 from .accounts import Accounts, at_least
@@ -65,6 +65,10 @@ class CopyCharacter(BaseModel):
 
 class ChatMessage(BaseModel):
     text: str
+
+
+class ChatTitle(BaseModel):
+    title: str = Field(min_length=1)
 
 
 class SheetUpdate(BaseModel):
@@ -780,6 +784,13 @@ def create_app(
             if m.get("usage") and turns and turns[-1]["role"] == "assistant":
                 turns[-1]["usage"] = m["usage"]  # what the answer this message ends cost
         return conv | {"turns": turns}
+
+    @app.patch("/api/campaigns/{slug}/chats/{conversation_id}")
+    def rename_chat(conversation_id: int, body: ChatTitle, request: Request, c: Campaign = Depends(reader),
+                    s: Store = Depends(store)) -> dict[str, Any]:
+        my_conversation(s, request, c, conversation_id)
+        s.set_conversation_title(conversation_id, body.title.strip()[:120])
+        return s.conversation(conversation_id)
 
     @app.delete("/api/campaigns/{slug}/chats/{conversation_id}", status_code=204)
     def delete_chat(conversation_id: int, request: Request, c: Campaign = Depends(reader), s: Store = Depends(store)) -> None:

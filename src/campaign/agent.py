@@ -355,13 +355,47 @@ def chat_turn(
     as replaying thinking blocks requires.
     """
     history = store.conversation_messages(conversation_id)
-    first = not history
+    titled = bool(store.conversation(conversation_id)["title"])
+    if not history and not titled:
+        store.set_conversation_title(conversation_id, short_title(text))  # until a better one is written
     agent = chat_agent(store, campaign, user_id=user_id, messages=list(history), writable=writable, **kw)
     start = len(agent.messages)
     answer = agent.send(text)
     new = [{"role": m["role"], "content": _plain(m["content"])} for m in agent.messages[start:]]
-    store.append_conversation(conversation_id, new, title=text.strip()[:80] if first else None, usage=agent.usage)
+    store.append_conversation(conversation_id, new, usage=agent.usage)
+    if not history and not titled and (better := conversation_title(text, answer)):
+        store.set_conversation_title(conversation_id, better)
     return Answer(answer, agent.usage)
+
+
+TITLE_MODEL = os.environ.get("CAMPAIGN_TITLE_MODEL", "claude-haiku-5-5")
+TITLE_SYSTEM = """Name this conversation from a D&D campaign assistant for a list of past
+conversations: 2 to 6 words naming what it's about, the specific person,
+place, fight or rule ("Ferran's fight", "Signet ring locations", "Neta's
+price for help"). Reply with the title only: no quotes, no full stop."""
+
+
+def short_title(text: str, limit: int = 60) -> str:
+    """The question, cut at a word boundary: a title until a proper one is written."""
+    words = " ".join(text.split())
+    if len(words) <= limit:
+        return words
+    return words[:limit].rsplit(" ", 1)[0].rstrip(",;:.-") + "…"
+
+
+def conversation_title(question: str, answer: str) -> str | None:
+    """A short title for a conversation from its first exchange, or None if one can't be had."""
+    try:
+        msg = anthropic.Anthropic().messages.create(
+            model=TITLE_MODEL, max_tokens=2000, system=TITLE_SYSTEM,
+            output_config={"effort": "low"},
+            messages=[{"role": "user", "content": f"Question: {question[:2000]}\n\nAnswer: {answer[:2000]}"}],
+        )
+    except Exception:  # a title is a nicety; the conversation keeps its provisional one
+        return None
+    text = "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
+    title = text.strip().splitlines()[0].strip(" \"'*#.") if text.strip() else ""
+    return title if 0 < len(title) <= 80 else None
 
 
 def ingest_session(

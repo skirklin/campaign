@@ -109,10 +109,13 @@ async function askTab(c) {
     return out;
   };
   const scrollDown = () => thread.lastElementChild?.scrollIntoView({ block: "end", behavior: "smooth" });
-  const fillPick = () => pick.replaceChildren(
-    h("option", { value: "" }, chats.length ? "New conversation" : "No conversations yet"),
-    ...chats.map((x) => h("option", { value: x.id }, x.title || "(untitled)")),
-  );
+  const fillPick = () => {
+    pick.replaceChildren(
+      h("option", { value: "" }, chats.length ? "New conversation" : "No conversations yet"),
+      ...chats.map((x) => h("option", { value: x.id }, `${x.title || "New conversation"} · ${ago(x.updated_at)}`)),
+    );
+    pick.value = current || "";
+  };
   const open = async (id) => {
     current = id ? Number(id) : null;
     pick.value = id || "";
@@ -144,7 +147,8 @@ async function askTab(c) {
         if (!current) {
           const conv = await api("POST", `${base}/chats`);
           current = conv.id;
-          chats = [conv, ...chats];
+          chats = [{ ...conv, title: shortTitle(text) }, ...chats];  // until the server's is ready
+          fillPick();
           if (thread.querySelector(".chat-welcome")) thread.replaceChildren();
         }
         input.value = "";
@@ -185,7 +189,6 @@ async function askTab(c) {
         typing.remove();
         chats = await api("GET", `${base}/chats`);
         fillPick();
-        pick.value = current;
       } catch (err) {
         toast(err.message, true);
       } finally {
@@ -212,6 +215,21 @@ async function askTab(c) {
   return h("div.chat",
     h("div.chat-head", pick,
       h("button", { onclick: () => open("") }, "+ New"),
+      h("button", {
+        title: "Rename this conversation", "aria-label": "Rename this conversation",
+        onclick: async () => {
+          const conv = chats.find((x) => x.id === current);
+          if (!conv) return;
+          const title = prompt("Name this conversation", conv.title || "")?.trim();
+          if (!title || title === conv.title) return;
+          try {
+            Object.assign(conv, await api("PATCH", `${base}/chats/${current}`, { title }));
+            fillPick();
+          } catch (err) {
+            toast(err.message, true);
+          }
+        },
+      }, "✎"),
       h("button.danger", {
         onclick: async () => {
           if (!current || !confirm("Delete this conversation?")) return;
@@ -222,6 +240,25 @@ async function askTab(c) {
         },
       }, "Delete")),
     thread, form);
+}
+
+// The question as a title until the server writes a proper one (the same cut it makes).
+function shortTitle(text, limit = 60) {
+  const words = text.split(/\s+/).filter(Boolean).join(" ");
+  if (words.length <= limit) return words;
+  return `${words.slice(0, limit).replace(/\s+\S*$/, "").replace(/[,;:.-]+$/, "")}…`;
+}
+
+// "just now", "5 min ago", "3 h ago", "yesterday", "Oct 12".
+function ago(iso) {
+  const then = new Date(iso);
+  const s = (Date.now() - then) / 1000;
+  if (!Number.isFinite(s)) return "";
+  if (s < 60) return "just now";
+  if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
+  if (s < 2 * 86400) return "yesterday";
+  return then.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
 // What an answer cost, quietly under it: "14.2k tokens · 4 lookups · 21s · $0.06".

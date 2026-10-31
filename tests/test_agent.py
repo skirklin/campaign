@@ -133,3 +133,23 @@ def test_conversations_share_a_cacheable_prefix(store, monkeypatch):
     assert a["system"] == b["system"] and a["tools"] == b["tools"]
     assert a["system"][-1]["cache_control"] == {"type": "ephemeral"}
     assert a["messages"] != b["messages"]
+
+
+def test_titles_are_short_and_fall_back_to_the_question(monkeypatch):
+    from campaign.agent import short_title
+
+    assert short_title("Who is Ireena?") == "Who is Ireena?"
+    long = "The party is about to fight the corrupted boar in its cave. Give me everything I need to run it well."
+    assert short_title(long) == "The party is about to fight the corrupted boar in its cave…"
+
+    calls = []
+
+    class Titler:
+        def __init__(self, reply):
+            self.messages = NS(create=lambda **kw: calls.append(kw) or NS(content=[NS(type="text", text=reply)]))
+
+    monkeypatch.undo()  # the real conversation_title, not conftest's stub
+    for reply, want in (('"Running the Boar Fight."', "Running the Boar Fight"), ("", None), ("x" * 200, None)):
+        monkeypatch.setattr(agent_mod.anthropic, "Anthropic", lambda r=reply: Titler(r))
+        assert agent_mod.conversation_title("q", "a") == want
+    assert calls[0]["model"] == agent_mod.TITLE_MODEL and calls[0]["max_tokens"] >= 1000
