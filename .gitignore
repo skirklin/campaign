@@ -4,3 +4,4 @@ __pycache__/
 *.transcript.txt
 .pytest_cache/
 deploy/k8s/secrets.env
+bench/corpus/
