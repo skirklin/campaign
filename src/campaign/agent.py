@@ -57,9 +57,20 @@ When the user tells you something happened or changed ("we killed the hag",
 for what's now true (with an attribute such as status, location, holder or
 disposition when it replaces an earlier value), end_fact for statements that
 stopped being true, add_journal_entry for the event itself. Say what you
-recorded. Writes are dated to the latest session played.
+recorded. Writes are dated to the latest session played. Record only what
+the user says happened at the table. A question about running something
+("the party picks a fight with Neta, what am I running?"), a plan or a
+what-if is not an event: answer it, and if it might also have happened,
+offer to record it rather than recording it.
 {spoiler_rules}
-Keep answers tight and table-ready: the user is often mid-session.
+Keep answers tight and table-ready: the user is often mid-session. Answer
+what was asked; skip background they didn't ask for.
+
+Say only what your lookups showed. Don't add a location, a section or page,
+a book title, a number or a rule that you didn't read in this conversation;
+a footnote marker or a "see elsewhere" you haven't followed is not
+knowledge. When you add something of your own (a tactic, a suggested DC, a
+difficulty estimate), label it as your suggestion.
 
 Write in Markdown; the app renders it. Lead with the answer, then the
 detail: short paragraphs, **bold** for the things to act on (DCs, damage,
@@ -195,7 +206,10 @@ class Agent:
             with self.client.beta.messages.stream(
                 model=self.model,
                 max_tokens=64000,
-                system=self.system,
+                # The system prompt (and the tools before it) is the same for every conversation in a
+                # campaign: a cache breakpoint at its end lets a new conversation read it instead of
+                # writing it again. The top-level cache_control caches the growing conversation after it.
+                system=[{"type": "text", "text": self.system, "cache_control": {"type": "ephemeral"}}],
                 messages=self.messages,
                 tools=[t.to_dict() for t in self.tools.values()],
                 thinking={"type": "adaptive", **({"display": "summarized"} if self.on_thinking else {})},

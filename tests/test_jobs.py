@@ -214,8 +214,8 @@ def test_a_scan_becomes_a_character(scan_job, monkeypatch):
     assert sheet["notes"].startswith("Has a cat.") and "Wisdom score; skill: Basket weaving" in sheet["notes"]
     assert calls[0]["messages"][0]["content"][0]["type"] == "document"
     assert calls[0]["thinking"]["display"] == "summarized"  # else the thinking shown as progress is empty
-    assert "output_format" not in calls[0] and '"unreadable"' in calls[0]["system"]  # plain JSON, schema in the prompt
-    assert 'campaign "Strahd"' in calls[0]["system"]
+    assert "output_format" not in calls[0] and '"unreadable"' in calls[0]["system"][0]["text"]  # plain JSON, schema in the prompt
+    assert 'campaign "Strahd"' in calls[0]["system"][0]["text"]
     tools = {t["name"] for t in calls[0]["tools"]}
     assert {"search_reference", "read_reference", "lookup"} <= tools and "record_fact" not in tools  # read-only
     assert [(e["kind"], e["text"]) for e in s.job_log(job_id)] == [

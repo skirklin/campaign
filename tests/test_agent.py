@@ -117,3 +117,19 @@ def test_chat_keeps_history_and_recovers_from_refusal(store, monkeypatch):
     assert len(a.messages) == 2  # the refused exchange is rolled back entirely
     a.send("ok")
     assert [m["role"] for m in client.requests[-1]["messages"]] == ["user", "assistant", "user"]
+
+
+def test_conversations_share_a_cacheable_prefix(store, monkeypatch):
+    """Two new conversations in one campaign send the same tools and system prompt, with a
+    cache breakpoint at the end of the system prompt, so the second reads what the first wrote."""
+    from campaign.agent import chat_agent
+
+    sent = []
+    for question in ("Who is Ireena?", "What's in the windmill?"):
+        client = install(monkeypatch, [([text("ok")], "end_turn")])
+        chat_agent(store, "strahd", on_text=lambda t: None).send(question)
+        sent.append(client.requests[0])
+    a, b = sent
+    assert a["system"] == b["system"] and a["tools"] == b["tools"]
+    assert a["system"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert a["messages"] != b["messages"]

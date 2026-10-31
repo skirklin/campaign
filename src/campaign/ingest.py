@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
-CHUNKER_VERSION = 2
+CHUNKER_VERSION = 3  # 3: Markdown footnotes inlined where they're cited
 MAX_CHARS = 2500
 PAGES_PER_GROUP = 12  # section size for PDFs without an outline
 
@@ -67,8 +67,39 @@ def _parent_for(nodes: list[dict[str, Any]], level: int) -> int | None:
     return None
 
 
+_FOOTNOTE_DEF = re.compile(r"^\[\^([^\]]+)\]:\s?(.*)$")
+
+
+def inline_footnotes(text: str) -> str:
+    """Put each Markdown footnote's text where it's cited, and drop the definitions.
+
+    A footnote's definition usually sits at the end of the document, far from
+    the passage that cites it ("the bone knight[^1] stat block"), so a chunk
+    with the citation would only carry an unexplained marker. Inlined, the
+    chunk says "the bone knight (Source: Eberron: Rising from the Last War)".
+    """
+    notes: dict[str, str] = {}
+    kept: list[str] = []
+    last: str | None = None
+    for line in text.splitlines():
+        if m := _FOOTNOTE_DEF.match(line):
+            last = m.group(1)
+            notes[last] = m.group(2).strip()
+            continue
+        if last is not None and line.startswith(("    ", "\t")) and line.strip():
+            notes[last] += " " + line.strip()  # a definition's continuation line
+            continue
+        last = None
+        kept.append(line)
+    if not notes:
+        return text
+    cite = re.compile(r"\[\^(" + "|".join(re.escape(k) for k in notes) + r")\]")
+    return "\n".join(cite.sub(lambda m: f" ({notes[m.group(1)]})", line) for line in kept)
+
+
 def parse_markdown(text: str) -> ParsedDoc:
     doc = ParsedDoc()
+    text = inline_footnotes(text)
     trail: list[str] = []  # heading path, e.g. ["Chapter 2", "Death House"]
     buf: list[str] = []
     current: int | None = None
