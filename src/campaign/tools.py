@@ -263,7 +263,9 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         creature. Give each kind of creature once with how many; where the
         adventure changes one ("use the violet fungus stat block with 45 HP
         (10d8) and vulnerability to fire"), pass its hp and a note. The party
-        defaults to the campaign's characters (how many, average level).
+        defaults to the campaign's characters (how many, average level); with
+        no characters, pass the size and level the user gave. Never assume a
+        level: without one there's no difficulty, so ask for it.
 
         Returns JSON: each creature's AC, HP, CR and XP (found false if no
         stat block is in the material: say so, never invent one), the total
@@ -277,15 +279,20 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
             party_size: How many characters, if not the campaign's party.
             party_level: Their level, if not the campaign's party's average.
         """
-        party = None
-        if party_size or party_level:
-            default = encounters.party_of(store, campaign)
-            party = encounters.Party(size=party_size or (default.size if default else 4),
-                                     level=party_level or (default.level if default else 1))
+        default = encounters.party_of(store, campaign)
+        size = party_size or (default.size if default else None)
+        level = party_level or (default.level if default else None)
+        # Difficulty only for a party whose size and level are both known: a guessed level makes a
+        # confident "deadly" out of nothing.
+        party = encounters.Party(size=size, level=level) if size and level else None
         spec = encounters.Spec(creatures=creatures, party=party)
         result = encounters.build(store, campaign, spec)
         show = "```encounter\n" + spec.model_dump_json(exclude_none=True, exclude_defaults=True) + "\n```"
-        return _json(encounters.summary(result) | {"show": show})
+        out = encounters.summary(result) | {"show": show}
+        if party is None:
+            out["no_difficulty"] = ("The party's " + ("level" if size else "size and level")
+                                    + " aren't known, so there's no difficulty: ask for them rather than assume.")
+        return _json(out)
 
     def treasure(place: str) -> str:
         """What the book puts at a place or on a creature (coins, items, magic), still there unless taken.

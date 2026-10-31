@@ -91,3 +91,13 @@ def test_the_tool_answers_briefly_and_hands_back_the_card(tmp_path):
     with TestClient(create_app(db)) as client:
         r = client.post("/api/campaigns/chateau/encounter", json=spec).json()
     assert r["creatures"][0]["stat_block"]["armor_class"] == "13" and r["adjusted_xp"] == 300
+
+
+def test_no_difficulty_without_a_known_level():
+    store, camp = setup()  # no characters
+    tools = {f.__name__: f for f in build_tools(ToolContext(store, camp))}
+    got = json.loads(tools["encounter"](creatures=[{"name": "Skeleton", "count": 3}], party_size=4))
+    assert "difficulty" not in got and got.get("party") is None
+    assert "level" in got["no_difficulty"] and '"party"' not in got["show"]
+    got = json.loads(tools["encounter"](creatures=[{"name": "Skeleton"}]))
+    assert "size and level" in got["no_difficulty"]
