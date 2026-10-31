@@ -9,6 +9,14 @@ from campaign.auth import AuthConfig
 from campaign.db import Store
 from campaign.web import create_app
 
+
+@pytest.fixture(autouse=True)
+def no_titles(monkeypatch):
+    """Writing a conversation's title is its own API call; tests that fake the API script only the chat."""
+    import campaign.agent
+
+    monkeypatch.setattr(campaign.agent, "conversation_title", lambda question, answer: None)
+
 BASE = "https://campaign.example"
 
 

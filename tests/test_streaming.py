@@ -138,3 +138,18 @@ def test_chat_streams_and_is_kept(app, monkeypatch):
     assert client.post(f"/api/campaigns/strahd/chats/{chat['id']}/messages", json={"text": " "}).status_code == 422
     assert client.delete(f"/api/campaigns/strahd/chats/{chat['id']}").status_code == 204
     assert client.get(f"/api/campaigns/strahd/chats/{chat['id']}").status_code == 404
+
+
+def test_a_conversation_gets_a_short_title_and_can_be_renamed(app, monkeypatch):
+    client, _ = app
+    monkeypatch.setattr(agent_mod.anthropic, "Anthropic",
+                        lambda: FakeClient([([BetaTextBlock(type="text", text="Nothing yet.")], "end_turn")]))
+    monkeypatch.setattr(agent_mod, "conversation_title", lambda q, a: "Recent events")
+    chat = client.post("/api/campaigns/strahd/chats").json()
+    with client.stream("POST", f"/api/campaigns/strahd/chats/{chat['id']}/messages",
+                       json={"text": "So, what has the party been up to lately in the village?"}) as r:
+        events(r)
+    assert client.get(f"/api/campaigns/strahd/chats/{chat['id']}").json()["title"] == "Recent events"
+    r = client.patch(f"/api/campaigns/strahd/chats/{chat['id']}", json={"title": "  Village gossip "})
+    assert r.json()["title"] == "Village gossip"
+    assert client.patch(f"/api/campaigns/strahd/chats/{chat['id']}", json={"title": ""}).status_code == 422
