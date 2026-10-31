@@ -1015,3 +1015,4 @@ body:has(.chat-form) #toast { bottom: calc(6.5rem + env(safe-area-inset-bottom))
 .bd-value { font-weight: 600; white-space: nowrap; }
 .bd-total { border-top: 1px solid var(--border); margin-top: .2rem; padding-top: .35rem; }
 .bd-total .bd-value { font-size: 1.15rem; }
+.chat-cost { margin: .5rem 0 0; font-size: .75rem; color: var(--muted); font-variant-numeric: tabular-nums; }

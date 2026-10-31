@@ -173,9 +173,63 @@ def remote_server(db: Path | str, cfg: AuthConfig) -> tuple[MCPServer, Any]:
         finally:
             s.close()
 
+    async def ask_assistant(campaign: str, question: str, conversation_id: int | None = None) -> str:
+        """Ask the campaign's own assistant, the one in the app's Ask tab, and get its answer.
+
+        It runs the app's chat as you, with the app's prompt and tools, and
+        the exchange is saved as one of your conversations there, so you can
+        open it in the app. Use this to see how the app answers (testing it,
+        comparing answers); to just look something up, the other tools are
+        quicker and cheaper. Takes as long as an answer takes in the app,
+        often a minute.
+
+        Returns JSON: the conversation_id (pass it back to follow up in the
+        same conversation), the answer (Markdown), the lookups it made, and
+        usage: model, api_calls, tool_calls, input/cache-read/cache-write/
+        output tokens, seconds and cost_usd.
+
+        Args:
+            campaign: The campaign's slug, from list_campaigns.
+            question: What to ask, as you'd type it in the app.
+            conversation_id: Continue this conversation; leave out to start a new one.
+        """
+        import anyio
+
+        from .agent import chat_turn, describe_tool_call
+
+        uid = user_id_of(get_access_token())
+
+        def run() -> str:
+            s = Store(db)
+            try:
+                c = _campaign_for(s, uid, campaign)
+                if c is None:
+                    return f"No campaign {campaign!r} for you. Call list_campaigns for the slugs."
+                if conversation_id is None:
+                    conv = s.create_conversation(c, uid)
+                else:
+                    found = s.conversation(conversation_id)
+                    if found is None or found["campaign_id"] != c.id or found["user_id"] != uid:
+                        return f"No conversation {conversation_id} of yours in {c.name}."
+                    conv = conversation_id
+                lookups: list[str] = []
+                answer = chat_turn(
+                    s, c, conv, question, user_id=uid, writable=at_least(c.access, "editor"),
+                    on_text=lambda t: None,
+                    on_tool=lambda n, a: lookups.append(describe_tool_call(n, a).strip(" ·")),
+                )
+                return json.dumps({"conversation_id": conv, "answer": str(answer), "lookups": lookups,
+                                   "usage": answer.usage}, ensure_ascii=False)
+            finally:
+                s.close()
+
+        return await anyio.to_thread.run_sync(run)
+
     read_only = ToolAnnotations(readOnlyHint=True)
     server.add_tool(list_campaigns, annotations=read_only)
     server.add_tool(campaign_overview, annotations=read_only)
+    # Not read-only: the conversation is saved, and the assistant may record what it's told happened.
+    server.add_tool(ask_assistant, annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
     for tool, writes in campaign_tools(db):
         server.add_tool(tool, annotations=ToolAnnotations(readOnlyHint=not writes, destructiveHint=False))
 

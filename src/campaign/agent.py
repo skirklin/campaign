@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -143,6 +144,7 @@ class Agent:
     model: str = MODEL
     messages: list[Any] = field(default_factory=list)
     stop_reason: str | None = None  # of the last response
+    usage: dict[str, Any] = field(default_factory=dict)  # what the last send() cost; see _new_usage
 
     def __post_init__(self) -> None:
         self.client = anthropic.Anthropic()
@@ -179,6 +181,15 @@ class Agent:
         """Add a user message and run the tool loop until Claude answers. Returns the final text."""
         start = len(self.messages)
         self.messages.append({"role": "user", "content": user_content})
+        self.usage = _new_usage(self.model)
+        began = time.monotonic()
+        try:
+            return self._loop(start, max_turns)
+        finally:
+            self.usage["seconds"] = round(time.monotonic() - began, 1)
+            self.usage["cost_usd"] = turn_cost(self.usage)
+
+    def _loop(self, start: int, max_turns: int) -> str:
         text = ""
         for _ in range(max_turns):
             with self.client.beta.messages.stream(
@@ -201,6 +212,7 @@ class Agent:
                         self.on_thinking(event.delta.thinking)
                 response = stream.get_final_message()
             self.stop_reason = response.stop_reason
+            _add_usage(self.usage, getattr(response, "usage", None))
 
             if response.stop_reason == "refusal":
                 del self.messages[start:]  # leave history valid for the next question
@@ -216,10 +228,39 @@ class Agent:
             if not tool_uses:
                 return text
             self.on_text("\n")
+            self.usage["tool_calls"] += len(tool_uses)
             self.messages.append(
                 {"role": "user", "content": [self._run_tool(b) for b in tool_uses]}
             )
         return text + "\n[stopped: too many tool calls]"
+
+
+def _new_usage(model: str) -> dict[str, Any]:
+    return {"model": model, "api_calls": 0, "tool_calls": 0, "input_tokens": 0, "cache_read_tokens": 0,
+            "cache_write_tokens": 0, "output_tokens": 0, "seconds": 0.0, "cost_usd": None}
+
+
+def _add_usage(total: dict[str, Any], u: Any) -> None:
+    total["api_calls"] += 1
+    if u is None:
+        return
+    total["input_tokens"] += u.input_tokens or 0
+    total["cache_read_tokens"] += getattr(u, "cache_read_input_tokens", 0) or 0
+    total["cache_write_tokens"] += getattr(u, "cache_creation_input_tokens", 0) or 0
+    total["output_tokens"] += u.output_tokens or 0
+
+
+def turn_cost(usage: dict[str, Any]) -> float | None:
+    """Dollars for one answer: cache reads at a tenth of the input price, writes at 1.25 times."""
+    from .digest import PRICES
+
+    price = PRICES.get(usage["model"])
+    if price is None:
+        return None
+    inp, out = price
+    dollars = (usage["input_tokens"] * inp + usage["cache_read_tokens"] * inp * 0.1
+               + usage["cache_write_tokens"] * inp * 1.25 + usage["output_tokens"] * out) / 1_000_000
+    return round(dollars, 4)
 
 
 def _role_parts(campaign) -> dict[str, str]:
@@ -275,6 +316,17 @@ def _plain(content: Any) -> Any:
     return [b.model_dump(mode="json", exclude_none=True) if hasattr(b, "model_dump") else b for b in content]
 
 
+class Answer(str):
+    """An answer's text, carrying what it cost (`usage`: tokens, calls, seconds, dollars)."""
+
+    usage: dict[str, Any]
+
+    def __new__(cls, text: str, usage: dict[str, Any]) -> Answer:
+        out = super().__new__(cls, text)
+        out.usage = usage
+        return out
+
+
 def chat_turn(
     store: Store, campaign: Campaign, conversation_id: int, text: str, user_id: int | None = None,
     writable: bool = True, **kw: Any,
@@ -291,8 +343,8 @@ def chat_turn(
     start = len(agent.messages)
     answer = agent.send(text)
     new = [{"role": m["role"], "content": _plain(m["content"])} for m in agent.messages[start:]]
-    store.append_conversation(conversation_id, new, title=text.strip()[:80] if first else None)
-    return answer
+    store.append_conversation(conversation_id, new, title=text.strip()[:80] if first else None, usage=agent.usage)
+    return Answer(answer, agent.usage)
 
 
 def ingest_session(

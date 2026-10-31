@@ -154,3 +154,40 @@ def test_denying_consent_and_tokens_for_other_resources(site, api):
     # it's signed, and the code goes to whoever is signed in, which is checked at the consent page.
     other = site.browser()
     assert other.post("/oauth/consent", data={"request": "forged.sig", "decision": "allow"}).status_code in (303, 401)
+
+
+def test_ask_assistant_runs_the_apps_chat_and_keeps_it(site, api, monkeypatch):
+    from anthropic.types.beta import BetaTextBlock, BetaToolUseBlock
+
+    import campaign.agent as agent_mod
+    from test_agent import FakeClient
+
+    dm, _ = setup_campaign(site)
+    clients = [
+        FakeClient([
+            ([BetaToolUseBlock(type="tool_use", id="t1", name="lookup", input={"name": "Morgantha"})], "tool_use"),
+            ([BetaTextBlock(type="text", text="A **night hag**.")], "end_turn"),
+        ]),
+        FakeClient([([BetaTextBlock(type="text", text="She bakes pies.")], "end_turn")]),
+    ]
+    monkeypatch.setattr(agent_mod.anthropic, "Anthropic", lambda: clients.pop(0))
+    token = connect(site, api, dm, register(api))["access_token"]
+
+    got = json.loads(call(api, token, "ask_assistant", campaign="strahd", question="Who is Morgantha?")[0])
+    assert got["answer"] == "A **night hag**." and got["lookups"] == ["Looked up “Morgantha”"]
+    assert (got["usage"]["api_calls"], got["usage"]["tool_calls"]) == (2, 1) and got["usage"]["cost_usd"] > 0
+    conv = got["conversation_id"]
+    again = json.loads(call(api, token, "ask_assistant", campaign="strahd", question="What does she do?",
+                            conversation_id=conv)[0])
+    assert again["conversation_id"] == conv and again["answer"] == "She bakes pies."
+    # It's an ordinary conversation in the app, with what each answer cost.
+    turns = dm.get(f"/api/campaigns/strahd/chats/{conv}").json()["turns"]
+    assert [t["text"] for t in turns if t["kind"] == "text"] == [
+        "Who is Morgantha?", "A **night hag**.", "What does she do?", "She bakes pies."]
+    assert turns[2]["usage"]["tool_calls"] == 1
+
+    # Someone else's conversation isn't yours to continue.
+    player, _, _ = join(site, dm, "pc@example.com")
+    ptoken = connect(site, api, player, register(api))["access_token"]
+    assert "No conversation" in call(api, ptoken, "ask_assistant", campaign="strahd", question="hi",
+                                     conversation_id=conv)[0]

@@ -117,6 +117,9 @@ def test_chat_streams_and_is_kept(app, monkeypatch):
     got = [(e, d) for e, d in got if not (e == "text" and not d.strip())]  # the newline after a tool round
     assert [e for e, _ in got] == ["tool", "text", "done"]
     assert "Listed the sessions" in got[0][1] and got[1][1] == "No sessions yet."
+    usage = got[2][1]["usage"]  # what the answer cost: two calls, one lookup
+    assert (usage["api_calls"], usage["tool_calls"], usage["cache_read_tokens"], usage["output_tokens"]) == (2, 1, 2000, 40)
+    assert usage["model"] and usage["cost_usd"] > 0
 
     # A second turn sends the whole stored history back, exactly as it was.
     with client.stream("POST", f"/api/campaigns/strahd/chats/{chat['id']}/messages", json={"text": "And now?"}) as r:
@@ -129,6 +132,8 @@ def test_chat_streams_and_is_kept(app, monkeypatch):
     assert history["title"] == "What happened?"
     assert [(t["role"], t["kind"]) for t in history["turns"]] == [
         ("user", "text"), ("assistant", "tool"), ("assistant", "text"), ("user", "text"), ("assistant", "text")]
+    assert history["turns"][2]["usage"]["api_calls"] == 2 and history["turns"][4]["usage"]["api_calls"] == 1
+    assert "usage" not in history["turns"][0]
     assert [c["id"] for c in client.get("/api/campaigns/strahd/chats").json()] == [chat["id"]]
     assert client.post(f"/api/campaigns/strahd/chats/{chat['id']}/messages", json={"text": " "}).status_code == 422
     assert client.delete(f"/api/campaigns/strahd/chats/{chat['id']}").status_code == 204

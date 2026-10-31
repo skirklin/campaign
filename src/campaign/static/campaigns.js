@@ -89,9 +89,9 @@ async function askTab(c) {
     };
     return el;
   };
-  const say = (role, text) => (role === "user"
+  const say = (role, text, usage) => (role === "user"
     ? h("div.chat-user", h("div.bubble", text))
-    : h("div.chat-assistant", renderMarkdown(text)));
+    : h("div.chat-assistant", renderMarkdown(text), usage && costLine(usage)));
   const turnsEls = (turns) => {
     const out = [];
     let act = null;
@@ -101,7 +101,7 @@ async function askTab(c) {
         act.add(t.text);
       } else {
         act = null;
-        out.push(say(t.role, t.text));
+        out.push(say(t.role, t.text, t.usage));
       }
     }
     return out;
@@ -151,6 +151,7 @@ async function askTab(c) {
         const typing = thread.appendChild(h("div.chat-typing", { "aria-label": "Thinking" }, h("span"), h("span"), h("span")));
         scrollDown();
         let answer = null;  // {el, text} of the answer being streamed in
+        let usage = null;
         let act = null;
         let frame = 0;
         const paint = () => {
@@ -173,9 +174,12 @@ async function askTab(c) {
             answer = null;  // text after a tool call starts a new paragraph
           } else if (type === "error") {
             thread.insertBefore(h("div.chat-error", data), typing);
+          } else if (type === "done" && data.usage) {
+            usage = data.usage;
           }
         });
         if (frame) { cancelAnimationFrame(frame); paint(); }
+        if (usage && answer) answer.el.append(costLine(usage));
         typing.remove();
         chats = await api("GET", `${base}/chats`);
         fillPick();
@@ -216,6 +220,20 @@ async function askTab(c) {
         },
       }, "Delete")),
     thread, form);
+}
+
+// What an answer cost, quietly under it: "14.2k tokens · 4 lookups · 21s · $0.06".
+function costLine(u) {
+  const k = (n) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`);
+  const total = u.input_tokens + u.cache_read_tokens + u.cache_write_tokens + u.output_tokens;
+  const parts = [`${k(total)} tokens`];
+  if (u.tool_calls) parts.push(`${u.tool_calls} lookup${u.tool_calls === 1 ? "" : "s"}`);
+  if (u.seconds) parts.push(`${Math.round(u.seconds)}s`);
+  if (u.cost_usd != null) parts.push(`$${u.cost_usd < 0.01 ? u.cost_usd.toFixed(3) : u.cost_usd.toFixed(2)}`);
+  return h("p.chat-cost", {
+    title: `${u.model}: ${u.input_tokens} input, ${u.cache_read_tokens} cached, ${u.cache_write_tokens} written to cache, `
+      + `${u.output_tokens} output, in ${u.api_calls} calls`,
+  }, parts.join(" · "));
 }
 
 // -- party ---------------------------------------------------------------------
