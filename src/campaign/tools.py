@@ -13,7 +13,7 @@ from typing import Any, Callable
 
 from pydantic import ValidationError
 
-from . import tables
+from . import encounters, tables
 from .charsheet import CharacterSheet, PartyStash, merge_patch
 from .db import Campaign, Store
 from .world import TREASURE, World
@@ -254,6 +254,38 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         if not blocks:
             return f"{view['name']} has no stat block in the digested material. Try search_reference."
         return "\n\n".join(format_stat_block(view["name"], json.loads(b)) for b in blocks)
+
+    def encounter(creatures: list[encounters.Creature], party_size: int | None = None,
+                  party_level: int | None = None) -> str:
+        """Put a fight together: every creature's stat block, its XP, and how hard it is for the party.
+
+        One call for a whole fight, rather than a stat_block call per
+        creature. Give each kind of creature once with how many; where the
+        adventure changes one ("use the violet fungus stat block with 45 HP
+        (10d8) and vulnerability to fire"), pass its hp and a note. The party
+        defaults to the campaign's characters (how many, average level).
+
+        Returns JSON: each creature's AC, HP, CR and XP (found false if no
+        stat block is in the material: say so, never invent one), the total
+        and adjusted XP and the difficulty by the DMG's rules, and `show`: a
+        ```encounter block to put in your answer as it is. The app renders it
+        as a card with every stat block, HP to track and initiative to roll,
+        so don't reprint the stat blocks yourself.
+
+        Args:
+            creatures: Each kind of creature: name (as the book gives it), count, and optionally hp and note.
+            party_size: How many characters, if not the campaign's party.
+            party_level: Their level, if not the campaign's party's average.
+        """
+        party = None
+        if party_size or party_level:
+            default = encounters.party_of(store, campaign)
+            party = encounters.Party(size=party_size or (default.size if default else 4),
+                                     level=party_level or (default.level if default else 1))
+        spec = encounters.Spec(creatures=creatures, party=party)
+        result = encounters.build(store, campaign, spec)
+        show = "```encounter\n" + spec.model_dump_json(exclude_none=True, exclude_defaults=True) + "\n```"
+        return _json(encounters.summary(result) | {"show": show})
 
     def treasure(place: str) -> str:
         """What the book puts at a place or on a creature (coins, items, magic), still there unless taken.
@@ -565,6 +597,7 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         find_entities,
         timeline,
         stat_block,
+        encounter,
         treasure,
         roll_table,
         search_reference,

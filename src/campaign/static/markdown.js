@@ -8,8 +8,17 @@
 import { h, toast } from "./util.js";
 import { parseExpr, rollExpr, formatExpr } from "./dice.js";
 
-export function renderMarkdown(text) {
-  return h("div.md", blocks(String(text || "").replace(/\r\n?/g, "\n").split("\n")));
+// `fences` renders other fenced blocks by language: {encounter: (body) => element}.
+let fences = {};
+
+export function renderMarkdown(text, custom = {}) {
+  const outer = fences;
+  fences = custom;
+  try {
+    return h("div.md", blocks(String(text || "").replace(/\r\n?/g, "\n").split("\n")));
+  } finally {
+    fences = outer;
+  }
 }
 
 // -- blocks --------------------------------------------------------------------------
@@ -33,7 +42,10 @@ function blocks(lines) {
       const body = [];
       for (i++; i < lines.length && !lines[i].trim().startsWith(m[1]); i++) body.push(lines[i]);
       i++;  // the closing fence (or the end, while an answer is still streaming in)
-      out.push(m[2].toLowerCase() === "statblock" ? statBlockFromText(body.join("\n")) : h("pre", h("code", body.join("\n"))));
+      const lang = m[2].toLowerCase();
+      out.push(lang === "statblock" ? statBlockFromText(body.join("\n"))
+        : fences[lang] ? fences[lang](body.join("\n"))
+        : h("pre", h("code", body.join("\n"))));
       continue;
     }
     if ((m = line.match(HEADING))) {

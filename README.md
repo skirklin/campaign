@@ -255,6 +255,14 @@ The digest turns a module into two things the assistant can use:
 - **The tables** to roll on: random encounters, treasure, rumors, each row
   as printed.
 
+For a fight, the `encounter` tool takes the creatures and how many of
+each (with the adventure's changes to any of them, like "45 HP, vulnerable
+to fire") and gives back their stat blocks, their XP and the encounter's
+difficulty for the party by the DMG's rules (the party defaults to the
+campaign's characters). In the Ask tab the answer shows it as an encounter
+card: the difficulty, every stat block, an HP box per monster and a button
+that rolls the monsters' initiative.
+
 For running a session, the chat and MCP tools `stat_block`, `treasure`
 (what's at a place, and what the party has already taken) and `roll_table`
 work from these.

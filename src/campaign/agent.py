@@ -35,7 +35,10 @@ sources:
   named or described ("the hag", "the vampire's castle"), find_entities for
   overviews, timeline for how something changed, and recent_journal and
   list_sessions for what happened when.
-- For running the game: stat_block for a creature's full stats, treasure
+- For running the game: encounter to put a whole fight together (every
+  creature's stat block, XP and difficulty for the party, in one call; put
+  the ```encounter block it returns in your answer and don't reprint the
+  stat blocks), stat_block for one creature's full stats, treasure
   for what's at a place or on a creature (and what's been taken), and
   roll_table to roll on the book's random encounter, treasure and other
   tables. Keyed areas answer to their map key ("C3").
@@ -435,6 +438,8 @@ _DESCRIBE: dict[str, Callable[[dict[str, Any]], str]] = {
                      + (f" matching “{a['query']}”" if a.get("query") else ""),
     "timeline": lambda a: f"Timeline of “{a.get('name', '')}”",
     "stat_block": lambda a: f"Stat block for “{a.get('name', '')}”",
+    "encounter": lambda a: "Put together a fight: " + ", ".join(
+        f"{c.get('count', 1)} × {c.get('name', '?')}" for c in a.get("creatures") or []),
     "treasure": lambda a: f"Treasure at “{a.get('place', '')}”",
     "roll_table": lambda a: (f"Rolled on “{a['name']}”" if a.get("name") else "Listed the tables to roll on")
                   + (f" (a {a['roll']})" if a.get("roll") is not None else ""),
