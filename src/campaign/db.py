@@ -844,6 +844,24 @@ class Store:
             )
         return cur.rowcount > 0
 
+    def set_source_dm_only(self, source_id: int, dm_only: bool) -> None:
+        """Make a source DM-only or visible to players, its world facts included.
+
+        A book's facts are applied as known to the party (from session 0) when
+        the book is visible to players, and unknown when it's DM-only. Changing
+        the setting changes those facts to match. A fact the party learned in
+        play (from a later session) keeps that.
+        """
+        book_facts = ("run_id IN (SELECT id FROM runs WHERE kind = 'book' AND source_id = ?)")
+        with self.conn:
+            self.conn.execute("UPDATE sources SET dm_only = ? WHERE id = ?", (int(dm_only), source_id))
+            if dm_only:
+                self.conn.execute(
+                    f"UPDATE facts SET party_knows_from = NULL WHERE {book_facts} AND party_knows_from = 0", (source_id,))
+            else:
+                self.conn.execute(
+                    f"UPDATE facts SET party_knows_from = 0 WHERE {book_facts} AND party_knows_from IS NULL", (source_id,))
+
     def _visible_sources_clause(self, campaign: Campaign) -> str:
         return "s.campaign_id = ?" + (" AND s.dm_only = 0" if campaign.spoiler_safe else "")
 

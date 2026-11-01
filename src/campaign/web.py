@@ -67,6 +67,10 @@ class ChatMessage(BaseModel):
     text: str
 
 
+class SourceUpdate(BaseModel):
+    dm_only: bool | None = None
+
+
 class ChatTitle(BaseModel):
     title: str = Field(min_length=1)
 
@@ -428,6 +432,17 @@ def create_app(
                 status["estimate"] = estimates[src["id"]]
             out.append(src | {"digest": status})
         return out
+
+    @app.patch("/api/campaigns/{slug}/sources/{source_id}")
+    def update_source(source_id: int, body: SourceUpdate, c: Campaign = Depends(editor),
+                      s: Store = Depends(store)) -> dict[str, Any]:
+        """Change who can see a source: `dm_only` hides it, and what the world took from it, from players."""
+        src = s.source(source_id)
+        if src is None or src["campaign_id"] != c.id or (c.spoiler_safe and src["dm_only"]):
+            raise HTTPException(404, "no such source")
+        if body.dm_only is not None:
+            s.set_source_dm_only(source_id, body.dm_only)
+        return {"id": source_id, "dm_only": bool(s.source(source_id)["dm_only"])}
 
     @app.post("/api/campaigns/{slug}/sources", status_code=201)
     def add_source(
