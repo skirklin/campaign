@@ -149,7 +149,7 @@ def create_app(
     # requests) opens the database and races to create the schema.
     Store(db).close()
     # With sign-in on, the remote MCP endpoint (and its OAuth) is served too.
-    mcp = remote_server(db, auth) if auth is not None else None
+    mcp = remote_server(db, auth, wake_digest=lambda: reconciler.wake()) if auth is not None else None
     # Digests run in the background for as long as the server does, toward
     # whatever the sources' targets say (see digest.Reconciler).
     reconciler = digest.Reconciler(db, **({"client_factory": digest_client} if digest_client else {}))
@@ -393,8 +393,7 @@ def create_app(
 
         Idempotent: asking twice is the same as asking once.
         """
-        s.set_digest_target(source_id, digest.MODEL, digest.EFFORT)
-        digest.retry_failed(s, source_id)
+        digest.request(s, source_id)
         estimates.pop(source_id, None)
         reconciler.wake()
 
@@ -423,9 +422,11 @@ def create_app(
             # Everything left has failed (or waits on something that has): nothing more will happen on its own.
             stuck = bool(target) and remaining > 0 and status["failed"] >= remaining
             running = bool(target) and (remaining > 0 or status["total"] == 0) and not stuck
-            if src["kind"] != "transcript" and not running and src["id"] not in estimates:
+            stale = src["id"] not in estimates or estimates[src["id"]].get("model") != digest.MODEL
+            if src["kind"] != "transcript" and not running and stale:
                 # Planned against the current model (without saving), so it shows what a digest would do.
-                estimates[src["id"]] = digest.estimate(s, digest.plan(s, src["id"], save=False))
+                estimates[src["id"]] = digest.estimate(
+                    s, digest.plan(s, src["id"], model=digest.MODEL, save=False), model=digest.MODEL)
             status |= {"running": running, "stuck": stuck, "target": target, "model": target or digest.MODEL,
                        "spent_usd": digest.spent(s.digest_usage(src["id"]))}
             if not running and remaining > 0 and src["id"] in estimates:

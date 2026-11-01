@@ -191,3 +191,46 @@ def test_ask_assistant_runs_the_apps_chat_and_keeps_it(site, api, monkeypatch):
     ptoken = connect(site, api, player, register(api))["access_token"]
     assert "No conversation" in call(api, ptoken, "ask_assistant", campaign="strahd", question="hi",
                                      conversation_id=conv)[0]
+
+
+def test_digest_tools_redigest_a_book_with_a_new_model(site, api, monkeypatch):
+    import time
+
+    from campaign import digest
+    from test_digest import BOOK, FakeDigest
+
+    monkeypatch.setattr(digest, "MIN_LEAF_CHARS", 1)
+    fake = FakeDigest()
+    monkeypatch.setattr(digest.anthropic, "Anthropic", lambda **kw: fake)
+    dm, _ = setup_campaign(site)
+    book = BOOK.format(intro="", church="Donavich prays.").encode()
+    src = dm.post("/api/campaigns/strahd/sources", files={"file": ("book.md", book)},
+                  data={"kind": "module", "digest_now": "true"}).json()
+    token = connect(site, api, dm, register(api))["access_token"]
+
+    def settled():
+        for _ in range(200):
+            rows = json.loads(call(api, token, "digest_status", campaign="strahd")[0])["sources"]
+            row = next(r for r in rows if r["id"] == src["id"])
+            if row["done"] == row["sections"] == 8:
+                return row
+            time.sleep(0.05)
+        raise AssertionError(row)
+
+    first = settled()
+    assert set(first["digested_with"]) == {digest.MODEL} and len(fake.calls) == 8
+
+    monkeypatch.setattr(digest, "MODEL", "claude-sonnet-5-5")
+    got = json.loads(call(api, token, "digest_source", campaign="strahd", source_id=src["id"])[0])
+    assert got["digesting"] and got["model"] == "claude-sonnet-5-5" and got["estimate"]["calls"] == 8
+    assert got["status"]["done"] == 0 and got["status"]["target_model"] == "claude-sonnet-5-5"
+    again = settled()
+    assert again["digested_with"].keys() == {"claude-sonnet-5-5"} and len(fake.calls) == 16
+    # Asking again with nothing left to do costs nothing.
+    assert json.loads(call(api, token, "digest_source", campaign="strahd", source_id=src["id"])[0])["estimate"]["calls"] == 0
+    assert "No source" in call(api, token, "digest_source", campaign="strahd", source_id=src["id"] + 99)[0]
+
+    player, _, _ = join(site, dm, "pc@example.com")
+    ptoken = connect(site, api, player, register(api))["access_token"]
+    assert "editor access" in call(api, ptoken, "digest_status", campaign="strahd")[0]
+    assert "editor access" in call(api, ptoken, "digest_source", campaign="strahd", source_id=src["id"])[0]
