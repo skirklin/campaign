@@ -435,3 +435,23 @@ def test_inventories_and_the_stash_move_into_the_party_inventory(tmp_path):
     assert inv.purse(None) == {"cp": 0, "sp": 0, "ep": 0, "gp": 809, "pp": 56}
     assert not s.conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'party_stash'").fetchone()
     s.close()
+
+
+def test_items_are_world_items_by_their_own_name_or_when_someone_says_so(store):
+    """The book's aliases are too loose to go by: "+1 arrows" names a quiver, "breastplate" the Breastplate of Mytros."""
+    camp = store.create_campaign("Names", "dm")
+    world = Inventory(store, camp).world
+    run = world.start_run("manual")
+    quiver = world.ensure_entity("Quiver of Ten +1 Arrows", "item")["id"]
+    world.add_alias(quiver, "+1 Arrows", run)
+    shield = world.ensure_entity("Shield of Volkan", "item")["id"]
+    world.add_alias(shield, "lion shield", run)
+    t = tools(store, "names")
+    t["add_items"](items=[{"name": "+1 Arrows", "qty": 20}, {"name": "shield of volkan"},
+                          {"name": "Shield w/ Lion Head", "world_item": "lion shield"}], reason="loot")
+    items = json.loads(t["inventory"]())["holders"][0]["items"]
+    assert [i.get("world_item") for i in items] == [None, "Shield of Volkan", "Shield of Volkan"]
+    assert "Not done" in t["add_items"](items=[{"name": "Odd", "world_item": "Nothing like it"}], reason="x")
+    assert t["link_item"](item_id=items[0]["id"], world_item="Quiver of Ten +1 Arrows") == "+1 Arrows is Quiver of Ten +1 Arrows."
+    assert t["link_item"](item_id=items[0]["id"], world_item=None) == "+1 Arrows is a plain item now."
+    assert "world_item" not in json.loads(t["inventory"]())["holders"][0]["items"][0]
