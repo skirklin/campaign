@@ -186,7 +186,9 @@ localhost without it, unless you pass `--no-auth`. With sign-in on:
   changes, so two people at once both count. Other edits are refused if
   someone changed the stash in the meantime, rather than overwriting it.
   Session ingests and chat record unclaimed loot there
-  (`get_party_stash`, `update_party_stash`).
+  (`get_party_stash`, `update_party_stash`). Any item, in the stash or on
+  a sheet, can have a worth in gold pieces each, for loot nobody will do
+  more with than sell; the stash shows what its items are worth in all.
 - **Paper sheets can be scanned in.** On the Party tab, **From a scan or
   PDF…** takes a photo or PDF of a filled-in sheet; Claude reads it into a
   new character (`CAMPAIGN_SHEET_MODEL`, default `CAMPAIGN_MODEL`) and lists

@@ -143,6 +143,7 @@ class Item(Model):
     requires_attunement: bool = False
     bonuses: list[Bonus] = []  # count while equipped (and attuned, if it needs it)
     notes: str = ""
+    value_gp: float = Field(0, ge=0)  # what one is worth, in gold pieces; 0 if nobody's said
 
     @property
     def active(self) -> bool:
