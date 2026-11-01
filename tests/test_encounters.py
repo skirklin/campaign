@@ -78,7 +78,7 @@ def test_the_tool_answers_briefly_and_hands_back_the_card(tmp_path):
                                  "hp": "13 (2d8 + 4)", "cr": "1/4", "xp_each": 50}]
     assert got["difficulty"] == "trivial" and got["show"].startswith("```encounter\n{")
     spec = json.loads(got["show"].split("\n")[1])
-    assert spec == {"creatures": [{"name": "Skeleton", "count": 3}], "party": {"size": 4, "level": 4}}
+    assert spec == {"creatures": [{"name": "Skeleton", "id": 1, "count": 3}], "party": {"size": 4, "level": 4}}
     assert "stat_block" not in json.dumps(got)  # the card shows them; the answer needn't
 
     # The card's endpoint builds the same spec, stat blocks and all.
@@ -101,3 +101,26 @@ def test_no_difficulty_without_a_known_level():
     assert "level" in got["no_difficulty"] and '"party"' not in got["show"]
     got = json.loads(tools["encounter"](creatures=[{"name": "Skeleton"}]))
     assert "size and level" in got["no_difficulty"]
+
+
+def test_a_pinned_id_wins_over_the_name_and_the_book_text_is_at_hand():
+    store = Store(":memory:")
+    camp = store.create_campaign("Chateau", "dm")
+    src = store.add_source(camp, "Bestiary", "module", [
+        {"heading": "Skeleton", "text": "Skeleton. Armor Class 13 (armor scraps). Hit Points 13 (2d8 + 4).", "page": 1},
+        {"heading": "Skeleton", "text": "Actions. Shortsword. +4 to hit.", "page": 1},
+        {"heading": "Zombie", "text": "Zombie. Armor Class 8. Hit Points 22.", "page": 2},
+    ])
+    World(store, camp).apply_book(src, [
+        entry("Skeleton", block("13 (armor scraps)", "13 (2d8 + 4)", "1/4")),
+        entry("Zombie", block("8", "22 (3d8 + 9)", "1/4")),
+    ], key="k")
+    world = World(store, camp)
+    zombie = world.resolve("Zombie")["id"]
+    r = encounters.build(store, camp, encounters.Spec(creatures=[{"name": "Skeleton", "id": zombie}]))
+    assert r["creatures"][0]["name"] == "Zombie"  # what was matched when the encounter was made
+    r = encounters.build(store, camp, encounters.Spec(creatures=[{"name": "Skeleton", "id": 9999}]))
+    assert r["creatures"][0]["name"] == "Skeleton"  # gone: back to the name
+
+    passage = encounters.book_passage(store, camp, world.resolve("Skeleton")["id"])
+    assert [p["text"][:9] for p in passage] == ["Skeleton.", "Actions. "]

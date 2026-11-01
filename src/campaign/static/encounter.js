@@ -21,7 +21,7 @@ export function encounterFence(slug) {
     const key = `${slug}\n${JSON.stringify(spec)}`;
     if (!built.has(key)) built.set(key, api("POST", `/api/campaigns/${slug}/encounter`, spec));
     built.get(key).then(
-      (result) => card.replaceChildren(...encounterBody(result)),
+      (result) => card.replaceChildren(...encounterBody(result, slug)),
       (err) => card.replaceChildren(h("p.error-text", `Couldn't build this encounter: ${err.message}`)),
     );
     return card;
@@ -31,7 +31,28 @@ export function encounterFence(slug) {
 const mod = (score) => (Number.isFinite(score) ? Math.floor((score - 10) / 2) : 0);
 const averageHp = (hp) => Number(String(hp || "").match(/^\s*(\d+)/)?.[1]) || null;
 
-function encounterBody(r) {
+// The book text a stat block was read from, fetched when opened: to check the card against.
+function bookText(slug, entityId) {
+  const body = h("div.book-text", h("p.muted.small", "Finding it in the book…"));
+  let loaded = false;
+  return h("details.book-text-toggle", {
+    ontoggle: async (e) => {
+      if (!e.target.open || loaded) return;
+      loaded = true;
+      try {
+        const chunks = await api("GET", `/api/campaigns/${slug}/entities/${entityId}/passage`);
+        body.replaceChildren(...(chunks.length
+          ? chunks.map((ch) => h("div", h("p.fact-meta", [ch.source, ch.heading, ch.page && `p. ${ch.page}`].filter(Boolean).join(" · ")),
+            h("pre", ch.text)))
+          : [h("p.muted.small", "Couldn't find this stat block's text in the book.")]));
+      } catch (err) {
+        body.replaceChildren(h("p.error-text", err.message));
+      }
+    },
+  }, h("summary.small", "Book text"), body);
+}
+
+function encounterBody(r, slug) {
   const party = r.party ? `${r.party.size} characters, level ${r.party.level}` : "no party on file";
   const head = h("header",
     h("h4", "Encounter"),
@@ -80,6 +101,7 @@ function encounterBody(r) {
         c.note && h("span.small.encounter-note", c.note)),
       trackers,
       statBlockFromData(c.name, { ...sb, hit_points: c.hp }),
+      c.id && bookText(slug, c.id),
     );
   });
   return [head, thresholds, h("div.encounter-actions", roll), initiative, ...rows];

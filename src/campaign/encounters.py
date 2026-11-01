@@ -29,6 +29,7 @@ from .world import World
 
 class Creature(BaseModel):
     name: str
+    id: int | None = None  # the world entity it was matched to, so a re-render shows the same one
     count: int = Field(default=1, ge=1, le=50)
     hp: str | None = None  # the adventure's own hit points, e.g. "45 (10d8)"
     note: str = ""  # anything else the adventure changes: "vulnerable to fire"
@@ -111,17 +112,42 @@ def party_of(store: Store, campaign: Any) -> Party | None:
     return Party(size=len(levels), level=max(1, min(20, round(sum(levels) / len(levels)))))
 
 
-def find_stat_block(world: World, name: str) -> tuple[str, dict[str, Any] | None]:
-    """The entity's name and its stat block (the latest, if the book gives several), or None."""
-    e = world.resolve(name)
-    view = world.view(e["id"]) if e else None
+def find_stat_block(world: World, name: str, entity_id: int | None = None) -> tuple[int | None, str, dict[str, Any] | None]:
+    """The entity's id, name and stat block (the latest, if the book gives several), or None.
+
+    By `entity_id` when given (and still there), else by name or alias.
+    """
+    view = world.view(entity_id) if entity_id else None
+    if view is None:
+        e = world.resolve(name)
+        view = world.view(e["id"]) if e else None
     if view is None:
         hits = world.lookup(name, limit=1)
         view = hits[0] if hits else None
     if view is None:
-        return name, None
+        return None, name, None
     blocks = world.attribute_values(view["id"], "stat_block")
-    return view["name"], json.loads(blocks[-1]) if blocks else None
+    return view["id"], view["name"], json.loads(blocks[-1]) if blocks else None
+
+
+def book_passage(store: Store, campaign: Any, entity_id: int) -> list[dict[str, Any]]:
+    """The book's own text for an entity's stat block: the chunk that best matches its name in the
+    source the stat block came from, and the one after (stat blocks often run on). To check the
+    stat block against, not to replace it."""
+    world = World(store, campaign)
+    e = world.entity(entity_id)
+    if e is None:
+        return []
+    facts = [f for f in world.facts(entity_id) if f["attribute"] == "stat_block" and f["source_id"]]
+    source = store.source(facts[-1]["source_id"]) if facts else None
+    if source is None:
+        return []
+    hits = store.search(campaign, f"{e['name']} armor class hit points", limit=5, source=source["title"])
+    if not hits:
+        return []
+    name = e["name"].lower()
+    best = next((h for h in hits if name in (h["heading"] or "").lower()), hits[0])
+    return store.read_chunks(campaign, best["id"], after=1)
 
 
 def build(store: Store, campaign: Any, spec: Spec) -> dict[str, Any]:
@@ -129,10 +155,10 @@ def build(store: Store, campaign: Any, spec: Spec) -> dict[str, Any]:
     party = spec.party or party_of(store, campaign)
     creatures = []
     for c in spec.creatures:
-        name, sb = find_stat_block(world, c.name)
+        entity_id, name, sb = find_stat_block(world, c.name, c.id)
         rating, xp = challenge_xp(sb.get("challenge", "")) if sb else (None, None)
         creatures.append({
-            "asked_for": c.name, "name": name, "count": c.count, "found": sb is not None,
+            "asked_for": c.name, "id": entity_id, "name": name, "count": c.count, "found": sb is not None,
             "stat_block": sb, "hp": c.hp or (sb or {}).get("hit_points"), "hp_changed": bool(c.hp),
             "note": c.note, "cr": rating, "xp_each": xp,
         })

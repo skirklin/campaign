@@ -204,6 +204,62 @@ const ABILITIES = ["str", "dex", "con", "int", "wis", "cha"];
 const ABILITY_NAMES = { strength: "str", dexterity: "dex", constitution: "con", intelligence: "int", wisdom: "wis", charisma: "cha" };
 const modOf = (score) => (Number.isFinite(score) ? Math.floor((score - 10) / 2) : null);
 
+// What a stat block entry lets you do at the table: roll an attack (to hit and every damage part
+// at once, dice doubled on a natural 20), roll a recharge, tick off uses ("3/Day").
+const NUM = "[+\\-\u2212]\\d+";
+const TO_HIT = new RegExp(`(${NUM})\\s*to hit|Attack Roll:\\s*(${NUM})`, "i");
+const DAMAGE = /\d+\s*\((\d*d\d+(?:\s*[+\-\u2212]\s*\d+)?)\)\s*([A-Za-z]+)\s+damage/gi;
+
+function actionControls(name, body) {
+  const out = [];
+  const hit = body.match(TO_HIT);
+  const damage = [...body.matchAll(DAMAGE)].map((d) => ({ expr: parseExpr(d[1].replace(/\u2212/g, "-")), type: d[2].toLowerCase() }))
+    .filter((d) => d.expr);
+  if (hit || damage.length) {
+    const result = h("span.action-result");
+    out.push(h("button.action-roll", {
+      type: "button", title: `Roll ${name}`, "aria-label": `Roll ${name}`,
+      onclick: () => {
+        const parts = [];
+        let crit = false;
+        if (hit) {
+          const bonus = (hit[1] || hit[2]).replace("\u2212", "-");
+          const r = rollExpr(parseExpr(`1d20${bonus}`));
+          crit = r.natural === 20;
+          parts.push(`${r.total} to hit${crit ? " (CRIT!)" : r.natural === 1 ? " (natural 1)" : ""}`);
+        }
+        const dmg = damage.map((d) => `${rollExpr(d.expr, { crit }).total} ${d.type}`);
+        if (dmg.length) parts.push(dmg.join(" + "));
+        const text = parts.join(" · ");
+        result.textContent = ` ${text} `;
+        result.classList.remove("rolled");
+        void result.offsetWidth;
+        result.classList.add("rolled");
+        toast(`${name}: ${text}`);
+      },
+    }, "⚔"), result);
+  }
+  const recharge = name.match(/Recharge\s+(\d)(?:\s*[\u2013\-]\s*\d)?/i);
+  if (recharge) {
+    const low = Number(recharge[1]);
+    const result = h("span.action-result");
+    out.push(h("button.action-roll", {
+      type: "button", title: `Roll to recharge (${low}+ on a d6)`,
+      onclick: () => {
+        const r = rollExpr(parseExpr("1d6")).total;
+        result.textContent = r >= low ? ` ${r}: recharged ` : ` ${r}: not yet `;
+        result.classList.toggle("ready", r >= low);
+      },
+    }, "↻"), result);
+  }
+  const perDay = name.match(/(\d+)\/Day/i);
+  if (perDay) {
+    out.push(h("span.uses", { title: "Uses" }, Array.from({ length: Math.min(Number(perDay[1]), 9) }, (_, i) =>
+      h("input", { type: "checkbox", "aria-label": `${name}: use ${i + 1}` }))), " ");
+  }
+  return out;
+}
+
 // The stat_block tool's text: name, "AC … · HP … · Speed … · CR …", ability line, other
 // lines, then "Traits:", "Actions:" (or other) sections of "- " items. Anything that
 // doesn't look like that is shown as it is.
@@ -251,7 +307,8 @@ function statBlockCard({ name, ac, hp, speed, cr, scores, props, sections }) {
   const entry = (text) => {
     // "Tusk. Melee Weapon Attack: …" -> the name in bold italics, as the books print it.
     const m = text.match(/^([^.:]{2,60}?(?:\([^)]*\))?)\.\s+(.*)$/s);
-    return h("p", m ? [h("strong", h("em", `${m[1]}.`)), " ", ...inline(m[2])] : inline(text));
+    if (!m) return h("p", inline(text));
+    return h("p", h("strong", h("em", `${m[1]}.`)), " ", ...actionControls(m[1], m[2]), ...inline(m[2]));
   };
   const hpDice = String(hp || "").match(/\(([^)]*d[^)]*)\)/);
   return h("section.statblock-card",
