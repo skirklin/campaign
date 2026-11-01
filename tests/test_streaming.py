@@ -71,6 +71,10 @@ def test_events_send_only_what_changed(tmp_path, monkeypatch):
     real_sleep = web.asyncio.sleep
 
     async def sleep(seconds):
+        # asyncio.sleep is patched for everyone, the test client's own plumbing included: count
+        # only the stream's one-second polls, or a stray sleep(0) moves the writes out of order.
+        if seconds != 1:
+            return await real_sleep(seconds)
         ticks.append(seconds)
         if len(ticks) == 1:
             st = Store(db)
