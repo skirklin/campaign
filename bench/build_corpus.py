@@ -38,6 +38,22 @@ def clean(text: str, demote: int = 0) -> str:
     return "\n".join(out).strip() + "\n"
 
 
+def fix_srd(name: str, text: str) -> str:
+    """Repair the upstream markdown's known faults, so each creature's stat block is whole and in place."""
+    if name == "11 monsters":
+        # The ice devil's Magic Resistance and actions sit inside the imp's block, after its ability scores.
+        imp = text.index("##### Imp\n")
+        start = text.index("***Magic Resistance.*** The devil has advantage", imp)
+        end = text.index("The frigid air dissipates when the rest of the wall vanishes.\n", start)
+        end = text.index("\n", end) + 1
+        moved = text[start:end]
+        text = text[:start] + text[end:].lstrip("\n")
+        text = text[:imp] + moved + "\n" + text[imp:]
+    if name == "16 npcs":
+        text = text.replace("\n**Archmage**\n", "\n### Archmage\n", 1)  # a bold line, not a heading
+    return text
+
+
 def build(src: Path, out: Path) -> None:
     out.mkdir(parents=True, exist_ok=True)
     docs = src / "adventures/docs"
@@ -59,7 +75,8 @@ def build(src: Path, out: Path) -> None:
 
     srd = ["# SRD 5.1 Bestiary\n\n_System Reference Document 5.1 © 2016 Wizards of the Coast LLC, CC BY 4.0"
            " (https://creativecommons.org/licenses/by/4.0/). Markdown from https://github.com/thejasonvu/dnd-5e-srd._\n"]
-    srd += [clean((src / f"srd/markdown/{name}.md").read_text()) for name in ("11 monsters", "15 creatures", "16 npcs")]
+    srd += [clean(fix_srd(name, (src / f"srd/markdown/{name}.md").read_text()))
+            for name in ("11 monsters", "15 creatures", "16 npcs")]
     (out / "srd-5.1-bestiary.md").write_text("\n".join(srd))
 
 

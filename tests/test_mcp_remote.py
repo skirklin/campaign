@@ -218,10 +218,17 @@ def test_digest_tools_redigest_a_book_with_a_new_model(site, api, monkeypatch):
         raise AssertionError(row)
 
     first = settled()
-    assert set(first["digested_with"]) == {digest.MODEL} and len(fake.calls) == 8
+    first_model = digest.MODEL
+    assert set(first["digested_with"]) == {first_model} and len(fake.calls) == 8
 
+    # Each source keeps its own model: a new default doesn't redo it, asking for a model does.
     monkeypatch.setattr(digest, "MODEL", "claude-sonnet-5-5")
-    got = json.loads(call(api, token, "digest_source", campaign="strahd", source_id=src["id"])[0])
+    same = json.loads(call(api, token, "digest_source", campaign="strahd", source_id=src["id"])[0])
+    assert same["model"] == first_model and same["estimate"]["calls"] == 0
+    assert "Unknown model" in call(api, token, "digest_source", campaign="strahd", source_id=src["id"],
+                                   model="gpt-4")[0]
+    got = json.loads(call(api, token, "digest_source", campaign="strahd", source_id=src["id"],
+                          model="claude-sonnet-5-5")[0])
     assert got["digesting"] and got["model"] == "claude-sonnet-5-5" and got["estimate"]["calls"] == 8
     assert got["status"]["done"] == 0 and got["status"]["target_model"] == "claude-sonnet-5-5"
     again = settled()

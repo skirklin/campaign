@@ -422,6 +422,29 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         ok = world.end_fact(fact_id, ctx.run(), ctx.clock)
         return f"Ended fact {fact_id} at session {ctx.clock}." if ok else f"No open fact {fact_id}."
 
+    def retract_fact(fact_id: int) -> str:
+        """Delete a fact that was recorded by mistake (it never was true), as if it had never been
+        recorded; a value it replaced is current again. For something that was true and stopped
+        being true, use end_fact instead. Only facts recorded in chat or by hand.
+
+        Args:
+            fact_id: The fact_id shown by lookup.
+        """
+        if world.retract_fact(fact_id):
+            return f"Deleted fact {fact_id}."
+        return f"No fact {fact_id} recorded in chat or by hand (book and session facts can't be deleted here)."
+
+    def delete_journal_entry(event_id: int) -> str:
+        """Delete a journal entry that was recorded by mistake (it didn't happen). Only entries added in
+        chat or by hand.
+
+        Args:
+            event_id: The entry's id, from recent_journal.
+        """
+        if world.delete_event(event_id):
+            return f"Deleted journal entry {event_id}."
+        return f"No journal entry {event_id} added in chat or by hand."
+
     def party_learned(fact_id: int) -> str:
         """Note that the party has now learned an existing fact (for example a secret from the book).
 
@@ -620,6 +643,6 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         get_character,
         get_party_stash,
     ]
-    writers = [record_fact, end_fact, party_learned, add_journal_entry, update_character, create_character,
-               update_party_stash]
+    writers = [record_fact, end_fact, retract_fact, party_learned, add_journal_entry, delete_journal_entry,
+               update_character, create_character, update_party_stash]
     return readers + (writers if writable else [])

@@ -261,6 +261,13 @@ The digest turns a module into two things the assistant can use:
 - **The tables** to roll on: random encounters, treasure, rumors, each row
   as printed.
 
+Facts are what the book says is true: what a character claims is kept as
+theirs ("Anni says…"), and where something is keeps the book's whole
+placement (the chest *under the tables*, *beneath the violet fungus*). Each
+stat block is checked against the book's text after it's read, and lines
+the model dropped (resistances, immunities, senses, languages, saves,
+skills) are put back.
+
 For a fight, the `encounter` tool takes the creatures and how many of
 each (with the adventure's changes to any of them, like "45 HP, vulnerable
 to fire") and gives back their stat blocks, their XP and the encounter's
@@ -335,10 +342,16 @@ app to sign in with Google and asks you to allow it, then acts as you:
   be read and continued in the app. Useful for testing how the app answers.
 - **Digests, for development** (`digest_status`, `digest_source`; editor
   access): each source's digest progress, the models it was digested with
-  and what it cost; and digesting a source again with the configured
-  model (`CAMPAIGN_DIGEST_MODEL`), e.g. after changing it. The app's own
-  Digest button only finishes a digest; anything more involved stays a
-  tool, to keep the UI simple.
+  and what it cost; and digesting a source again, with a model of its own
+  if you like (a cheap one for a bestiary, a stronger one for an
+  adventure; otherwise the source keeps its model, or gets
+  `CAMPAIGN_DIGEST_MODEL`). The app's own Digest button only finishes a
+  digest; anything more involved stays a tool, to keep the UI simple.
+- **Taking a write back** (`retract_fact`, `delete_journal_entry`): a fact
+  or journal entry recorded in chat or by hand by mistake is deleted as if
+  it had never been written (a value it replaced is current again). The
+  chat assistant uses them when told something it recorded was wrong.
+  `end_fact` is for what was true and stopped being true.
 - **OAuth 2.1** (`oauth.py`): dynamic client registration, PKCE, codes and
   tokens stored as hashes, access tokens for an hour and rotating refresh
   tokens for 30 days, all tied to your user. The Account page lists

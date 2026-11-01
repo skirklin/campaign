@@ -318,6 +318,40 @@ class World:
                 (session, run_id, fact_id, self.campaign.id),
             ).rowcount > 0
 
+    # Writes a person made (in chat or by hand) can be taken back; what came from a book or a session
+    # transcript is changed by re-running that, not piecemeal.
+    _RETRACTABLE = "SELECT id FROM runs WHERE campaign_id = ? AND kind IN ('chat', 'manual')"
+
+    def retract_fact(self, fact_id: int) -> bool:
+        """Delete a fact recorded by mistake, reopening the value it replaced. False if it isn't one."""
+        f = self.conn.execute(
+            f"SELECT * FROM facts WHERE id = ? AND campaign_id = ? AND run_id IN ({self._RETRACTABLE})",
+            (fact_id, self.campaign.id, self.campaign.id),
+        ).fetchone()
+        if f is None:
+            return False
+        with self.conn:
+            if f["attribute"]:
+                self.conn.execute(
+                    "UPDATE facts SET valid_to = NULL, closed_by_run = NULL WHERE campaign_id = ? AND entity_id = ?"
+                    " AND attribute = ? AND closed_by_run = ? AND valid_to = ? AND id != ?",
+                    (self.campaign.id, f["entity_id"], f["attribute"], f["run_id"], f["valid_from"], fact_id),
+                )
+            self.conn.execute("DELETE FROM facts WHERE id = ?", (fact_id,))
+        self._remove_orphans()
+        return True
+
+    def delete_event(self, event_id: int) -> bool:
+        """Delete a journal entry recorded by mistake. False if it isn't one."""
+        with self.conn:
+            gone = self.conn.execute(
+                f"DELETE FROM events WHERE id = ? AND campaign_id = ? AND run_id IN ({self._RETRACTABLE})",
+                (event_id, self.campaign.id, self.campaign.id),
+            ).rowcount > 0
+        if gone:
+            self._remove_orphans()
+        return gone
+
     def party_learned(self, fact_id: int, session: int) -> bool:
         with self.conn:
             return self.conn.execute(

@@ -47,7 +47,7 @@ from pydantic import BaseModel
 from .db import Store
 from .loops import LeasedLoop
 
-LEAF_VERSION = 2  # 2: rollable tables, keyed areas, read-aloud text, treasure
+LEAF_VERSION = 3  # 2: rollable tables, keyed areas, read-aloud text, treasure; 3: claims, placement, sets, checked stat blocks
 BRANCH_VERSION = 2  # 2: stricter merge rules (no merging across kinds, members into groups, shared titles)
 MODEL = os.environ.get("CAMPAIGN_DIGEST_MODEL", os.environ.get("CAMPAIGN_MODEL", "claude-opus-5-5"))
 EFFORT = os.environ.get("CAMPAIGN_DIGEST_EFFORT", "medium")
@@ -177,6 +177,24 @@ Return:
   "d100", "2d6"), its pages, and every row: the roll exactly as printed
   ("1-4", "05", "00", "18+") and the result in full. Not other tables
   (price lists, stat summaries).
+
+Facts are what the book says is true. What a character says, believes,
+claims or lies about is not: if it matters, write it as theirs ("Anni says
+only her mother knows how to open the front door"), never as a plain fact,
+since characters are often wrong or lying and the book may say otherwise.
+
+Keep where things are exactly as the book places them: the room, the
+container, what it's under or behind, and what guards or hides it ("Emerald
+Signet: in a chest under the tables in the Conservatory, beneath a violet
+fungus that attacks anything within 10 ft."), not a shortened "in the
+Conservatory chest". Put that placement in the facts of the item and of the
+place.
+
+Each separately named thing is its own entity. A set of named things (three
+named rings, four named siblings) is one entity each; if the set also has a
+name of its own ("the Signet Rings"), it can be an entity too, but never
+with its members' names as aliases, and its facts are about the set, not
+about one member.
 
 Skip mundane things (doors, furniture, unnamed guards) unless the text makes
 them matter. Copy numbers exactly and never invent them.
@@ -509,10 +527,66 @@ def branch_prompt(node: DNode, candidates: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+# The lines of a stat block between its armor class and its challenge that a model most often drops,
+# as books label them (2014 and 2024 styles). Checked against the source after extraction.
+STAT_LINES = {
+    "saving throws": "Saving Throws", "skills": "Skills",
+    "damage vulnerabilities": "Damage Vulnerabilities", "vulnerabilities": "Damage Vulnerabilities",
+    "damage resistances": "Damage Resistances", "resistances": "Damage Resistances",
+    "damage immunities": "Damage Immunities", "condition immunities": "Condition Immunities",
+    "immunities": "Immunities", "senses": "Senses", "languages": "Languages",
+}
+STAT_LINES |= {k.removesuffix("ies") + "y" if k.endswith("ies") else k.removesuffix("s"): v
+               for k, v in STAT_LINES.items() if k not in ("senses", "skills", "languages", "saving throws")}
+_STAT_LINE = re.compile(
+    r"^\W*(" + "|".join(sorted(map(re.escape, STAT_LINES), key=len, reverse=True)) + r")\b\W*\s+(.+?)\s*$",
+    re.IGNORECASE)
+_AC = re.compile(r"\b(armor class|AC)\b", re.IGNORECASE)
+_CHALLENGE = re.compile(r"^\W*(challenge|CR)\b", re.IGNORECASE | re.MULTILINE)
+
+
+def stat_lines_in_text(text: str, name: str) -> dict[str, str]:
+    """The labelled lines (saves, skills, resistances, senses, languages...) of `name`'s stat block in
+    `text`, by label: from the first armor class within a few lines of the name to its challenge."""
+    # The name as a line of its own (a heading or a bold title), not a mention in someone else's block.
+    title = r"^[#*_\s]*" + re.escape(name.strip()) + r"[*_\s]*$"
+    for m in re.finditer(title, text, re.IGNORECASE | re.MULTILINE):
+        ac = _AC.search(text, m.end(), m.end() + 600)
+        if ac is None:
+            continue
+        end = _CHALLENGE.search(text, ac.end())
+        if end is None:
+            return {}
+        out: dict[str, str] = {}
+        for line in text[ac.end():end.start()].splitlines():
+            line = re.sub(r"<br\s*/?>", "", line)
+            if hit := _STAT_LINE.match(line):
+                label = STAT_LINES[hit.group(1).lower()]
+                out.setdefault(label, re.sub(r"[*_]", "", hit.group(2)).strip())
+        return out
+    return {}
+
+
+def complete_stat_block(sb: dict[str, Any], text: str, name: str) -> dict[str, Any]:
+    """Add back the labelled lines the source prints for this stat block but the extraction left out."""
+    have = " ".join([*(sb.get("other") or []), *(sb.get("traits") or [])]).lower()
+    # Present if its label is (however phrased: "Resistance:", "Damage Immunities") or its value is.
+    stems = {"Saving Throws": "sav", "Skills": "skill", "Damage Vulnerabilities": "vulnerab",
+             "Damage Resistances": "resist", "Damage Immunities": "damage immun",
+             "Condition Immunities": "condition immun", "Immunities": "immun", "Senses": "sens",
+             "Languages": "language"}
+    missing = [f"{label} {value}" for label, value in stat_lines_in_text(text, name).items()
+               if stems[label] not in have and value.lower()[:20] not in have]
+    return {**sb, "other": [*(sb.get("other") or []), *missing]} if missing else sb
+
+
 def digest_node(client: Any, node: DNode, model: str, effort: str) -> tuple[dict[str, Any], int, int]:
     if node.is_leaf:
         parsed, i, o = _call(client, LEAF_SYSTEM, leaf_prompt(node), LeafOutput, model, effort)
         entities = [e.model_dump() for e in parsed.entities]
+        for e in entities:
+            if e["stat_block"]:
+                e["stat_block"] = complete_stat_block(e["stat_block"], node.text, e["name"])
         # The same name twice within one section is the same thing.
         groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
         for e in entities:
@@ -610,8 +684,8 @@ PRICES = {
 # Guesses for estimating before anything has been digested with a model. Once
 # enough sections have been, their measured ratios replace these.
 CHARS_PER_TOKEN = 3.5
-LEAF_OVERHEAD = 1500  # system prompt + output schema, in tokens
-LEAF_OUT_PER_IN = 0.5  # thinking + summary + entities, per input token
+LEAF_OVERHEAD = 2000  # system prompt + output schema, in tokens
+LEAF_OUT_PER_IN = 0.8  # thinking + summary + entities, per input token (0.5 came out 36-42% low on Sonnet)
 BRANCH_OVERHEAD = 1200
 BRANCH_OUT_PER_IN = 0.3
 VISIBLE_SHARE = 0.5  # of a node's output tokens, how much is the summary/entities its parent reads
@@ -798,16 +872,22 @@ def run(
         store.close()
 
 
-def request(store: Store, source_id: int) -> None:
-    """Ask for a source to be digested with the configured model, giving failed sections another go.
+def request(store: Store, source_id: int, model: str | None = None) -> str:
+    """Ask for a source to be digested, giving failed sections another go; returns the model.
 
+    With `model`, digests with that one (a source can have its own: a cheap
+    model for a bestiary, a stronger one for an adventure); without, keeps
+    the model the source is already set to, or else the configured one.
     Idempotent. A source digested with another model is planned against
     this one now (no API calls), so its sections show as still to do at
     once rather than when the loop gets to it. The caller wakes the loop.
     """
-    store.set_digest_target(source_id, MODEL, EFFORT)
-    plan(store, source_id, model=MODEL)
-    retry_failed(store, source_id, model=MODEL)
+    src = store.source(source_id)
+    model = model or (src["digest_model"] if src else None) or MODEL
+    store.set_digest_target(source_id, model, EFFORT)
+    plan(store, source_id, model=model)
+    retry_failed(store, source_id, model=model)
+    return model
 
 
 def retry_failed(store: Store, source_id: int, model: str = MODEL) -> int:
