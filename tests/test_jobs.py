@@ -321,7 +321,7 @@ def test_ingests_move_over_to_jobs_keeping_their_ids(tmp_path):
     # The database as the v10 server left it: an ingest in the ingests table, no jobs.
     s.conn.executescript("DROP TABLE character_files; DROP TABLE job_log; DROP TABLE jobs;"
                          " DROP TABLE inventory_log; DROP TABLE purses; DROP TABLE holdings;"
-                         " ALTER TABLE conversation_messages DROP COLUMN usage; PRAGMA user_version = 10;")
+                         " ALTER TABLE conversation_messages DROP COLUMN usage; ALTER TABLE sessions DROP COLUMN kind; ALTER TABLE sessions DROP COLUMN covers; PRAGMA user_version = 10;")
     s.conn.execute(
         "INSERT INTO ingests (id, campaign_id, session, input_blob, input_name, transcript_blob, played_on, role,"
         " state, attempts, error, created_at, updated_at)"
@@ -460,7 +460,7 @@ def test_scans_read_before_files_were_kept_get_attached(tmp_path):
     from campaign.db import V12_PARTY_STASH
     s.conn.executescript("DROP TABLE character_files; ALTER TABLE conversation_messages DROP COLUMN usage;"
                          " DROP TABLE inventory_log; DROP TABLE purses; DROP TABLE holdings;"
-                         f" {V12_PARTY_STASH} PRAGMA user_version = 12;")
+                         f" {V12_PARTY_STASH} ALTER TABLE sessions DROP COLUMN kind; ALTER TABLE sessions DROP COLUMN covers; PRAGMA user_version = 12;")
     s.close()
     s = Store(db)  # migrates
     assert [(f["name"], f["blob"]) for f in s.character_files(character_id)] == [("cid character sheet.pdf", blob)]

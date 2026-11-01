@@ -12,7 +12,7 @@
 // the party's unclaimed loot) on their sheet and the Play view's Gear tab.
 // The server decides who may change what; can_edit on each holder says.
 
-import { api, h, toast, sign, bottomSheet, keypad, askQty, worth } from "./util.js";
+import { api, h, toast, sign, bottomSheet, keypad, askQty, worth, sessionNames } from "./util.js";
 import { COINS, BONUS_TARGETS } from "./sheet.js";
 
 // Close a sheet, then open what comes next once it's gone, so the back button stays in step with them.
@@ -54,6 +54,7 @@ export class InventoryView {
 
   async load() {
     try {
+      this.sessionName = await sessionNames(this.slug);
       this.show(await api("GET", this.base));
     } catch (err) {
       this.el.replaceChildren(h("p.muted", err.message));
@@ -118,7 +119,7 @@ export class InventoryView {
       !focused && this.data.log.length > 0 && h("details.inventory-log",
         h("summary.muted.small", "History"),
         h("ul.log", this.data.log.map((l) => h("li",
-          h("span.session-tag", l.session ? `#${l.session}` : "before"), " ", l.text,
+          h("span.session-tag", this.sessionName ? this.sessionName(l.session) : `session ${l.session}`), " ", l.text,
           l.who && h("span.muted", ` · ${l.who.split("@")[0]}`))))),
     ].filter(Boolean));
   }

@@ -311,20 +311,30 @@ class World:
         source_id: int | None = None,
         pages: list[int] | tuple[int, ...] = (),
     ) -> dict[str, Any]:
-        """Add a fact true from `session` on. A new attribute value ends the current one."""
+        """Add a fact true from `session` on. A new attribute value ends the current one.
+
+        Written into the past (a recap of earlier play) when a later value is
+        already recorded, it ends where that later value begins instead.
+        """
         attribute = attribute.strip().lower() if attribute else None
-        closed = 0
+        closed, until = 0, None
         with self.conn:
             if attribute and modality == "fact":
-                closed = self.conn.execute(
-                    "UPDATE facts SET valid_to = ?, closed_by_run = ?"
-                    " WHERE entity_id = ? AND attribute = ? AND valid_to IS NULL AND modality = 'fact'",
-                    (session, run_id, entity_id, attribute),
-                ).rowcount
+                later = self.conn.execute(
+                    "SELECT min(valid_from) FROM facts WHERE entity_id = ? AND attribute = ? AND modality = 'fact'"
+                    " AND valid_from > ?", (entity_id, attribute, session)).fetchone()[0]
+                if later is not None:
+                    until = later
+                else:
+                    closed = self.conn.execute(
+                        "UPDATE facts SET valid_to = ?, closed_by_run = ?"
+                        " WHERE entity_id = ? AND attribute = ? AND valid_to IS NULL AND modality = 'fact'",
+                        (session, run_id, entity_id, attribute),
+                    ).rowcount
             fact_id = self.conn.execute(
-                "INSERT INTO facts (campaign_id, entity_id, attribute, value, statement, modality, valid_from,"
-                " party_knows_from, source_id, pages, run_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (self.campaign.id, entity_id, attribute, value, statement.strip(), modality, session,
+                "INSERT INTO facts (campaign_id, entity_id, attribute, value, statement, modality, valid_from, valid_to,"
+                " party_knows_from, source_id, pages, run_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (self.campaign.id, entity_id, attribute, value, statement.strip(), modality, session, until,
                  session if party_knows else None, source_id, json.dumps(sorted(set(pages))), run_id, now()),
             ).lastrowid
         return {"id": fact_id, "ended": closed}

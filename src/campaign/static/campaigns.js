@@ -1,7 +1,7 @@
 // Campaign list, and per-campaign tabs for ingesting sessions and reference
 // material and browsing what the assistant has recorded.
 
-import { api, h, toast, enc, whoami, canEdit, live, streamPost } from "./util.js";
+import { api, h, toast, enc, whoami, canEdit, live, streamPost, sessionNames } from "./util.js";
 import { membersTab } from "./people.js";
 import { characterCard, newCharacterForm } from "./sheet.js";
 import { InventoryView } from "./inventory.js";
@@ -355,8 +355,9 @@ async function sessionsTab(c) {
     sessions.length === 0 ? h("p.empty", "No sessions ingested yet.") : "",
     ...[...sessions].reverse().map((s) => h("details.card.session",
       h("summary",
-        h("span.session-num", `#${s.number}`),
+        s.kind === "recap" ? h("span.badge", "Recap") : h("span.session-num", `#${s.number}`),
         h("strong", s.title || "(untitled)"),
+        s.kind === "recap" && s.covers && h("span.muted", `about ${s.covers} sessions`),
         s.played_on && h("span.muted", s.played_on)),
       h("div.prose", s.summary ? s.summary.split(/\n\s*\n/).map((p) => h("p", p)) : h("p.muted", "No summary.")),
       h("div.actions",
@@ -851,10 +852,11 @@ function highlight(snippet) {
 
 const KIND_LABELS = { npc: "NPCs", pc: "Player characters", lore: "Lore" };
 const kindLabel = (k) => KIND_LABELS[k] || `${k}s`;
-const range = (f) => (f.valid_to === null ? `since session ${f.valid_from}`
-  : f.valid_to === f.valid_from ? `during session ${f.valid_from}` : `sessions ${f.valid_from}–${f.valid_to}`);
-const ORIGINS = { ingest: (f) => `session ${f.run_session}`, chat: () => "chat", manual: () => "edited by hand" };
-const sourceLabel = (f) => (f.origin === "book" || !ORIGINS[f.origin] ? f.source || f.origin : ORIGINS[f.origin](f))
+// `name` names a session (sessionNames): recaps by their title.
+const range = (f, name) => (f.valid_to === null ? `since ${name(f.valid_from)}`
+  : f.valid_to === f.valid_from ? `during ${name(f.valid_from)}` : `${name(f.valid_from)} to ${name(f.valid_to)}`);
+const ORIGINS = { ingest: (f, name) => name(f.run_session), chat: () => "chat", manual: () => "edited by hand" };
+const sourceLabel = (f, name) => (f.origin === "book" || !ORIGINS[f.origin] ? f.source || f.origin : ORIGINS[f.origin](f, name))
   + (f.pages?.length ? ` p. ${f.pages.join(", ")}` : "");
 
 async function stateTab(c) {
@@ -918,10 +920,11 @@ function worldCard(c, e) {
 
 export async function entityView(slug, id) {
   const base = `/api/campaigns/${slug}`;
-  const [campaigns, e, list] = await Promise.all([
-    api("GET", "/api/campaigns"), api("GET", `${base}/entities/${id}`), api("GET", `${base}/entities`),
+  const [campaigns, e, list, name] = await Promise.all([
+    api("GET", "/api/campaigns"), api("GET", `${base}/entities/${id}`), api("GET", `${base}/entities`), sessionNames(slug),
   ]);
   const c = campaigns.find((x) => x.slug === slug);
+  e.sessionName = name;
   const now = e.as_of;
   const body = h("div.entity-body");
 
@@ -929,7 +932,7 @@ export async function entityView(slug, id) {
   const sliderLabel = h("span.as-of-label");
   const renderAt = () => {
     const t = Number(slider.value);
-    sliderLabel.textContent = t === now ? `Now (session ${now})` : `As of session ${t}`;
+    sliderLabel.textContent = t === now ? `Now (${name(now)})` : `As of ${name(t)}`;
     body.replaceChildren(...factSections(c, e, t, t === now).filter(Boolean));
   };
   slider.addEventListener("input", renderAt);
@@ -982,6 +985,7 @@ export async function entityView(slug, id) {
 }
 
 function factSections(c, e, t, isNow) {
+  const name = e.sessionName;
   const base = `/api/campaigns/${c.slug}`;
   const facts = e.all_facts.filter((f) => f.valid_from <= t);
   const openAt = (f) => f.valid_to === null || f.valid_to > t;
@@ -1006,7 +1010,7 @@ function factSections(c, e, t, isNow) {
   }, "×");
   const factRow = (f, text) => h("li.fact",
     h("span", text || inline(f.statement)),
-    h("span.fact-meta", range(f), " · ", sourceLabel(f), f.party_knows_from === null ? " · party doesn't know" : ""),
+    h("span.fact-meta", range(f, name), " · ", sourceLabel(f, name), f.party_knows_from === null ? " · party doesn't know" : ""),
     endButton(f));
 
   const add = isNow && canEdit(c) && (() => {
@@ -1039,9 +1043,9 @@ function factSections(c, e, t, isNow) {
 
   return [
     ...readAloud.map((f) => h("figure.read-aloud",
-      h("figcaption", "Read aloud"), h("blockquote", f.value), h("span.fact-meta", sourceLabel(f)))),
+      h("figcaption", "Read aloud"), h("blockquote", f.value), h("span.fact-meta", sourceLabel(f, name)))),
     h("section.card",
-      h("h2", isNow ? "True now" : `True at the end of session ${t}`),
+      h("h2", isNow ? "True now" : `True at the end of ${name(t)}`),
       attrs.length > 0 && h("ul.facts.attrs", attrs.map((f) => factRow(f, h("span", h("strong", f.attribute), ": ", f.value)))),
       statements.length > 0 && h("ul.facts", statements.map((f) => factRow(f))),
       attrs.length + statements.length === 0 && h("p.empty", "Nothing recorded."),
@@ -1051,12 +1055,12 @@ function factSections(c, e, t, isNow) {
       h("ul.facts", treasure.map((f) => factRow(f, inline(f.statement.slice(TREASURE.length))))),
       isNow && h("p.muted.small", "When the party takes something, mark it no longer true (×) and add it to the party's inventory (Party tab).")),
     ...statBlocks.map((f) => h("div.statblock-wrap",
-      statBlockFromData(e.name, JSON.parse(f.value)), h("p.fact-meta", sourceLabel(f)))),
+      statBlockFromData(e.name, JSON.parse(f.value)), h("p.fact-meta", sourceLabel(f, name)))),
     maybe.length > 0 && h("section.card", h("h2", "Rumors and possibilities"),
       h("ul.facts", maybe.map((f) => factRow(f, `${f.modality === "rumor" ? "Rumor: " : "Possible: "}${f.statement}`)))),
     past.length > 0 && h("section.card", h("h2", "No longer true"), h("ul.facts.past", past.map((f) => factRow(f)))),
     events.length > 0 && h("section.card", h("h2", "Events"),
-      h("ol.events", events.map((ev) => h("li", h("span.session-num", `S${ev.session}`), " ", ev.text)))),
+      h("ol.events", events.map((ev) => h("li", h("span.session-num", name(ev.session)), " ", ev.text)))),
     add,
   ];
 }
@@ -1067,14 +1071,20 @@ async function journalTab(c) {
   const base = `/api/campaigns/${c.slug}`;
   const [events, { sessions }] = await Promise.all([api("GET", `${base}/journal`), api("GET", `${base}/sessions`)]);
   if (!events.length) return h("p.empty", "The journal is empty.");
-  const titles = Object.fromEntries(sessions.map((s) => [s.number, s.title]));
+  const bySession = Object.fromEntries(sessions.map((s) => [s.number, s]));
+  const heading = (n) => {
+    const s = bySession[n];
+    if (n === 0) return "Before play";
+    if (s?.kind === "recap") return [`Recap: ${s.title}`, s.covers && h("span.muted.as-written", ` · about ${s.covers} sessions`)];
+    return `Session ${n}${s?.title ? ` — ${s.title}` : ""}`;
+  };
   const groups = new Map();
   events.forEach((e) => {
     if (!groups.has(e.session)) groups.set(e.session, []);
     groups.get(e.session).push(e);
   });
   return h("div.journal", [...groups.entries()].reverse().map(([n, items]) => h("section",
-    h("h2.section-title", n === 0 ? "Before play" : `Session ${n}${titles[n] ? ` — ${titles[n]}` : ""}`),
+    h("h2.section-title", heading(n)),
     h("ol", items.map((e) => h("li", e.text,
       e.entities.length > 0 && h("span.event-entities", " — ",
         e.entities.map((x, i) => [i ? ", " : "", h("a", { href: `#/campaigns/${c.slug}/entity/${x.id}` }, x.name)]))))),
