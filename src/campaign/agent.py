@@ -512,6 +512,8 @@ _DESCRIBE: dict[str, Callable[[dict[str, Any]], str]] = {
     "change_coin": lambda a: f"Coin for {a.get('holder', '?')}" + (f" to {a['to']}" if a.get("to") else "")
                    + ": " + ", ".join(f"{v:+d} {k}" if not a.get("to") else f"{v} {k}" for k, v in (a.get("change") or {}).items()),
     "split_party_coin": lambda a: "Shared out the party's coin",
+    "link_item": lambda a: f"Said item {a.get('item_id')} is {a['world_item']}" if a.get("world_item")
+                 else f"Made item {a.get('item_id')} a plain item",
     "define_item": lambda a: f"Said what {a.get('name', 'an item')} does",
 }
 

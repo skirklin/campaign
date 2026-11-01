@@ -99,10 +99,26 @@ class Inventory:
         values = self.world.attribute_values(item_id, "mechanics")
         return ItemMechanics.model_validate_json(values[-1]) if values else None
 
-    def find_item(self, name: str) -> int | None:
-        """The world item called `name` (by name or alias), if there is one."""
-        found = self.world.resolve(name, "item")
-        return found["id"] if found and found["kind"] == "item" else None
+    def find_item(self, name: str, aliases: bool = False) -> int | None:
+        """The world item called `name`, if there is one: by its own name, or with `aliases` by any it answers to.
+
+        Only someone saying which item they mean goes by aliases: the book gives
+        "+1 arrows" to a quiver and "breastplate" to the Breastplate of Mytros, so
+        a plain shield or breastplate must never become one by its name.
+        """
+        if aliases:
+            found = self.world.resolve(name, "item")
+            return found["id"] if found and found["kind"] == "item" else None
+        row = self.conn.execute(
+            "SELECT id FROM entities WHERE campaign_id = ? AND kind = 'item' AND name = ? COLLATE NOCASE ORDER BY id LIMIT 1",
+            (self.campaign.id, name.strip())).fetchone()
+        return row["id"] if row else None
+
+    def world_item(self, name: str) -> int:
+        """The world item someone named, by its name or an alias; InventoryError if there's none."""
+        if item_id := self.find_item(name, aliases=True):
+            return item_id
+        raise InventoryError(f"the world has no item called {name!r}")
 
     def visible(self, entity_id: int) -> bool:
         """Whether this viewer may know the world has this thing: anything about it the party knows."""
@@ -267,8 +283,8 @@ class Inventory:
     ) -> int:
         """Something new for the party (loot, a purchase): held by `holder_id`, or the party's if None.
 
-        With `link`, an item the world already defines by that name is linked
-        to its definition. Joins a holding of the same thing the holder has.
+        With `link`, a world item of exactly that name is what it is (`item_id`
+        says which one otherwise). Joins a holding of the same thing the holder has.
         """
         name = name.strip()
         if not name:
@@ -397,9 +413,14 @@ class Inventory:
             self.conn.execute("UPDATE holdings SET item_id = NULL, value_gp = ?, updated_at = ? WHERE id = ?",
                               (value, now(), holding_id))
 
-    def link(self, holding_id: int, item_id: int) -> None:
+    def link(self, holding_id: int, item_id: int) -> str:
+        """Say which world item a holding is, keeping the party's name for it."""
+        row = self._row(holding_id)
+        if self.campaign.spoiler_safe and self.secret(row["item_id"]):
+            raise InventoryError("the DM has said what this item is; ask them to change it")
         with self.conn:
             self.conn.execute("UPDATE holdings SET item_id = ?, updated_at = ? WHERE id = ?", (item_id, now(), holding_id))
+        return f"{row['name']} is {self.world.entity(item_id)['name']}"
 
     # -- coin -----------------------------------------------------------------------
 

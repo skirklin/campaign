@@ -82,8 +82,8 @@ def _brief_holding(h: dict[str, Any]) -> dict[str, Any]:
     for k in ("notes", "value_gp", "bonuses", "requires_attunement", "equipped", "attuned"):
         if h[k]:
             out[k] = h[k]
-    if h["item"] and h["item"]["name"] and h["item"]["name"] != h["name"]:
-        out["world_item"] = h["item"]["name"]
+    if h["item"] and h["item"]["name"]:
+        out["world_item"] = h["item"]["name"]  # what it is in the world; its definition, if any, is in bonuses etc.
     if h["item"] and h["item"].get("secret"):
         out["definition_secret"] = True  # the party doesn't know what it does
     return out
@@ -651,13 +651,14 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         """Add things the party now owns: loot, purchases, gifts.
 
         Loot nobody has claimed goes to the party (the default); something a
-        character took for themselves goes to them. An item the world already
-        has (by name or alias) is linked to its definition; otherwise say what
-        it does afterwards with define_item if it does anything. Plain loot
-        just needs a name, and value_gp if it's worth something.
+        character took for themselves goes to them. An item named exactly as a
+        world item is that item; to say an item is a world item under another
+        name (the party's "lion-headed shield" is the Shield of Volkan), give
+        world_item. Say what an item does with define_item if the world
+        doesn't. Plain loot just needs a name, and value_gp if it's worth something.
 
         Args:
-            items: Each {"name", "qty" (default 1), "notes", "value_gp" (each)}.
+            items: Each {"name", "qty" (default 1), "notes", "value_gp" (each), "world_item" (optional)}.
             reason: Where it came from, e.g. "looted the ghoul nest".
             holder: "party", or who has them: a character, or anyone else by name.
         """
@@ -666,7 +667,9 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
             added = []
             for i in items:
                 name, qty = str(i.get("name") or ""), int(i.get("qty") or 1)
-                inv.add(name, qty, to, str(i.get("notes") or ""), float(i.get("value_gp") or 0), reason=reason)
+                item_id = inv.world_item(str(i["world_item"])) if i.get("world_item") else None
+                inv.add(name, qty, to, str(i.get("notes") or ""), float(i.get("value_gp") or 0), item_id=item_id,
+                        reason=reason)
                 added.append(name + (f" ×{qty}" if qty != 1 else ""))
             return f"Added for {inv.holder_name(to)}: {', '.join(added)}."
         return _attempt(run)
@@ -709,6 +712,21 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
             return _attempt(lambda: inv.give_coin(_holder(holder), _holder(to), change, reason))
         return _attempt(lambda: inv.coin(_holder(holder), change, reason))
 
+    def link_item(item_id: int, world_item: str | None) -> str:
+        """Say which world item one of the party's items is (keeping the party's name for it), or with
+        world_item null that it's no world item at all, just a thing with a name.
+
+        Args:
+            item_id: The item's id from inventory.
+            world_item: The world item's name or alias (see find_entities kind "item"), or null.
+        """
+        def run() -> str:
+            if world_item is None:
+                inv.unlink(item_id)
+                return f"{inv.holding(item_id)['name']} is a plain item now."
+            return inv.link(item_id, inv.world_item(world_item)) + "."
+        return _attempt(run)
+
     def split_party_coin(reason: str = "") -> str:
         """Share the party's purse evenly among the characters; what doesn't divide stays with the party."""
         return _attempt(lambda: inv.split(reason))
@@ -734,7 +752,8 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         def run() -> str:
             m = ItemMechanics(requires_attunement=requires_attunement, bonuses=bonuses or [], value_gp=value_gp)
             linked = inv.holding(item_id)["item"] if item_id is not None else None
-            entity = inv.define(name, m, party_knows, item_id=linked["id"] if linked else None, run_id=ctx.run())
+            target = linked["id"] if linked and linked["id"] else inv.find_item(name, aliases=True)
+            entity = inv.define(name, m, party_knows, item_id=target, run_id=ctx.run())
             if item_id is not None:
                 inv.link(item_id, entity)
             return f"{name}: {m.describe()}" + ("" if party_knows else " (the party doesn't know yet)")
@@ -759,6 +778,6 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         inventory,
     ]
     writers = [record_fact, end_fact, retract_fact, party_learned, add_journal_entry, delete_journal_entry,
-               update_character, create_character, add_items, change_item, give_item, change_coin,
+               update_character, create_character, add_items, change_item, give_item, link_item, change_coin,
                split_party_coin, define_item]
     return readers + (writers if writable else [])
