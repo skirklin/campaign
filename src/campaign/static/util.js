@@ -66,6 +66,24 @@ export function toast(msg, isError = false, action = null) {
 
 export const sign = (n) => (n >= 0 ? `+${n}` : `${n}`);
 
+// Sessions as people say them, the same everywhere: a recap (a stretch of play written up
+// afterwards) by its title, a played session as "session 12", session 0 as "before play".
+// Resolves to a function from a session number to its name. Fetched at most every 30 s.
+const sessionLists = new Map();
+export async function sessionNames(slug) {
+  let got = sessionLists.get(slug);
+  if (!got || Date.now() - got.at > 30000) {
+    got = { at: Date.now(), list: api("GET", `/api/campaigns/${slug}/sessions`).then((r) => r.sessions).catch(() => []) };
+    sessionLists.set(slug, got);
+  }
+  const bySession = new Map((await got.list).map((s) => [s.number, s]));
+  return (n) => {
+    if (!n) return "before play";
+    const s = bySession.get(n);
+    return s?.kind === "recap" ? (s.title || `recap ${n}`) : `session ${n}`;
+  };
+}
+
 // A value in gold pieces, as a player would say it: "1,400 gp", "5 sp", "3 cp"; "" for none.
 export function worth(gp) {
   if (!gp) return "";

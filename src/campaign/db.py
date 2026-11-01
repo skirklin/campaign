@@ -544,6 +544,15 @@ CREATE INDEX inventory_log_campaign ON inventory_log(campaign_id, id);
 """
 
 
+# v16: a session can be a recap: a stretch of play written up afterwards (from memory,
+# from notes) rather than one evening's transcript. It's on the same clock as
+# played sessions, so what it records is ordered and found like everything else.
+V16_RECAPS = """
+ALTER TABLE sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'played' CHECK (kind IN ('played', 'recap'));
+ALTER TABLE sessions ADD COLUMN covers INTEGER;  -- a recap: about how many sessions of play it stands for
+"""
+
+
 def _v15_inventory(conn: sqlite3.Connection) -> None:
     from .charsheet import Item, no_coins  # charsheet imports nothing of ours
 
@@ -633,6 +642,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (13, V13_CHARACTER_FILES),
     (14, V14_CHAT_USAGE),
     (15, _v15_inventory),
+    (16, V16_RECAPS),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 
@@ -1391,7 +1401,11 @@ class Store:
         title: str | None = None,
         summary: str | None = None,
         source_id: int | None = None,
+        kind: str | None = None,
+        covers: int | None = None,
     ) -> int:
+        """A session's record, made if new. A recap (`kind` "recap") stands for a stretch of play,
+        about `covers` sessions of it, written up afterwards rather than ingested."""
         with self.conn:
             self.conn.execute(
                 "INSERT INTO sessions (campaign_id, number) VALUES (?, ?)"
@@ -1403,6 +1417,8 @@ class Store:
                 ("title", title),
                 ("summary", summary),
                 ("source_id", source_id),
+                ("kind", kind),
+                ("covers", covers),
             ):
                 if val is not None:
                     self.conn.execute(
@@ -1416,7 +1432,7 @@ class Store:
 
     def sessions(self, campaign: Campaign) -> list[dict[str, Any]]:
         rows = self.conn.execute(
-            "SELECT id, number, played_on, title, summary FROM sessions"
+            "SELECT id, number, played_on, title, summary, kind, covers FROM sessions"
             " WHERE campaign_id = ? ORDER BY number",
             (campaign.id,),
         )

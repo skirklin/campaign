@@ -10,7 +10,7 @@
 // That's Edit mode. Play mode (play.js) is the same sheet laid out for the
 // table; the sheet opens in whichever this device used last.
 
-import { api, h, toast, sign, getPath, setPath, debounce, installBanner } from "./util.js";
+import { api, h, toast, sign, getPath, setPath, debounce, installBanner, sessionNames } from "./util.js";
 import { InventoryView } from "./inventory.js";
 
 export const ABILITIES = ["str", "dex", "con", "int", "wis", "cha"];
@@ -162,11 +162,12 @@ export class SheetView {
   async loadWorld() {
     if (!this.worldBox) return;
     try {
-      const e = await api("GET", `/api/campaigns/${this.campaign.slug}/entities/${this.entityId}`);
+      const [e, name] = await Promise.all([api("GET", `/api/campaigns/${this.campaign.slug}/entities/${this.entityId}`),
+        sessionNames(this.campaign.slug)]);
       const items = e.timeline;
       this.worldBox.replaceChildren(items.length
         ? h("ul.timeline", items.map((i) => h("li",
-            h("span.session-num", i.session === 0 ? "before" : `#${i.session}`), " ",
+            h("span.session-num", name(i.session)), " ",
             i.change === "ended" ? h("s", i.statement) : i.statement)))
         : h("p.muted", "Nothing recorded yet. Session ingests and chats add to this."));
     } catch (err) {

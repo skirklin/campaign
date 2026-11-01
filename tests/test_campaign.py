@@ -418,7 +418,7 @@ def test_inventories_and_the_stash_move_into_the_party_inventory(tmp_path):
     old = json.loads(EXAMPLE.read_text())  # a sheet as v14 kept it, inventory and coin and all
     cid = s.create_character(old, camp.id)
     s.conn.executescript(f"DROP TABLE inventory_log; DROP TABLE purses; DROP TABLE holdings; {V12_PARTY_STASH}"
-                         " PRAGMA user_version = 14;")
+                         " ALTER TABLE sessions DROP COLUMN kind; ALTER TABLE sessions DROP COLUMN covers; PRAGMA user_version = 14;")
     s.conn.execute("INSERT INTO party_stash VALUES (?, ?, 'then')", (camp.id, json.dumps(
         {"items": [{"name": "Black pearl", "value_gp": 1000}], "currency": {"gp": 809, "pp": 56}})))
     s.conn.commit()
@@ -455,3 +455,33 @@ def test_items_are_world_items_by_their_own_name_or_when_someone_says_so(store):
     assert t["link_item"](item_id=items[0]["id"], world_item="Quiver of Ten +1 Arrows") == "+1 Arrows is Quiver of Ten +1 Arrows."
     assert t["link_item"](item_id=items[0]["id"], world_item=None) == "+1 Arrows is a plain item now."
     assert "world_item" not in json.loads(t["inventory"]())["holders"][0]["items"][0]
+
+
+def test_recaps_put_past_play_on_the_same_timeline(store):
+    """Play before the app (or never recorded) is written up as recaps, and what happened is dated to them."""
+    camp = store.create_campaign("Odyssey", "dm")
+    t = tools(store, "odyssey")
+    assert t["add_recap"](title="The call", summary="The boar hunt; the Oracle.", covers=3, played="2024") == \
+        "Recap 1: The call (about 3 sessions)."
+    assert t["add_recap"](title="Estoria", summary="The Great Labors.", covers=15) == "Recap 2: Estoria (about 15 sessions)."
+    sessions = json.loads(t["list_sessions"]())
+    assert [(s["number"], s["kind"], s["covers"]) for s in sessions] == [(1, "recap", 3), (2, "recap", 15)]
+
+    # Writing up recap 1 after recap 2 exists: dated to it, and a value doesn't end one recorded later.
+    t["record_fact"](entity="Versi", kind="npc", statement="Versi is in Estoria.", attribute="location",
+                     value="Estoria", session=2)
+    t["record_fact"](entity="Versi", statement="Versi is held at the Temple of the Oracle.", attribute="location",
+                     value="the Temple of the Oracle", session=1)
+    t["add_journal_entry"](text="The party freed Versi.", entities=["Versi"], session=1)
+    from campaign.world import World
+    world = World(store, camp)
+    versi = world.resolve("Versi")["id"]
+    assert world.view(versi)["current"] == {"location": "Estoria"}
+    assert world.view(versi, as_of=1)["current"] == {"location": "the Temple of the Oracle"}
+    assert world.events(session=1)[0]["text"] == "The party freed Versi."
+    assert "no session 7" in t["add_journal_entry"](text="Later.", session=7)
+
+    # Rewriting a recap; the next played session comes after them.
+    assert t["add_recap"](title="The call", summary="The boar hunt, the Oracle, the prophecy.", number=1).startswith("Recap 1")
+    assert "isn't a recap" in t["add_recap"](title="x", summary="y", number=5)
+    assert store.next_ingest_session(camp) == 3

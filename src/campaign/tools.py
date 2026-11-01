@@ -370,8 +370,44 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         return _json({"name": e["name"], "timeline": world.timeline(e["id"])})
 
     def list_sessions() -> str:
-        """List played sessions with their recaps, oldest first."""
+        """List the sessions, oldest first, with their recaps. A session of kind "recap" stands for a
+        stretch of play written up afterwards (about `covers` sessions of it), not one evening."""
         return _json(store.sessions(campaign))
+
+    def _when(session: int | None) -> int | str:
+        """The session a write is dated to: the given one (an existing session, for writing up the
+        past), else the latest. A string says why it can't be."""
+        if session is None:
+            return ctx.clock
+        if session == ctx.clock or any(s["number"] == session for s in store.sessions(campaign)):
+            return session
+        return f"There's no session {session}; list_sessions shows them, and add_recap adds one for past play."
+
+    def add_recap(title: str, summary: str, covers: int | None = None, played: str = "",
+                  number: int | None = None) -> str:
+        """Write up a stretch of past play that has no transcript (the campaign before the app, or
+        sessions nobody recorded) as a recap: a session record on the same timeline as played
+        sessions, so what happened in it is dated and found like everything else.
+
+        Add recaps oldest first; each comes after every session so far. Then date what happened in
+        it to its number: record_fact, end_fact, party_learned and add_journal_entry take session.
+        With number, rewrites that recap's title, summary or covers instead.
+
+        Args:
+            title: A few words, e.g. "Estoria and the Great Labors".
+            summary: The recap a player could read: what happened, in order.
+            covers: About how many sessions of play it stands for.
+            played: When, roughly, e.g. "2024".
+            number: An existing recap to rewrite.
+        """
+        if number is not None:
+            if not any(s["number"] == number and s["kind"] == "recap" for s in store.sessions(campaign)):
+                return f"Session {number} isn't a recap."
+        else:
+            number = store.next_ingest_session(campaign)
+        store.upsert_session(campaign, number, played_on=played or None, title=title.strip(),
+                             summary=summary.strip(), kind="recap", covers=covers)
+        return f"Recap {number}: {title.strip()}" + (f" (about {covers} sessions)" if covers else "") + "."
 
     def recent_journal(session: int | None = None, limit: int = 40) -> str:
         """Read the campaign journal: the ordered log of what happened.
@@ -392,6 +428,7 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         aliases: list[str] | None = None,
         party_knows: bool = True,
         modality: str = "fact",
+        session: int | None = None,
     ) -> str:
         """Record something true about a person, place or thing, from the current session on.
 
@@ -413,6 +450,7 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
             aliases: Other names this entity goes by, to remember.
             party_knows: False if this is true but the party hasn't learned it.
             modality: "fact", or "rumor" for unconfirmed claims, or "possible" for plans and threats that haven't happened.
+            session: When it became true, if earlier than the latest session (a recap's number, writing up the past).
         """
         e = world.resolve(entity, kind)
         if e is None:
@@ -424,19 +462,26 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         run = ctx.run()
         for alias in aliases or []:
             world.add_alias(e["id"], alias, run)
-        r = world.record(e["id"], statement, run, ctx.clock, attribute=attribute, value=value,
+        when = _when(session)
+        if isinstance(when, str):
+            return when
+        r = world.record(e["id"], statement, run, when, attribute=attribute, value=value,
                          modality=modality, party_knows=party_knows)
         ended = f"; ended the previous {attribute}" if r["ended"] else ""
-        return f"Recorded fact {r['id']} about {e['name']} as of session {ctx.clock}{ended}."
+        return f"Recorded fact {r['id']} about {e['name']} as of session {when}{ended}."
 
-    def end_fact(fact_id: int) -> str:
+    def end_fact(fact_id: int, session: int | None = None) -> str:
         """Mark a fact as no longer true as of the current session. It stays in the history.
 
         Args:
             fact_id: The fact_id shown by lookup.
+            session: When it stopped being true, if earlier than the latest session (a recap's number).
         """
-        ok = world.end_fact(fact_id, ctx.run(), ctx.clock)
-        return f"Ended fact {fact_id} at session {ctx.clock}." if ok else f"No open fact {fact_id}."
+        when = _when(session)
+        if isinstance(when, str):
+            return when
+        ok = world.end_fact(fact_id, ctx.run(), when)
+        return f"Ended fact {fact_id} at session {when}." if ok else f"No open fact {fact_id}."
 
     def retract_fact(fact_id: int) -> str:
         """Delete a fact that was recorded by mistake (it never was true), as if it had never been
@@ -461,16 +506,20 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
             return f"Deleted journal entry {event_id}."
         return f"No journal entry {event_id} added in chat or by hand."
 
-    def party_learned(fact_id: int) -> str:
+    def party_learned(fact_id: int, session: int | None = None) -> str:
         """Note that the party has now learned an existing fact (for example a secret from the book).
 
         Args:
             fact_id: The fact_id shown by lookup.
+            session: When they learned it, if earlier than the latest session (a recap's number).
         """
-        ok = world.party_learned(fact_id, ctx.clock)
-        return f"The party knows fact {fact_id} as of session {ctx.clock}." if ok else "Nothing to change."
+        when = _when(session)
+        if isinstance(when, str):
+            return when
+        ok = world.party_learned(fact_id, when)
+        return f"The party knows fact {fact_id} as of session {when}." if ok else "Nothing to change."
 
-    def add_journal_entry(text: str, entities: list[str] | None = None) -> str:
+    def add_journal_entry(text: str, entities: list[str] | None = None, session: int | None = None) -> str:
         """Append an event to the journal, e.g. "The party killed Morgantha and freed the children."
 
         One entry per meaningful event, in the order they happened. Record
@@ -480,10 +529,14 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         Args:
             text: What happened, in past tense, naming who was involved.
             entities: Names or aliases of the entities involved.
+            session: When it happened, if earlier than the latest session (a recap's number).
         """
         ids = [e["id"] for e in (world.resolve(n) for n in entities or []) if e]
-        event_id = world.add_event(text, ctx.clock, ctx.run(), ids)
-        return f"Logged event {event_id} in session {ctx.clock}."
+        when = _when(session)
+        if isinstance(when, str):
+            return when
+        event_id = world.add_event(text, when, ctx.run(), ids)
+        return f"Logged event {event_id} in session {when}."
 
     # -- characters ----------------------------------------------------------
 
@@ -777,7 +830,7 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         get_character,
         inventory,
     ]
-    writers = [record_fact, end_fact, retract_fact, party_learned, add_journal_entry, delete_journal_entry,
+    writers = [add_recap, record_fact, end_fact, retract_fact, party_learned, add_journal_entry, delete_journal_entry,
                update_character, create_character, add_items, change_item, give_item, link_item, change_coin,
                split_party_coin, define_item]
     return readers + (writers if writable else [])

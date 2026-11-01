@@ -51,6 +51,11 @@ sources:
   end its fact and add it. What an item does (bonuses, attunement, worth)
   is its definition in the world, shared by every copy: define_item.
   Changes of hands go through the inventory, not holder facts.
+- Recaps: past play with no transcript (the campaign before the app, sessions
+  nobody recorded) is written up with add_recap as a session of its own,
+  on the same timeline, and what happened in it is dated to that session:
+  record_fact, end_fact, party_learned and add_journal_entry take session.
+  Write recaps oldest first, and only what the user tells you happened.
 
 Answer from the tools, not from memory of the published adventure: this
 table may have changed things, and editions differ. Say "now" vs "before"
@@ -501,6 +506,7 @@ _DESCRIBE: dict[str, Callable[[dict[str, Any]], str]] = {
     "delete_journal_entry": lambda a: "Deleted a journal entry recorded by mistake",
     "party_learned": lambda a: "Marked a fact as known to the party",
     "add_journal_entry": lambda a: f"Journal: {a.get('text', '')}",
+    "add_recap": lambda a: f"Recap: {a.get('title', '')}",
     "get_character": lambda a: f"Read {a.get('name', '')}'s sheet",
     "update_character": lambda a: f"Updated {a.get('name', '')}'s sheet" + (f": {a['reason']}" if a.get("reason") else ""),
     "create_character": lambda a: "Created a character",
