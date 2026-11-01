@@ -370,3 +370,31 @@ def test_copies_an_older_apply_made_are_folded_into_one(monkeypatch):
     monkeypatch.setattr(world_mod, "APPLY_VERSION", world_mod.APPLY_VERSION + 1)
     w.apply_book(src, entries, key="v1")
     assert [r["name"] for r in w.list()] == ["Sydon, Lord of Storms"]
+
+
+def test_a_mistaken_write_from_chat_can_be_taken_back():
+    from campaign.tools import ToolContext, build_tools
+
+    store, camp, w, _ = setup()
+    store.upsert_session(camp, 2)
+    ireena = w.resolve("Ireena")["id"]
+    w.record(ireena, "Ireena is in Vallaki", play(store, w, 1), 1, attribute="location", value="Vallaki")
+    tools = {t.__name__: t for t in build_tools(ToolContext(store, camp))}
+    tools["record_fact"]("Ireena", "Ireena is at the Abbey", attribute="location", value="Abbey")
+    tools["add_journal_entry"]("The party fought Morgantha.", ["Morgantha"])
+    tools["record_fact"]("Bildrath", "Bildrath runs the mercantile", kind="npc")
+    abbey = next(f for f in w.facts(ireena) if f["statement"] == "Ireena is at the Abbey")
+    entry = w.events()[0]
+    bildrath = w.resolve("Bildrath")["id"]
+    lives = next(f for f in w.facts(ireena) if f["statement"].startswith("Lives"))
+
+    assert tools["retract_fact"](abbey["id"]) == f"Deleted fact {abbey['id']}."
+    assert w.view(ireena)["current"] == {"location": "Vallaki"}  # the value it replaced is current again
+    assert tools["delete_journal_entry"](entry["id"]) == f"Deleted journal entry {entry['id']}."
+    assert w.events() == [] and w.resolve("Morgantha")  # the book's Morgantha stays
+    fact = w.facts(bildrath)[0]
+    tools["retract_fact"](fact["id"])
+    assert w.resolve("Bildrath") is None  # an entity only that write made goes with it
+    # What came from the book or a session is changed by re-running those, not here.
+    assert "can't be deleted" in tools["retract_fact"](lives["id"])
+    assert "No journal entry" in tools["delete_journal_entry"](12345)

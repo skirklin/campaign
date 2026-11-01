@@ -272,20 +272,25 @@ def remote_server(db: Path | str, cfg: AuthConfig, wake_digest: Callable[[], Non
         finally:
             s.close()
 
-    def digest_source(campaign: str, source_id: int) -> str:
-        """Digest a reference source with the configured model: again, if it was digested with another
-        model (or an older version of the digest), else only the sections not yet done or failed.
+    def digest_source(campaign: str, source_id: int, model: str | None = None) -> str:
+        """Digest a reference source: again, if it was digested with another model (or an older version
+        of the digest), else only the sections not yet done or failed.
 
-        Spends API money: returns the estimate of what's left to digest, then runs in the background;
-        check on it with digest_status. Sections already digested with this model are reused from the
-        cache. For development and debugging; needs editor access.
+        `model` sets the source's own digest model (any of the app's known models, e.g. a cheap one for
+        a bestiary and a stronger one for an adventure); without it, the source keeps the model it's
+        set to, or gets the configured one. Spends API money: returns the estimate of what's left to
+        digest, then runs in the background; check on it with digest_status. Sections already digested
+        with the model are reused from the cache. For development and debugging; needs editor access.
 
         Args:
             campaign: The campaign's slug, from list_campaigns.
             source_id: The source's id, from digest_status or list_sources.
+            model: The model to digest with; leave out to keep the source's (or the configured) one.
         """
         from . import digest
 
+        if model is not None and model not in digest.PRICES:
+            return f"Unknown model {model!r}; known: {', '.join(digest.PRICES)}."
         s = Store(db)
         try:
             c = _digest_campaign(s, campaign)
@@ -294,10 +299,10 @@ def remote_server(db: Path | str, cfg: AuthConfig, wake_digest: Callable[[], Non
             rows = _digest_rows(s, c, only=source_id)
             if not rows:
                 return f"No source {source_id} to digest in {c.name}. Call digest_status for the ids."
-            digest.request(s, source_id)
-            estimate = digest.estimate(s, digest.plan(s, source_id, model=digest.MODEL, save=False), model=digest.MODEL)
+            used = digest.request(s, source_id, model)
+            estimate = digest.estimate(s, digest.plan(s, source_id, model=used, save=False), model=used)
             wake_digest()
-            return json.dumps({"digesting": True, "model": digest.MODEL, "estimate": estimate,
+            return json.dumps({"digesting": True, "model": used, "estimate": estimate,
                                "status": _digest_rows(s, c, only=source_id)[0]})
         finally:
             s.close()

@@ -600,3 +600,30 @@ def test_one_limit_on_calls_in_flight_across_sources(env, monkeypatch):
     while loop.reconcile_once():
         pass
     assert most == 2 and store.digest_status(a["id"])["done"] == 8
+
+
+def test_a_stat_block_gets_back_the_lines_the_model_dropped():
+    text = """# Swarm of Trickered Treats
+
+_Medium swarm of Tiny constructs_
+
+**AC** 12 **Initiative** +2 (12)<br />
+**Hit Points** 28 (4d8 + 10)<br />
+
+**Resistances** Bludgeoning, Piercing, Slashing<br />
+**Immunities** Blinded, Charmed<br />
+**Senses** Blindsight 10 ft., Passive Perception 6<br />
+**Languages** understands the languages of its creator but cannot speak<br />
+**Challenge** 1/4 (50 XP)
+
+The **Swarm of Trickered Treats** Armor Class 99 is just a mention.
+"""
+    sb = {"armor_class": "12", "other": ["Senses blindsight 10 ft., passive Perception 6", "Immunity: blinded, charmed"]}
+    got = digest.complete_stat_block(sb, text, "Swarm of Trickered Treats")
+    assert got["other"] == [
+        "Senses blindsight 10 ft., passive Perception 6", "Immunity: blinded, charmed",
+        "Damage Resistances Bludgeoning, Piercing, Slashing",
+        "Languages understands the languages of its creator but cannot speak",
+    ]
+    assert digest.complete_stat_block(got, text, "Swarm of Trickered Treats") == got  # nothing more to add
+    assert digest.complete_stat_block(sb, text, "Imp") == sb  # not in this text: left alone

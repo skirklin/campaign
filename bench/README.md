@@ -19,7 +19,9 @@ uploaded as "Published module" and digested:
 
 `build_corpus.py` makes the four files from those repositories (the
 adventures' chapters joined into one file each, navigation links dropped,
-the license on top). They aren't committed here; build and upload them.
+the license on top). It also repairs the SRD markdown's known faults (the
+ice devil's actions spliced into the imp's block, the archmage's missing
+heading). They aren't committed here; build and upload them.
 
 ## Running it
 

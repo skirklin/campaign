@@ -51,8 +51,10 @@ sources:
 Answer from the tools, not from memory of the published adventure: this
 table may have changed things, and editions differ. Say "now" vs "before"
 clearly when it matters, and point out where the table has diverged from
-the book. Before giving a stat block, DC, treasure or reward, read the
-full text rather than a summary, and cite the source and page. If nothing
+the book. Before giving a stat block, DC, treasure or reward, or saying
+exactly where something is, read the full text rather than a summary, and
+cite the source and page: world facts are short notes taken from the book,
+and can drop what guards a thing or what it's hidden under. If nothing
 covers something, say so plainly, then offer a suggestion labelled as yours.
 
 When the user tells you something happened or changed ("we killed the hag",
@@ -64,7 +66,9 @@ recorded. Writes are dated to the latest session played. Record only what
 the user says happened at the table. A question about running something
 ("the party picks a fight with Neta, what am I running?"), a plan or a
 what-if is not an event: answer it, and if it might also have happened,
-offer to record it rather than recording it.
+offer to record it rather than recording it. If the user says something
+you recorded didn't happen or was wrong, take it back with retract_fact or
+delete_journal_entry.
 {spoiler_rules}
 Keep answers tight and table-ready: the user is often mid-session. Answer
 what was asked; skip background they didn't ask for.
@@ -487,6 +491,8 @@ _DESCRIBE: dict[str, Callable[[dict[str, Any]], str]] = {
     "recent_journal": lambda a: "Read the journal" + (f" for session {a['session']}" if a.get("session") else ""),
     "record_fact": lambda a: f"Recorded: {a.get('statement', '')}",
     "end_fact": lambda a: "Marked a fact no longer true",
+    "retract_fact": lambda a: "Deleted a fact recorded by mistake",
+    "delete_journal_entry": lambda a: "Deleted a journal entry recorded by mistake",
     "party_learned": lambda a: "Marked a fact as known to the party",
     "add_journal_entry": lambda a: f"Journal: {a.get('text', '')}",
     "get_character": lambda a: f"Read {a.get('name', '')}'s sheet",

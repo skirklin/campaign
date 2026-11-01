@@ -422,11 +422,12 @@ def create_app(
             # Everything left has failed (or waits on something that has): nothing more will happen on its own.
             stuck = bool(target) and remaining > 0 and status["failed"] >= remaining
             running = bool(target) and (remaining > 0 or status["total"] == 0) and not stuck
-            stale = src["id"] not in estimates or estimates[src["id"]].get("model") != digest.MODEL
+            model = target or digest.MODEL
+            stale = src["id"] not in estimates or estimates[src["id"]].get("model") != model
             if src["kind"] != "transcript" and not running and stale:
-                # Planned against the current model (without saving), so it shows what a digest would do.
+                # Planned against the model a digest would use (without saving), so it shows what it would do.
                 estimates[src["id"]] = digest.estimate(
-                    s, digest.plan(s, src["id"], model=digest.MODEL, save=False), model=digest.MODEL)
+                    s, digest.plan(s, src["id"], model=model, save=False), model=model)
             status |= {"running": running, "stuck": stuck, "target": target, "model": target or digest.MODEL,
                        "spent_usd": digest.spent(s.digest_usage(src["id"]))}
             if not running and remaining > 0 and src["id"] in estimates:
