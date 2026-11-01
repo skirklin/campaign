@@ -57,7 +57,8 @@ uv run campaign web            # http://127.0.0.1:8765
   It has ability scores with live modifiers, save and skill proficiency
   checkboxes, and HP with damage and heal buttons (damage comes off temp HP
   first). Resources like spell slots and hit dice are clickable pips. It
-  also covers attacks, spells by level, inventory and coin, conditions,
+  also covers attacks, spells by level, what they carry and their coin
+  (in the party's inventory, below), conditions,
   death saves, short and long rests, export to JSON, and a change history.
 - **Play view**: the same sheet laid out for a phone at the table, and what
   a sheet opens in (the ✎ button switches to the full editor, and the
@@ -86,8 +87,9 @@ uv run campaign web            # http://127.0.0.1:8765
   reload mid-fight carries on.
   Rolls show their sums one line per part: the die, then each modifier
   (STR, proficiency, Magic, Rage), then the total.
-  Every change made in the Play view (HP, pips, statuses, coin, rests)
-  shows an **Undo** on its toast. The 🎲 button opens a dice tray: tap dice to build an expression or
+  Every change made to the sheet in the Play view (HP, pips, statuses,
+  rests) shows an **Undo** on its toast; what they carry changes in the
+  party's inventory, which keeps its own history. The 🎲 button opens a dice tray: tap dice to build an expression or
   type one (`8d6 fire`, `2d20kh1+5` for advantage, `4d6kh3` for a stat),
   with Adv/Dis toggles. Every roll is remembered on that device, per
   character (the latest 100): the tray shows the recent ones, the Notes
@@ -155,8 +157,8 @@ localhost without it, unless you pass `--no-auth`. With sign-in on:
   ability, proficiency, magic bonus and damage dice; AC is a formula
   (base plus ability modifiers, with a Dexterity cap for medium armor);
   max HP is the hit-dice total plus Constitution per level. Anything
-  else is a bonus with a source: on the item that grants it (it counts
-  while equipped, and attuned if it needs to be), or on the sheet for
+  else is a bonus with a source: on what the item that grants it is (it
+  counts while equipped, and attuned if it needs to be), or on the sheet for
   features and effects, which can be switched off (Rage, between fights).
   Click any number to see what it adds up from. **Statuses** are what's
   switched on in play: Rage, Concentration (on a named spell), Bless. A
@@ -176,19 +178,32 @@ localhost without it, unless you pass `--no-auth`. With sign-in on:
   it (Gauntlets of Ogre Power). Nicknames become the world entry's
   aliases. Sheets saved before this
   keep their numbers as flat amounts until edited.
-- **The party stash** is on the Party tab and on the Play view's Gear tab:
-  the shared purse, plus loot nobody has claimed yet. It's the party's
-  shared bag, so anyone in the campaign can change it, whatever their
-  access, and its history shows who did what. **Take** moves an item or
-  coin into a character's inventory, and an item's **Put in the party
-  stash** moves it back. Both need the right to change that character, and
-  both are logged on the stash and the sheet. Coin is added and spent as
-  changes, so two people at once both count. Other edits are refused if
-  someone changed the stash in the meantime, rather than overwriting it.
-  Session ingests and chat record unclaimed loot there
-  (`get_party_stash`, `update_party_stash`). Any item, in the stash or on
-  a sheet, can have a worth in gold pieces each, for loot nobody will do
-  more with than sell; the stash shows what its items are worth in all.
+- **The party's inventory** is one list of everything the party owns, by
+  who has it: the party itself (loot nobody has claimed yet, and the
+  shared purse), each character, and anyone they've left something with
+  (the trident with Vulkan, to be reforged). It's on the Party tab, with a
+  search and what it's all worth; each character's sheet and the Play
+  view's Gear tab show what they carry with the party's unclaimed loot
+  below it. **Claim**, **Give…** and **Put back** hand a thing to someone,
+  and coin can be added, spent, handed over, or **shared** evenly among
+  the characters. Anyone in the campaign can change the party's own things
+  and add to them; a character's things need the right to change that
+  character. Every change is logged with who made it and the session, and
+  shows on the item's and the character's world timeline.
+
+  An item that does something points at **what it is** in the world: a
+  world item whose definition says what it adds while equipped, whether it
+  needs attunement and what one is worth. It's kept once, so every copy
+  reads it: fix the Cloak of Protection and every cloak follows, and the
+  sheets of whoever has one equipped count it. ✦ marks those items; **What
+  it does…** edits the definition (editor access, as for the rest of the
+  world). It's a world fact, so the DM can mark it **secret**: the party
+  sees "Xiphos sword of magical" and nothing of what it does, and their
+  sheets don't count it, until the DM marks it known. Mundane loot is just a
+  name, how many, notes and what each is worth. Session ingests and chat
+  use the same list (`inventory`, `add_items`, `give_item`, `change_coin`,
+  `define_item`). A character exported as JSON carries their things with
+  them, and importing one (or scanning a paper sheet) puts them back.
 - **Paper sheets can be scanned in.** On the Party tab, **From a scan or
   PDF…** takes a photo or PDF of a filled-in sheet; Claude reads it into a
   new character (`CAMPAIGN_SHEET_MODEL`, default `CAMPAIGN_MODEL`) and lists
@@ -230,7 +245,7 @@ uv run campaign char import examples/character.json -c curse-of-strahd
 uv run campaign char show "Brannoc Ashvale"
 uv run campaign char hp "Brannoc Ashvale" -- -9
 uv run campaign char rest "Brannoc Ashvale" --long
-uv run campaign char set "Brannoc Ashvale" '{"currency": {"gp": 120}}' --reason "loot from the crypt"
+uv run campaign char set "Brannoc Ashvale" '{"conditions": ["poisoned"]}' --reason "the ghoul's claws"
 
 # people (only with sign-in on; see docs/deploy.md)
 uv run campaign users add you@example.com --admin --claim-unowned   # the first admin

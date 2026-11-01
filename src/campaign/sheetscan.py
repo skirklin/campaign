@@ -2,7 +2,7 @@
 
 Claude reads the document and answers with the sheet as JSON in a fixed
 shape (ScannedSheet, checked on arrival), which is then turned into a
-CharacterSheet. The scan schema spells out abilities and coins as fields
+CharacterFile: the sheet, and what the character carries. The scan schema spells out abilities and coins as fields
 rather than open-ended maps; anything Claude couldn't make out is listed
 rather than guessed.
 """
@@ -19,7 +19,7 @@ from typing import Any, Callable
 from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
 from .charsheet import (
-    ABILITIES, RETIRED_SHEET_FIELDS, SKILLS, ArmorClass, Attack, AttackOption, Bonus, CharacterSheet, ClassLevel,
+    ABILITIES, RETIRED_SHEET_FIELDS, SKILLS, ArmorClass, Attack, AttackOption, Bonus, CharacterFile, ClassLevel,
     HitPoints, Item, Resource, Spell, Status, without,
 )
 from .tools import ToolContext
@@ -208,7 +208,7 @@ def _dice(text: str) -> list[str]:
     return re.findall(r"\d+d\d+(?:[+-]\d+)?", text.replace(" ", "").lower())
 
 
-def to_sheet(scan: ScannedSheet) -> tuple[CharacterSheet, list[str]]:
+def to_sheet(scan: ScannedSheet) -> tuple[CharacterFile, list[str]]:
     """The sheet, plus what couldn't be read or placed, or doesn't add up to what the sheet prints."""
     leftover = list(scan.unreadable)
 
@@ -225,7 +225,7 @@ def to_sheet(scan: ScannedSheet) -> tuple[CharacterSheet, list[str]]:
     saves = [a for a in (_ability(n) for n in scan.save_proficiencies) if a]
     abilities = {ABILITY_NAMES[k]: v for k, v in scan.abilities.model_dump().items()}
     attacks = [Attack.model_validate(a.model_dump(exclude={"printed_to_hit", "printed_damage"})) for a in scan.attacks]
-    sheet = CharacterSheet(
+    sheet = CharacterFile(
         name=scan.name.strip() or "Unnamed character",
         player=scan.player, species=scan.species, background=scan.background, alignment=scan.alignment,
         classes=scan.classes, xp=scan.xp, abilities=abilities,
@@ -240,7 +240,7 @@ def to_sheet(scan: ScannedSheet) -> tuple[CharacterSheet, list[str]]:
         spells=scan.spells, inventory=scan.inventory, currency=scan.currency.model_dump(),
         features=scan.features, proficiencies=scan.proficiencies,
         personality=scan.personality, notes=scan.notes,
-    )
+    ).worn()
     # The hit-dice part is what's left of the printed maximum once CON and bonuses are taken off.
     sheet.hp = sheet.hp.model_copy(update={"base": scan.hp.max - sum(v for _, v in sheet.hp_max_parts())})
 
@@ -303,7 +303,7 @@ def read_sheet(
     data: bytes, filename: str, ctx: ToolContext, model: str = MODEL,
     check: Callable[[], None] | None = None, on_thinking: Callable[[str], None] | None = None,
     on_tool: Callable[[str, dict[str, Any]], None] | None = None,
-) -> tuple[CharacterSheet, list[str]]:
+) -> tuple[CharacterFile, list[str]]:
     """Read the sheet, looking things up in the campaign `ctx` as needed (read-only).
 
     `check` is called as the answer streams in and before each lookup, and

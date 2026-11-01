@@ -50,7 +50,9 @@ _MAP_KEY = re.compile(r"^[a-z]{0,3}\d+[a-z]?$", re.IGNORECASE)
 
 
 TREASURE = "Treasure: "  # starts the statement of each thing of value the book puts somewhere
-BULKY = ("stat_block", "read_aloud")  # attributes too long to list among an entity's current values
+# Attributes too long to list among an entity's current values. "mechanics" is an item's
+# definition, what it does for whoever has it equipped (charsheet.ItemMechanics, as JSON).
+BULKY = ("stat_block", "read_aloud", "mechanics")
 
 
 def _naming(alias: str) -> bool:
@@ -151,6 +153,9 @@ class World:
             return self.conn.execute(
                 "DELETE FROM entities WHERE campaign_id = ?"
                 " AND id NOT IN (SELECT entity_id FROM characters WHERE entity_id IS NOT NULL)"
+                " AND id NOT IN (SELECT holder_id FROM holdings WHERE holder_id IS NOT NULL)"
+                " AND id NOT IN (SELECT item_id FROM holdings WHERE item_id IS NOT NULL)"
+                " AND id NOT IN (SELECT holder_id FROM purses WHERE holder_id IS NOT NULL)"
                 " AND id NOT IN (SELECT entity_id FROM facts)"
                 " AND id NOT IN (SELECT entity_id FROM aliases)"
                 " AND id NOT IN (SELECT entity_id FROM event_entities)",
@@ -258,6 +263,20 @@ class World:
             # A character sheet follows its entity; if both had one, keep's stays linked.
             if not self.conn.execute("SELECT 1 FROM characters WHERE entity_id = ?", (keep_id,)).fetchone():
                 self.conn.execute("UPDATE characters SET entity_id = ? WHERE entity_id = ?", (keep_id, other_id))
+            # What either held or defined is the one thing's now; two purses become one.
+            for column in ("holder_id", "item_id"):
+                self.conn.execute(f"UPDATE holdings SET {column} = ? WHERE {column} = ?", (keep_id, other_id))
+            for column in ("item_id", "from_holder", "to_holder"):
+                self.conn.execute(f"UPDATE inventory_log SET {column} = ? WHERE {column} = ?", (keep_id, other_id))
+            purses = self.conn.execute("SELECT id, holder_id, coins FROM purses WHERE holder_id IN (?, ?)",
+                                       (keep_id, other_id)).fetchall()
+            if len(purses) == 2:
+                total = {k: json.loads(purses[0]["coins"]).get(k, 0) + json.loads(purses[1]["coins"]).get(k, 0)
+                         for k in json.loads(purses[0]["coins"]) | json.loads(purses[1]["coins"])}
+                self.conn.execute("DELETE FROM purses WHERE holder_id = ?", (other_id,))
+                self.conn.execute("UPDATE purses SET coins = ? WHERE holder_id = ?", (json.dumps(total), keep_id))
+            else:
+                self.conn.execute("UPDATE purses SET holder_id = ? WHERE holder_id = ?", (keep_id, other_id))
             self.conn.execute("DELETE FROM entities WHERE id = ?", (other_id,))
             # Both may have had a current value for the same attribute: the newer one wins.
             open_facts = self.conn.execute(
@@ -433,6 +452,8 @@ class World:
         if self.campaign.spoiler_safe and not facts and not events and e["kind"] != "pc":
             return None
         cur = [f for f in facts if f["valid_to"] is None and f["modality"] == "fact"]
+        if held := self.held_by(entity_id):
+            e["held_by"] = held
         e.update(
             as_of=self.now if as_of is None else as_of,
             current={f["attribute"]: f["value"] for f in cur if f["attribute"] and f["attribute"] not in BULKY},
@@ -443,6 +464,14 @@ class World:
             summary=self.cached_summary(entity_id) if as_of is None else None,
         )
         return e
+
+    def held_by(self, entity_id: int) -> list[dict[str, Any]]:
+        """Who in the party's inventory has this item: [{"holder": "Agrippa", "qty": 1}], the party's own as "the party"."""
+        rows = self.conn.execute(
+            "SELECT coalesce(e.name, 'the party') AS holder, sum(h.qty) AS qty FROM holdings h"
+            " LEFT JOIN entities e ON e.id = h.holder_id WHERE h.item_id = ? AND h.campaign_id = ?"
+            " GROUP BY h.holder_id ORDER BY min(h.id)", (entity_id, self.campaign.id))
+        return [dict(r) for r in rows]
 
     def attribute_values(self, entity_id: int, attribute: str) -> list[str]:
         """The current values of one attribute, as this viewer may see them (a stat block, read-aloud text)."""
@@ -521,6 +550,12 @@ class World:
                 items.append({"session": f["valid_to"], "change": "ended", **_brief(f)})
         for ev in self.events(entity_id=entity_id):
             items.append({"session": ev["session"], "change": "event", "statement": ev["text"]})
+        # What the party did with it, or with what they were carrying.
+        for row in self.conn.execute(
+            "SELECT session, text FROM inventory_log WHERE campaign_id = ? AND ? IN (item_id, from_holder, to_holder)"
+            " ORDER BY id", (self.campaign.id, entity_id),
+        ):
+            items.append({"session": row["session"], "change": "event", "statement": row["text"]})
         order = {"ended": 0, "began": 1, "event": 2}
         return sorted(items, key=lambda i: (i["session"], order[i["change"]]))
 

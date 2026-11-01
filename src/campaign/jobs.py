@@ -164,7 +164,8 @@ def run_scan(run: Run) -> dict[str, Any]:
 
     from . import sheetscan
     from .agent import describe_tool_call
-    from .charsheet import CharacterSheet
+    from .charsheet import CharacterFile
+    from .inventory import Inventory
     from .tools import ToolContext
 
     s, name = run.store, run.input["name"]
@@ -185,7 +186,7 @@ def run_scan(run: Run) -> dict[str, Any]:
         except anthropic.BadRequestError as err:  # the same request would be refused again
             raise Permanent(f"Claude's API refused the request: {err.message}") from err
         run.save_input(sheet=sheet.model_dump(), unreadable=unreadable)
-    sheet = CharacterSheet.model_validate(run.input["sheet"])
+    sheet = CharacterFile.model_validate(run.input["sheet"])
     unreadable = run.input["unreadable"]
     if unreadable:  # on the sheet itself, where they get corrected
         note = "Not clear on the scan, check these: " + "; ".join(unreadable)
@@ -193,7 +194,10 @@ def run_scan(run: Run) -> dict[str, Any]:
     run.check()  # last chance to stop before anything is written
     reason = f"read from {name} (job {run.job['id']})"
     try:
-        character_id = s.create_character(sheet.model_dump(), run.campaign.id, run.job["requested_by"], reason=reason)
+        character_id = s.create_character(sheet.sheet().model_dump(), run.campaign.id, run.job["requested_by"],
+                                          reason=reason)
+        inv = Inventory(s, run.campaign, run.job["requested_by"])
+        inv.bring_in(inv.character_holder(character_id), sheet.inventory, sheet.currency, reason=f"{sheet.name}'s, {reason}")
     except sqlite3.IntegrityError:
         same = s.find_character(sheet.name, run.campaign)
         if same is None or not any(e["reason"] == reason for e in s.character_log(same["id"], limit=1000)):

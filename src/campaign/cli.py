@@ -10,9 +10,10 @@ from typing import Annotated, Optional
 
 import typer
 
-from .charsheet import CharacterSheet, apply_hp, merge_patch, render, rest
+from .charsheet import CharacterFile, CharacterSheet, apply_hp, merge_patch, render, rest
 from .config import db_path
 from .db import Campaign, Store
+from .inventory import Inventory
 
 app = typer.Typer(no_args_is_help=True, help="D&D campaign assistant.")
 char_app = typer.Typer(no_args_is_help=True, help="Character sheets.")
@@ -343,11 +344,22 @@ def web(
 # -- characters --------------------------------------------------------------
 
 
+def _inventory(s: Store, character: dict) -> tuple[Inventory, int]:
+    """The character's campaign's inventory (as its DM sees it) and the character as a holder in it."""
+    inv = Inventory(s, s.campaign_by_id(character["campaign_id"]))
+    return inv, inv.character_holder(character["id"])
+
+
 def _load(s: Store, name: str) -> tuple[int, CharacterSheet]:
     found = s.find_character(name)
     if found is None:
         raise typer.BadParameter(f"no character {name!r}")
-    return found["id"], CharacterSheet.model_validate(found["sheet"])
+    return found["id"], _inventory(s, found)[0].sheet(found)
+
+
+def _render(s: Store, character_id: int, sheet: CharacterSheet) -> str:
+    inv, holder = _inventory(s, s.character(character_id))
+    return render(sheet, inv.carried(holder), inv.purse(holder))
 
 
 @char_app.command("list")
@@ -361,26 +373,37 @@ def char_list() -> None:
 
 @char_app.command("show")
 def char_show(name: str, as_json: Annotated[bool, typer.Option("--json")] = False) -> None:
-    """Print a character sheet."""
-    _, sheet = _load(store(), name)
+    """Print a character sheet, with what they carry."""
+    s = store()
+    character_id, sheet = _load(s, name)
+    inv, holder = _inventory(s, s.character(character_id))
     if as_json:
-        show(sheet.model_dump())
+        show(CharacterFile.model_validate(sheet.model_dump() | {
+            "inventory": [i.model_dump() for i in inv.carried(holder)], "currency": inv.purse(holder)}).model_dump())
     else:
-        typer.echo(render(sheet))
+        typer.echo(_render(s, character_id, sheet))
 
 
 @char_app.command("import")
 def char_import(path: Path, campaign: CampaignOpt = None) -> None:
-    """Create or replace a character from a JSON sheet (see examples/character.json)."""
+    """Create or replace a character from a JSON sheet (see examples/character.json), with what they carry."""
     s = store()
-    sheet = CharacterSheet.model_validate_json(path.read_text(encoding="utf-8"))
+    file = CharacterFile.model_validate_json(path.read_text(encoding="utf-8"))
     c = pick(s, campaign)  # a character belongs to a campaign
     reason = f"imported from {path.name}"
-    if existing := s.find_character(sheet.name, c):
-        s.update_character(existing["id"], sheet.model_dump(), reason=reason)
+    if existing := s.find_character(file.name, c):
+        s.update_character(existing["id"], file.sheet().model_dump(), reason=reason)
+        character_id = existing["id"]
+        inv, holder = _inventory(s, existing)
+        for h in inv.holdings(holder):  # replaced by what the file carries
+            inv.remove(h["id"], reason)
+        if coins := {k: -v for k, v in inv.purse(holder).items() if v}:
+            inv.coin(holder, coins, reason)
     else:
-        s.create_character(sheet.model_dump(), campaign_id=c.id, reason=reason)
-    typer.echo(f"Saved {sheet.name} in {c.name}.")
+        character_id = s.create_character(file.sheet().model_dump(), campaign_id=c.id, reason=reason)
+    inv, holder = _inventory(s, s.character(character_id))
+    inv.bring_in(holder, file.inventory, file.currency, reason=f"{file.name}'s, {reason}")
+    typer.echo(f"Saved {file.name} in {c.name}.")
 
 
 @char_app.command("set")
@@ -394,7 +417,8 @@ def char_set(
     character_id, current = _load(s, name)
     updated = CharacterSheet.model_validate(merge_patch(current.model_dump(), json.loads(patch)))
     s.update_character(character_id, updated.model_dump(), reason=reason)
-    typer.echo(render(updated))
+    _, updated = _load(s, updated.name)
+    typer.echo(_render(s, character_id, updated))
 
 
 @char_app.command("hp")
@@ -418,7 +442,7 @@ def char_rest(name: str, long: Annotated[bool, typer.Option("--long/--short")] =
     character_id, sheet = _load(s, name)
     rest(sheet, long)
     s.update_character(character_id, sheet.model_dump(), reason="long rest" if long else "short rest")
-    typer.echo(render(sheet))
+    typer.echo(_render(s, character_id, sheet))
 
 
 @char_app.command("log")
