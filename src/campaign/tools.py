@@ -287,6 +287,8 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         party = encounters.Party(size=size, level=level) if size and level else None
         spec = encounters.Spec(creatures=creatures, party=party)
         result = encounters.build(store, campaign, spec)
+        for c, found in zip(spec.creatures, result["creatures"]):
+            c.id = found["id"]  # the card shows what was matched here, whatever names change later
         show = "```encounter\n" + spec.model_dump_json(exclude_none=True, exclude_defaults=True) + "\n```"
         out = encounters.summary(result) | {"show": show}
         if party is None:

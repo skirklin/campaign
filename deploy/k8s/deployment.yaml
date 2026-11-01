@@ -42,7 +42,7 @@ spec:
             - {name: CAMPAIGN_PUBLIC_URL, value: "https://campaign.kirkl.in"}
             # Digest with Haiku while iterating (about 1/40 of Opus). The model is
             # part of every cache key, so switching back re-digests from scratch.
-            - {name: CAMPAIGN_DIGEST_MODEL, value: claude-haiku-5-5}
+            - {name: CAMPAIGN_DIGEST_MODEL, value: claude-sonnet-5-5}
             # From the Google Cloud OAuth client (docs/deploy.md, step 1).
             - {name: GOOGLE_CLIENT_ID, value: "779965064363-4ce52upmf3rktf48fn8lqk96qlfnd1ff.apps.googleusercontent.com"}
             # Credentials: the campaign-secrets Secret, created by hand (docs/deploy.md, step 2).

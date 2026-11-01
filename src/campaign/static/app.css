@@ -1046,3 +1046,19 @@ ol.initiative { margin: .2rem 0 .6rem; padding-left: 1.4rem; font-variant-numeri
 .hp-tracker { display: flex; align-items: center; gap: .3rem; }
 .hp-tracker input { width: 4.2rem; text-align: center; font-variant-numeric: tabular-nums; }
 .encounter-creature .statblock-card { margin: .6rem 0 .2rem; }
+
+/* Stat block entries you can roll. */
+.action-roll {
+  padding: 0 .35rem; margin-right: .25rem; font-size: .8rem; line-height: 1.4;
+  color: var(--rule); background: none; border: 1px solid color-mix(in srgb, var(--rule) 45%, transparent); border-radius: 5px;
+}
+.action-roll:hover { background: color-mix(in srgb, var(--rule) 10%, transparent); }
+.action-result { font-weight: 700; color: var(--text); }
+.action-result:empty { display: none; }
+.action-result.rolled { animation: pop .35s ease-out; }
+.action-result.ready { color: var(--ok); }
+.uses { display: inline-flex; gap: .2rem; margin-right: .3rem; vertical-align: middle; }
+.uses input { width: .95rem; height: .95rem; accent-color: var(--rule); }
+.book-text-toggle { margin: .3rem 0 .4rem; }
+.book-text-toggle > summary { cursor: pointer; color: var(--accent); }
+.book-text pre { white-space: pre-wrap; font: .85rem/1.5 var(--sans); background: var(--surface-2); padding: .6rem .7rem; border-radius: var(--radius-sm); max-height: 24rem; overflow: auto; }

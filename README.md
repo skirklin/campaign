@@ -261,7 +261,11 @@ to fire") and gives back their stat blocks, their XP and the encounter's
 difficulty for the party by the DMG's rules (the party defaults to the
 campaign's characters). In the Ask tab the answer shows it as an encounter
 card: the difficulty, every stat block, an HP box per monster and a button
-that rolls the monsters' initiative.
+that rolls the monsters' initiative. Each creature can show the book text
+its stat block was read from, to check it against. In any stat block, an
+attack has a button that rolls to hit and all its damage at once (dice
+doubled on a natural 20), a recharge ability rolls its d6, and "3/Day"
+abilities get tick boxes.
 
 For running a session, the chat and MCP tools `stat_block`, `treasure`
 (what's at a place, and what the party has already taken) and `roll_table`

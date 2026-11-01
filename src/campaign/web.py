@@ -601,6 +601,11 @@ def create_app(
         """A fight as the encounter card shows it: each creature's stat block, XP and the difficulty."""
         return encounters.build(s, c, spec)
 
+    @app.get("/api/campaigns/{slug}/entities/{entity_id}/passage")
+    def entity_passage(entity_id: int, c: Campaign = Depends(reader), s: Store = Depends(store)) -> list[dict[str, Any]]:
+        """The book text an entity's stat block was read from, to check it against."""
+        return encounters.book_passage(s, c, entity_id)
+
     @app.get("/api/campaigns/{slug}/journal")
     def journal(session: int | None = None, c: Campaign = Depends(reader), s: Store = Depends(store)) -> list[dict]:
         return World(s, c).events(session=session)
