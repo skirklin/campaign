@@ -7,7 +7,7 @@
 // writes into `this.sheet` and the debounced save sends it; HP and rests go
 // through the server's endpoints, which apply the rules there.
 
-import { api, h, toast, sign, bottomSheet, keypad, askQty, backCloses } from "./util.js";
+import { api, h, toast, sign, bottomSheet, keypad, askQty, backCloses, worth } from "./util.js";
 import { StashView } from "./stash.js";
 import { d, fmtMod, parseExpr, formatExpr, rollExpr } from "./dice.js";
 import { SheetView, ABILITIES, ABILITY_NAMES, SKILLS, CONDITIONS, COINS } from "./sheet.js";
@@ -473,6 +473,7 @@ export class PlayView extends SheetView {
     const bonuses = item.bonuses || [];
     const dialog = bottomSheet(item.name || "Item",
       item.notes ? h("p", item.notes) : h("p.muted", "No notes. Add them in Edit."),
+      item.value_gp > 0 && h("p.muted.small", `Worth ${worth(item.value_gp)}${item.qty !== 1 ? ` each, ${worth(item.value_gp * item.qty)} in all` : ""}`),
       bonuses.length > 0 && h("p.muted.small", bonuses.map((b) => `${typeof b.amount === "number" ? sign(b.amount) : b.amount} ${b.target}`).join(", ")
         + (item.requires_attunement ? " · needs attunement" : "")),
       h("div.item-toggles", toggle("equipped", "Equipped"), item.requires_attunement && toggle("attuned", "Attuned")),

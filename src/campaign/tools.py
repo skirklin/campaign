@@ -584,8 +584,11 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
 
         Use it for loot the party takes but nobody claims, and the shared
         purse. Lists are replaced whole, so read the stash first and send the
-        complete new item list. Examples: {"currency": {"gp": 340}},
-        {"items": [{"name": "Potion of healing", "qty": 3}]}.
+        complete new item list. An item's value_gp is what one of it is
+        worth in gold (0 if unknown), for loot nobody will fuss with beyond
+        selling it. Examples: {"currency": {"gp": 340}},
+        {"items": [{"name": "Potion of healing", "qty": 3}]},
+        {"items": [{"name": "Black pearl", "value_gp": 1000}]}.
 
         Args:
             patch: Merge patch against the current stash.

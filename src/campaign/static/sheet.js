@@ -10,7 +10,7 @@
 // That's Edit mode. Play mode (play.js) is the same sheet laid out for the
 // table; the sheet opens in whichever this device used last.
 
-import { api, h, toast, sign, getPath, setPath, debounce, installBanner } from "./util.js";
+import { api, h, toast, sign, worth, getPath, setPath, debounce, installBanner } from "./util.js";
 
 export const ABILITIES = ["str", "dex", "con", "int", "wis", "cha"];
 export const ABILITY_NAMES = { str: "Strength", dex: "Dexterity", con: "Constitution", int: "Intelligence", wis: "Wisdom", cha: "Charisma" };
@@ -313,16 +313,18 @@ export class SheetView {
 
   // -- building blocks -------------------------------------------------------
 
-  field(path, { type = "text", label, placeholder, cls, min, max, rows, reason, after } = {}) {
+  // `step: "any"` keeps a number's fraction (a value in gp); otherwise numbers are whole.
+  field(path, { type = "text", label, placeholder, cls, min, max, step, rows, reason, after } = {}) {
     const v = getPath(this.sheet, path);
     let el;
     if (type === "textarea") el = h("textarea", { value: v ?? "", rows: rows || 4, placeholder });
     else if (type === "checkbox") el = h("input", { type, checked: !!v });
-    else el = h("input", { type, value: v ?? "", placeholder, min, max, step: type === "number" ? 1 : undefined });
+    else el = h("input", { type, value: v ?? "", placeholder, min, max, step: type === "number" ? step || 1 : undefined });
     if (cls) el.classList.add(...cls.split(" "));
     el.setAttribute("aria-label", label || placeholder || path);
     el.addEventListener("change", () => {
-      const val = type === "checkbox" ? el.checked : type === "number" ? Math.trunc(Number(el.value) || 0) : el.value;
+      const val = type === "checkbox" ? el.checked
+        : type === "number" ? (step === "any" ? Number(el.value) || 0 : Math.trunc(Number(el.value) || 0)) : el.value;
       setPath(this.sheet, path, val);
       this.changed(reason || `edited ${humanPath(path)}`);
       after?.();
@@ -620,7 +622,8 @@ export class SheetView {
       items.map((it, i) => {
         const open = this.openItems.has(i);
         const tags = [it.bonuses?.length ? `${it.bonuses.length} bonus${it.bonuses.length > 1 ? "es" : ""}` : "",
-          it.requires_attunement ? (it.attuned ? "attuned" : "needs attunement") : ""].filter(Boolean).join(" · ");
+          it.requires_attunement ? (it.attuned ? "attuned" : "needs attunement") : "",
+          it.value_gp ? `${worth(it.value_gp)}${it.qty !== 1 ? " each" : ""}` : ""].filter(Boolean).join(" · ");
         return h("div.item",
           h("div.row", { style: "grid-template-columns:1fr 4rem auto auto auto" },
             this.field(`inventory.${i}.name`, { placeholder: "Item", reason: "item" }),
@@ -641,13 +644,14 @@ export class SheetView {
                 onchange: (e) => { it.attuned = e.target.checked; this.changed(`${it.name || "item"} ${it.attuned ? "attuned" : "unattuned"}`); } }), "Attuned"),
             ),
             this.field(`inventory.${i}.notes`, { type: "textarea", rows: 2, placeholder: "What it does", reason: "item notes" }),
+            this.field(`inventory.${i}.value_gp`, { type: "number", min: 0, step: "any", label: "Worth (gp each)", reason: "item value" }),
             h("span.muted.small", "Bonuses while equipped"),
             this.bonuses("inventory", `inventory.${i}.bonuses`),
           ),
         );
       }),
       h("button.add", { onclick: () => {
-        items.push({ name: "", qty: 1, equipped: false, attuned: false, requires_attunement: false, bonuses: [], notes: "" });
+        items.push({ name: "", qty: 1, equipped: false, attuned: false, requires_attunement: false, bonuses: [], notes: "", value_gp: 0 });
         this.refresh("inventory");
         this.sections.inventory.body.querySelector(".item:last-of-type input")?.focus();
         this.changed("added item");

@@ -180,6 +180,10 @@ def test_moving_between_a_character_and_the_party_stash():
     move(sheet, stash, "character", {"Cloak of protection": 1})
     cloak = sheet.inventory[-1]
     assert cloak.bonuses[0].amount == 1 and cloak.requires_attunement and not cloak.equipped and not cloak.attuned
+    # Its worth is per item, so it holds when a stack is split.
+    stash.items.append(Item(name="Gold idol", qty=3, value_gp=250))
+    move(sheet, stash, "character", {"Gold idol": 1})
+    assert sheet.inventory[-1].value_gp == 250 and stash.items[-1].qty == 2 and stash.items[-1].value_gp == 250
     # Not enough changes nothing.
     before = (sheet.model_dump(), stash.model_dump())
     with pytest.raises(ValueError, match="only 1"):
@@ -197,9 +201,11 @@ def test_party_stash_tools(store):
     assert json.loads(t["get_party_stash"]())["items"] == []
     assert "Updated" in t["update_party_stash"](patch={"currency": {"gp": 340}}, reason="the crypt")
     assert "Rejected" in t["update_party_stash"](patch={"items": [{"qty": 2}]}, reason="bad")
-    t["update_party_stash"](patch={"items": [{"name": "Silver mirror"}]}, reason="the crypt")
+    t["update_party_stash"](patch={"items": [{"name": "Silver mirror", "value_gp": 25}]}, reason="the crypt")
     stash = json.loads(t["get_party_stash"]())
     assert stash["currency"]["gp"] == 340 and [(i["name"], i["qty"]) for i in stash["items"]] == [("Silver mirror", 1)]
+    assert stash["items"][0]["value_gp"] == 25
+    assert "Rejected" in t["update_party_stash"](patch={"items": [{"name": "Mirror", "value_gp": -1}]}, reason="bad")
     assert [r["reason"] for r in store.party_stash_log(store.campaign("loot").id)] == ["the crypt", "the crypt"]
 
 

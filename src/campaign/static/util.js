@@ -65,6 +65,14 @@ export function toast(msg, isError = false, action = null) {
 }
 
 export const sign = (n) => (n >= 0 ? `+${n}` : `${n}`);
+
+// A value in gold pieces, as a player would say it: "1,400 gp", "5 sp", "3 cp"; "" for none.
+export function worth(gp) {
+  if (!gp) return "";
+  if (gp >= 1) return `${Number(gp.toFixed(2)).toLocaleString()} gp`;
+  const sp = gp * 10;
+  return Number.isInteger(Math.round(sp * 1e6) / 1e6) ? `${Math.round(sp)} sp` : `${Math.round(gp * 100)} cp`;
+}
 export const enc = encodeURIComponent;
 
 export function getPath(obj, path) {
