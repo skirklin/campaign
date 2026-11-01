@@ -159,24 +159,33 @@ def test_character_sheets_belong_to_their_players(site):
     assert bob.get(f"/api/characters/{copy['id']}").status_code == 404
 
 
-def test_the_party_stash_is_the_whole_partys(site):
+def test_the_party_inventory_is_the_whole_partys(site):
     dm, _ = setup_campaign(site)
     alice, _, _ = join(site, dm, "alice@example.com")  # a player with viewer access
     bob, _, _ = join(site, dm, "bob@example.com")
-    ireth = alice.post("/api/characters", json={"name": "Ireth", "campaign": "strahd"}).json()["id"]
-    # Anyone in the party can put things in and change it, whatever their access.
-    assert alice.post("/api/campaigns/strahd/stash/coin", json={"currency": {"gp": 30}}).status_code == 200
-    log = bob.get("/api/campaigns/strahd/stash").json()["log"]
-    assert log[0]["who"] == "alice@example.com"
-    # Moving things in and out of a sheet needs the right to change that sheet.
-    take = {"character": ireth, "to": "character", "currency": {"gp": 10}}
-    assert bob.post("/api/campaigns/strahd/stash/move", json=take).status_code == 403
-    assert alice.post("/api/campaigns/strahd/stash/move", json=take).status_code == 200
-    assert dm.post("/api/campaigns/strahd/stash/move", json=take).status_code == 200
-    assert [c["can_edit"] for c in bob.get("/api/campaigns/strahd/stash").json()["characters"]] == [False]
+    ireth = alice.post("/api/characters", json={"name": "Ireth", "campaign": "strahd"}).json()["inventory"]["holder"]
+    base = "/api/campaigns/strahd/inventory"
+    # Anyone in the party can add to the party's things and its purse, whatever their access.
+    assert alice.post(f"{base}/coin", json={"currency": {"gp": 30}}).status_code == 200
+    loot = alice.post(f"{base}/items", json={"name": "Silver mirror"}).json()["holders"][0]["items"][0]["id"]
+    assert bob.get(base).json()["log"][0]["who"] == "alice@example.com"
+    # Taking for a character, or changing what they have, needs the right to change that character.
+    assert bob.post(f"{base}/items/{loot}/move", json={"to": ireth}).status_code == 403
+    assert bob.post(f"{base}/coin/give", json={"to": ireth, "currency": {"gp": 10}}).status_code == 403
+    assert alice.post(f"{base}/items/{loot}/move", json={"to": ireth}).status_code == 200
+    assert bob.patch(f"{base}/items/{loot}", json={"equipped": True}).status_code == 403
+    assert dm.patch(f"{base}/items/{loot}", json={"equipped": True}).status_code == 200
+    assert [h["can_edit"] for h in bob.get(base).json()["holders"]] == [True, False]
+    # Saying what an item does is the world's business: editors only. A secret stays the DM's.
+    defn = {"bonuses": [{"target": "ac", "amount": 1}], "party_knows": False}
+    assert alice.put(f"{base}/items/{loot}/definition", json=defn).status_code == 403
+    assert dm.put(f"{base}/items/{loot}/definition", json=defn).status_code == 200
+    seen = alice.get(base).json()["holders"][1]["items"][0]
+    assert seen["name"] == "Silver mirror" and seen["bonuses"] == [] and seen["item"]["name"] is None
+    assert dm.get(base).json()["holders"][1]["items"][0]["item"]["secret"]
     # Outsiders can't see it.
     carol = site.user("carol@example.com")
-    assert carol.get("/api/campaigns/strahd/stash").status_code == 404
+    assert carol.get(base).status_code == 404
 
 
 def test_admin_pages(site):

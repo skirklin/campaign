@@ -43,10 +43,14 @@ sources:
   roll_table to roll on the book's random encounter, treasure and other
   tables. Keyed areas answer to their map key ("C3").
 - Player character sheets: get_character, update_character.
-- The party stash, what the party holds in common (loot nobody has
-  claimed, the shared purse): get_party_stash, update_party_stash. When
-  the party takes treasure, end its fact and put it in the stash or on a
-  sheet.
+- The party's inventory: everything the party owns and who has it, the
+  party itself (loot nobody has claimed, the shared purse), a character, or
+  someone they left it with (inventory). New loot goes in with add_items,
+  held by the party unless someone took it; claiming, giving and putting
+  back are give_item; coin is change_coin. When the party takes treasure,
+  end its fact and add it. What an item does (bonuses, attunement, worth)
+  is its definition in the world, shared by every copy: define_item.
+  Changes of hands go through the inventory, not holder facts.
 
 Answer from the tools, not from memory of the published adventure: this
 table may have changed things, and editions differ. Say "now" vs "before"
@@ -134,9 +138,11 @@ Work in this order:
 5. Log the session's key events with add_journal_entry, in order, roughly
    5-20 entries, naming the entities involved.
 6. Update a character sheet only if it already exists and the transcript
-   states the change outright (gold found, items gained, a level up). Say
-   in `reason` where it came from. Loot the party takes without anyone
-   claiming it goes in the party stash (update_party_stash) instead.
+   states the change outright (a level up, HP). Say in `reason` where it
+   came from. Loot, purchases and coin go in the party's inventory: read it
+   first (inventory), then add_items (held by the party unless someone
+   claimed it), give_item when something changes hands, change_coin for
+   gold found or spent.
 7. Finish by calling finish_session exactly once with a short title and a
    recap a player could read before the next session.
 
@@ -498,8 +504,15 @@ _DESCRIBE: dict[str, Callable[[dict[str, Any]], str]] = {
     "get_character": lambda a: f"Read {a.get('name', '')}'s sheet",
     "update_character": lambda a: f"Updated {a.get('name', '')}'s sheet" + (f": {a['reason']}" if a.get("reason") else ""),
     "create_character": lambda a: "Created a character",
-    "get_party_stash": lambda a: "Checked the party stash",
-    "update_party_stash": lambda a: "Updated the party stash" + (f": {a['reason']}" if a.get("reason") else ""),
+    "inventory": lambda a: "Checked the party's inventory",
+    "add_items": lambda a: "Added " + ", ".join(str(i.get("name", "?")) for i in a.get("items") or [])
+                 + (f" for {a['holder']}" if a.get("holder") not in (None, "party") else ""),
+    "change_item": lambda a: "Changed an item" + (f": {a['reason']}" if a.get("reason") else ""),
+    "give_item": lambda a: f"Gave an item to {a.get('to', '?')}",
+    "change_coin": lambda a: f"Coin for {a.get('holder', '?')}" + (f" to {a['to']}" if a.get("to") else "")
+                   + ": " + ", ".join(f"{v:+d} {k}" if not a.get("to") else f"{v} {k}" for k, v in (a.get("change") or {}).items()),
+    "split_party_coin": lambda a: "Shared out the party's coin",
+    "define_item": lambda a: f"Said what {a.get('name', 'an item')} does",
 }
 
 

@@ -10,7 +10,8 @@
 // That's Edit mode. Play mode (play.js) is the same sheet laid out for the
 // table; the sheet opens in whichever this device used last.
 
-import { api, h, toast, sign, worth, getPath, setPath, debounce, installBanner } from "./util.js";
+import { api, h, toast, sign, getPath, setPath, debounce, installBanner } from "./util.js";
+import { InventoryView } from "./inventory.js";
 
 export const ABILITIES = ["str", "dex", "con", "int", "wis", "cha"];
 export const ABILITY_NAMES = { str: "Strength", dex: "Dexterity", con: "Constitution", int: "Intelligence", wis: "Wisdom", cha: "Charisma" };
@@ -27,7 +28,7 @@ export const CONDITIONS = [
 const RECHARGE = ["", "short rest", "long rest", "dawn"];
 const ATTACK_ABILITIES = { str: "STR", dex: "DEX", finesse: "Finesse", spell: "Spell", con: "CON", int: "INT", wis: "WIS", cha: "CHA", none: "None" };
 // Where a bonus can apply, grouped for the picker (the server's BONUS_TARGETS).
-const BONUS_TARGETS = [
+export const BONUS_TARGETS = [
   ["Defense & movement", [["ac", "AC"], ["hp_max", "Max HP"], ["speed", "Speed"], ["initiative", "Initiative"]]],
   ["Attacks", [["attack", "All attack rolls"], ...ABILITIES.map((a) => [`attack:${a}`, `${a.toUpperCase()} attack rolls`]),
     ["damage", "All damage"], ...ABILITIES.map((a) => [`damage:${a}`, `${a.toUpperCase()} attack damage`])]],
@@ -135,7 +136,7 @@ export async function sheetView(id) {
 }
 
 export class SheetView {
-  constructor({ id, campaign, can_edit, entity_id, copied_from, sheet, derived, log, files }) {
+  constructor({ id, campaign, can_edit, entity_id, copied_from, sheet, derived, log, files, inventory }) {
     this.id = id;
     this.campaign = campaign;
     this.entityId = entity_id;
@@ -145,6 +146,7 @@ export class SheetView {
     this.derived = derived;
     this.log = log;
     this.files = files || [];
+    this.inventory = inventory;  // what they carry and their purse, in the party's inventory
     this.reasons = new Set();
     this.queue = Promise.resolve();
     this.sections = {};
@@ -285,7 +287,28 @@ export class SheetView {
     return {
       id: this.id, campaign: this.campaign, can_edit: this.canEdit, entity_id: this.entityId,
       copied_from: this.copiedFrom, sheet: this.sheet, derived: this.derived, log: this.log,
+      files: this.files, inventory: this.inventory,
     };
+  }
+
+  // What they carry, in the party's inventory: their things, then the party's unclaimed loot to claim from.
+  // A change there can change what counts (equipping a shield), so the sheet's numbers are fetched again.
+  carried() {
+    return (this.inventoryView ||= new InventoryView(this.campaign.slug, {
+      focus: this.inventory.holder,
+      onChange: () => this.refetch(),
+    }));
+  }
+
+  async refetch() {
+    try {
+      const r = await api("GET", `/api/characters/${this.id}`);
+      this.derived = r.derived;
+      this.inventory = r.inventory;
+      this.updateDerived();
+    } catch (err) {
+      toast(err.message, true);
+    }
   }
 
   async play() {
@@ -313,18 +336,16 @@ export class SheetView {
 
   // -- building blocks -------------------------------------------------------
 
-  // `step: "any"` keeps a number's fraction (a value in gp); otherwise numbers are whole.
-  field(path, { type = "text", label, placeholder, cls, min, max, step, rows, reason, after } = {}) {
+  field(path, { type = "text", label, placeholder, cls, min, max, rows, reason, after } = {}) {
     const v = getPath(this.sheet, path);
     let el;
     if (type === "textarea") el = h("textarea", { value: v ?? "", rows: rows || 4, placeholder });
     else if (type === "checkbox") el = h("input", { type, checked: !!v });
-    else el = h("input", { type, value: v ?? "", placeholder, min, max, step: type === "number" ? step || 1 : undefined });
+    else el = h("input", { type, value: v ?? "", placeholder, min, max, step: type === "number" ? 1 : undefined });
     if (cls) el.classList.add(...cls.split(" "));
     el.setAttribute("aria-label", label || placeholder || path);
     el.addEventListener("change", () => {
-      const val = type === "checkbox" ? el.checked
-        : type === "number" ? (step === "any" ? Number(el.value) || 0 : Math.trunc(Number(el.value) || 0)) : el.value;
+      const val = type === "checkbox" ? el.checked : type === "number" ? Math.trunc(Number(el.value) || 0) : el.value;
       setPath(this.sheet, path, val);
       this.changed(reason || `edited ${humanPath(path)}`);
       after?.();
@@ -470,8 +491,9 @@ export class SheetView {
         ),
         h("div.col",
           this.section("inventory", "Inventory", () => [
-            h("div.coins", COINS.map((c) => this.field(`currency.${c}`, { type: "number", label: c.toUpperCase(), min: 0, reason: "coin" }))),
-            this.inventory(),
+            h("p.muted.small", "What they carry is in the party's inventory, with what the party holds in common."
+              + " An item's bonuses are what it does, shared by every one of it: ✦ marks those that do something."),
+            this.carried().el,
           ]),
           this.section("features", "Features & traits", () => this.rows("features", "features",
             [{ key: null, label: "Feature or trait" }], "", "feature")),
@@ -613,53 +635,7 @@ export class SheetView {
     );
   }
 
-  // Each item opens to show attunement, notes and the bonuses it gives while equipped.
-  inventory() {
-    const items = this.sheet.inventory;
-    this.openItems ??= new Set();
-    return h("div.rows",
-      items.length === 0 && h("p.empty", "No items."),
-      items.map((it, i) => {
-        const open = this.openItems.has(i);
-        const tags = [it.bonuses?.length ? `${it.bonuses.length} bonus${it.bonuses.length > 1 ? "es" : ""}` : "",
-          it.requires_attunement ? (it.attuned ? "attuned" : "needs attunement") : "",
-          it.value_gp ? `${worth(it.value_gp)}${it.qty !== 1 ? " each" : ""}` : ""].filter(Boolean).join(" · ");
-        return h("div.item",
-          h("div.row", { style: "grid-template-columns:1fr 4rem auto auto auto" },
-            this.field(`inventory.${i}.name`, { placeholder: "Item", reason: "item" }),
-            this.field(`inventory.${i}.qty`, { type: "number", placeholder: "Qty", reason: "item" }),
-            h("label.mini", { title: "Equipped" }, h("input", { type: "checkbox", checked: it.equipped,
-              onchange: (e) => { it.equipped = e.target.checked; this.changed(`${it.name || "item"} ${it.equipped ? "equipped" : "unequipped"}`); } }), "E"),
-            h("button.icon", { title: open ? "Less" : "Attunement, notes and bonuses", "aria-label": `Details of ${it.name}`, "aria-expanded": String(open),
-              onclick: () => { open ? this.openItems.delete(i) : this.openItems.add(i); this.refresh("inventory"); } }, open ? "▾" : "▸"),
-            h("button.icon", { title: "Remove item", "aria-label": "Remove item",
-              onclick: () => { items.splice(i, 1); this.openItems.clear(); this.changed("removed item"); this.refresh("inventory"); } }, "×"),
-          ),
-          !open && tags && h("p.muted.small.item-tags", tags),
-          open && h("div.item-details",
-            h("div.item-flags",
-              h("label.mini", h("input", { type: "checkbox", checked: it.requires_attunement,
-                onchange: (e) => { it.requires_attunement = e.target.checked; this.changed("attunement"); } }), "Needs attunement"),
-              h("label.mini", h("input", { type: "checkbox", checked: it.attuned,
-                onchange: (e) => { it.attuned = e.target.checked; this.changed(`${it.name || "item"} ${it.attuned ? "attuned" : "unattuned"}`); } }), "Attuned"),
-            ),
-            this.field(`inventory.${i}.notes`, { type: "textarea", rows: 2, placeholder: "What it does", reason: "item notes" }),
-            this.field(`inventory.${i}.value_gp`, { type: "number", min: 0, step: "any", label: "Worth (gp each)", reason: "item value" }),
-            h("span.muted.small", "Bonuses while equipped"),
-            this.bonuses("inventory", `inventory.${i}.bonuses`),
-          ),
-        );
-      }),
-      h("button.add", { onclick: () => {
-        items.push({ name: "", qty: 1, equipped: false, attuned: false, requires_attunement: false, bonuses: [], notes: "", value_gp: 0 });
-        this.refresh("inventory");
-        this.sections.inventory.body.querySelector(".item:last-of-type input")?.focus();
-        this.changed("added item");
-      } }, "+ Add item"),
-    );
-  }
-
-  // Bonuses at `path` (the sheet's, or an item's), shown in section `key`.
+  // Bonuses at `path`, shown in section `key`. Items' bonuses are on what the item is (inventory.js).
   bonuses(key, path) {
     const list = getPath(this.sheet, path);
     return h("div.rows.bonuses",
@@ -902,8 +878,9 @@ export class SheetView {
     return out;
   }
 
-  exportJson() {
-    const blob = new Blob([JSON.stringify(this.sheet, null, 2)], { type: "application/json" });
+  async exportJson() {
+    const file = await api("GET", `/api/characters/${this.id}/export`);  // the sheet, and what they carry
+    const blob = new Blob([JSON.stringify(file, null, 2)], { type: "application/json" });
     const a = h("a", { href: URL.createObjectURL(blob), download: `${this.sheet.name}.json` });
     a.click();
     URL.revokeObjectURL(a.href);

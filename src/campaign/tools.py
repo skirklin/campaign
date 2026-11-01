@@ -14,8 +14,9 @@ from typing import Any, Callable
 from pydantic import ValidationError
 
 from . import encounters, tables
-from .charsheet import CharacterSheet, PartyStash, merge_patch
+from .charsheet import Bonus, CharacterFile, CharacterSheet, ItemMechanics, merge_patch
 from .db import Campaign, Store
+from .inventory import Inventory, InventoryError
 from .world import TREASURE, World
 
 
@@ -71,6 +72,21 @@ def _brief_entity(r: dict[str, Any]) -> dict[str, Any]:
         "current": r["current"],
         "headline": headline if len(headline) <= 200 else headline[:197] + "…",
     }
+
+
+def _brief_holding(h: dict[str, Any]) -> dict[str, Any]:
+    """One of the party's items, for a conversation: only what's set."""
+    out: dict[str, Any] = {"id": h["id"], "name": h["name"]}
+    if h["qty"] != 1:
+        out["qty"] = h["qty"]
+    for k in ("notes", "value_gp", "bonuses", "requires_attunement", "equipped", "attuned"):
+        if h[k]:
+            out[k] = h[k]
+    if h["item"] and h["item"]["name"] and h["item"]["name"] != h["name"]:
+        out["world_item"] = h["item"]["name"]
+    if h["item"] and h["item"].get("secret"):
+        out["definition_secret"] = True  # the party doesn't know what it does
+    return out
 
 
 def _page(items: list[Any], offset: int, name: str) -> dict[str, Any]:
@@ -300,7 +316,7 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         """What the book puts at a place or on a creature (coins, items, magic), still there unless taken.
 
         When the party takes some, end that fact (end_fact) and add it to the
-        party stash (update_party_stash) or to whoever took it.
+        party's inventory (add_items), held by the party or whoever took it.
 
         Args:
             place: A location, keyed area ("C3"), creature or NPC, by name or alias.
@@ -489,17 +505,20 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         if found is None:
             known = [c["name"] for c in store.characters(campaign_ids=[campaign.id])]
             return f"No character {name!r} in this campaign. Known: {', '.join(known) or 'none'}."
-        sheet = CharacterSheet.model_validate(found["sheet"])
-        return _json({"sheet": found["sheet"], "derived": sheet.derived()})
+        inv = Inventory(store, campaign, ctx.user_id)
+        holder = inv.character_holder(found["id"])
+        return _json({"sheet": found["sheet"], "derived": inv.sheet(found).derived(),
+                      "carrying": [_brief_holding(h) for h in inv.holdings(holder)], "purse": inv.purse(holder)})
 
     def update_character(name: str, patch: dict[str, Any], reason: str) -> str:
         """Change a character sheet with a JSON merge patch; creates the character if new.
 
         Objects merge recursively, a null deletes a key, and lists are
         replaced whole, so read the sheet first and send the complete new
-        list when changing inventory, spells, attacks or resources.
-        Examples: {"hp": {"current": 17}}, {"currency": {"gp": 245}},
-        {"conditions": ["poisoned"]}.
+        list when changing spells, attacks or resources.
+        Examples: {"hp": {"current": 17}}, {"conditions": ["poisoned"]}.
+        What a character carries and their coin aren't on the sheet: they're
+        in the party's inventory (add_items, change_item, give_item, change_coin).
 
         Numbers are built from parts and summed when shown, so record the
         parts, never a total: ability scores (not modifiers); each attack's
@@ -537,6 +556,9 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
             reason: What happened, e.g. "took 9 damage from the ghoul".
         """
         found = _find_character(name)
+        if {"inventory", "currency"} & set(patch):
+            return ("Rejected: what a character carries and their coin are in the party's inventory;"
+                    " use add_items, change_item, give_item or change_coin.")
         updated = merge_patch(found["sheet"] if found else {"name": name}, patch)
         try:
             sheet = CharacterSheet.model_validate(updated)
@@ -548,7 +570,7 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
             store.create_character(sheet.model_dump(), campaign_id=campaign.id, owner_id=ctx.user_id, reason=reason)
         return f"Updated {sheet.name}: {reason}"
 
-    def create_character(sheet: CharacterSheet, reason: str = "created") -> str:
+    def create_character(sheet: CharacterFile, reason: str = "created") -> str:
         """Add a new player character to this campaign from a complete sheet.
 
         Use this to enter a character from a paper sheet, a scan, or a
@@ -586,7 +608,9 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         Great Weapon Master ["heavy", "melee"], to_hit -5, damage 10.
         Dice can scale:
         "(half_level:rogue)d6". The name is the name only; other names
-        go in nicknames.
+        go in nicknames. What they carry goes in inventory (an item that
+        gives a bonus carries it: the shield's +2 AC) and their coin in
+        currency; both go into the party's inventory, held by them.
 
         Args:
             sheet: The whole character sheet.
@@ -594,36 +618,127 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         """
         if _find_character(sheet.name):
             return f"{sheet.name} already exists in this campaign; use update_character to change the sheet."
-        character_id = store.create_character(sheet.model_dump(), campaign_id=campaign.id, owner_id=ctx.user_id,
-                                              reason=reason)
-        return _json({"created": character_id, "derived": sheet.derived()})
+        character_id = store.create_character(sheet.sheet().model_dump(), campaign_id=campaign.id,
+                                              owner_id=ctx.user_id, reason=reason)
+        inv = Inventory(store, campaign, ctx.user_id)
+        inv.bring_in(inv.character_holder(character_id), sheet.inventory, sheet.currency,
+                     reason=f"{sheet.name}'s, {reason}", run_id=ctx.run())
+        return _json({"created": character_id, "derived": inv.sheet(store.character(character_id)).derived()})
 
-    def get_party_stash() -> str:
-        """Read the party stash: items and coin the party holds in common, not on anyone's sheet."""
-        return _json(PartyStash.model_validate(store.party_stash(campaign.id)).model_dump())
+    # -- the party's inventory --------------------------------------------------------
 
-    def update_party_stash(patch: dict[str, Any], reason: str) -> str:
-        """Change the party stash with a JSON merge patch.
+    inv = Inventory(store, campaign, ctx.user_id)
 
-        Use it for loot the party takes but nobody claims, and the shared
-        purse. Lists are replaced whole, so read the stash first and send the
-        complete new item list. An item's value_gp is what one of it is
-        worth in gold (0 if unknown), for loot nobody will fuss with beyond
-        selling it. Examples: {"currency": {"gp": 340}},
-        {"items": [{"name": "Potion of healing", "qty": 3}]},
-        {"items": [{"name": "Black pearl", "value_gp": 1000}]}.
+    def _holder(name: str | None) -> int | None:
+        return inv.resolve_holder(name)
+
+    def _attempt(fn: Callable[[], str]) -> str:
+        try:
+            return fn()
+        except InventoryError as err:
+            return f"Not done: {err}"
+
+    def inventory() -> str:
+        """Everything the party owns, by who has it: the party's own (unclaimed loot, the shared purse),
+        each character, and anyone they've left things with. Each item has an id (for change_item and
+        give_item), and, if it does something, its definition: bonuses, attunement, worth."""
+        out = inv.overview()
+        return _json({"worth_gp": out["worth_gp"], "holders": [
+            {"holder": h["name"], "kind": h["kind"], "purse": {k: v for k, v in h["purse"].items() if v},
+             "items": [_brief_holding(i) for i in h["items"]]} for h in out["holders"]]})
+
+    def add_items(items: list[dict[str, Any]], reason: str, holder: str = "party") -> str:
+        """Add things the party now owns: loot, purchases, gifts.
+
+        Loot nobody has claimed goes to the party (the default); something a
+        character took for themselves goes to them. An item the world already
+        has (by name or alias) is linked to its definition; otherwise say what
+        it does afterwards with define_item if it does anything. Plain loot
+        just needs a name, and value_gp if it's worth something.
 
         Args:
-            patch: Merge patch against the current stash.
-            reason: What happened, e.g. "looted the ghoul nest".
+            items: Each {"name", "qty" (default 1), "notes", "value_gp" (each)}.
+            reason: Where it came from, e.g. "looted the ghoul nest".
+            holder: "party", or who has them: a character, or anyone else by name.
         """
-        updated = merge_patch(store.party_stash(campaign.id) or PartyStash().model_dump(), patch)
-        try:
-            stash = PartyStash.model_validate(updated)
-        except ValidationError as err:
-            return f"Rejected, stash would be invalid: {err}"
-        store.update_party_stash(campaign.id, stash.model_dump(), reason=reason, user_id=ctx.user_id)
-        return f"Updated the party stash: {reason}"
+        def run() -> str:
+            to = _holder(holder)
+            added = []
+            for i in items:
+                name, qty = str(i.get("name") or ""), int(i.get("qty") or 1)
+                inv.add(name, qty, to, str(i.get("notes") or ""), float(i.get("value_gp") or 0), reason=reason)
+                added.append(name + (f" ×{qty}" if qty != 1 else ""))
+            return f"Added for {inv.holder_name(to)}: {', '.join(added)}."
+        return _attempt(run)
+
+    def change_item(item_id: int, reason: str, name: str | None = None, qty: int | None = None,
+                    notes: str | None = None, value_gp: float | None = None, equipped: bool | None = None,
+                    attuned: bool | None = None) -> str:
+        """Change one of the party's items (an id from inventory): rename it, change how many, its notes or
+        what one is worth, equip or attune it. qty 0 removes it (sold, used up, lost).
+
+        Args:
+            item_id: The item's id from inventory.
+            reason: What happened, e.g. "drank one".
+        """
+        return _attempt(lambda: inv.change(item_id, reason, name=name, qty=qty, notes=notes, value_gp=value_gp,
+                                           equipped=equipped, attuned=attuned))
+
+    def give_item(item_id: int, to: str, reason: str = "", qty: int | None = None) -> str:
+        """Hand some or all of an item to someone: a character claiming it, one character giving it to
+        another, putting it back with the party's things ("party"), or leaving it with an NPC.
+
+        Args:
+            item_id: The item's id from inventory.
+            to: "party", a character, or anyone else by name (added as an NPC if the world doesn't know them).
+            qty: How many; all of them if not given.
+        """
+        return _attempt(lambda: inv.move(item_id, _holder(to), qty, reason))
+
+    def change_coin(holder: str, change: dict[str, int], reason: str, to: str | None = None) -> str:
+        """Gain or spend coin, or hand it over. A change, not a total: {"gp": 120} gains 120 gp,
+        {"gp": -15} spends 15. With `to`, the (positive) amounts move from holder to them.
+
+        Args:
+            holder: "party" for the shared purse, or a character.
+            change: Coins by kind: cp, sp, ep, gp, pp.
+            reason: What happened.
+            to: Who gets it, when handing coin over: "party", a character, or anyone else.
+        """
+        if to is not None:
+            return _attempt(lambda: inv.give_coin(_holder(holder), _holder(to), change, reason))
+        return _attempt(lambda: inv.coin(_holder(holder), change, reason))
+
+    def split_party_coin(reason: str = "") -> str:
+        """Share the party's purse evenly among the characters; what doesn't divide stays with the party."""
+        return _attempt(lambda: inv.split(reason))
+
+    def define_item(name: str, bonuses: list[Bonus] | None = None, requires_attunement: bool = False,
+                    value_gp: float = 0, party_knows: bool = True, item_id: int | None = None) -> str:
+        """Say what an item does: the world item's definition, shared by every copy the party has.
+
+        Its bonuses count for whoever has it equipped (and attuned, if it
+        needs attunement), as bonuses do on a sheet: {target, amount}, e.g.
+        {"target": "ac", "amount": 1}. With item_id, that holding is linked
+        to the definition. party_knows false keeps it from the players until
+        they identify it (they see the holding, not what it does).
+
+        Args:
+            name: The item, e.g. "Cloak of Protection". Made in the world if new.
+            bonuses: What it adds to while equipped.
+            requires_attunement: Whether it only works attuned.
+            value_gp: What one is worth, in gold.
+            party_knows: Whether the party knows what it does.
+            item_id: A holding (from inventory) to link to it.
+        """
+        def run() -> str:
+            m = ItemMechanics(requires_attunement=requires_attunement, bonuses=bonuses or [], value_gp=value_gp)
+            linked = inv.holding(item_id)["item"] if item_id is not None else None
+            entity = inv.define(name, m, party_knows, item_id=linked["id"] if linked else None, run_id=ctx.run())
+            if item_id is not None:
+                inv.link(item_id, entity)
+            return f"{name}: {m.describe()}" + ("" if party_knows else " (the party doesn't know yet)")
+        return _attempt(run)
 
     readers = [
         list_sources,
@@ -641,8 +756,9 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         list_sessions,
         recent_journal,
         get_character,
-        get_party_stash,
+        inventory,
     ]
     writers = [record_fact, end_fact, retract_fact, party_learned, add_journal_entry, delete_journal_entry,
-               update_character, create_character, update_party_stash]
+               update_character, create_character, add_items, change_item, give_item, change_coin,
+               split_party_coin, define_item]
     return readers + (writers if writable else [])

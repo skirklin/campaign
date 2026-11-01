@@ -5,12 +5,13 @@
 // resources as pips, coin and item counts with steppers, conditions as
 // toggles. Tapping a number rolls it. It shares SheetView's saving, so a tap
 // writes into `this.sheet` and the debounced save sends it; HP and rests go
-// through the server's endpoints, which apply the rules there.
+// through the server's endpoints, which apply the rules there. What the
+// character carries is in the party's inventory (inventory.js), on the Gear tab.
 
-import { api, h, toast, sign, bottomSheet, keypad, askQty, backCloses, worth } from "./util.js";
-import { StashView } from "./stash.js";
+import { api, h, toast, sign, bottomSheet, keypad, backCloses } from "./util.js";
+import { targetLabel } from "./inventory.js";
 import { d, fmtMod, parseExpr, formatExpr, rollExpr } from "./dice.js";
-import { SheetView, ABILITIES, ABILITY_NAMES, SKILLS, CONDITIONS, COINS } from "./sheet.js";
+import { SheetView, ABILITIES, ABILITY_NAMES, SKILLS, CONDITIONS } from "./sheet.js";
 
 // Rolls remembered per character on this device.
 const ROLLS_KEPT = 100;
@@ -284,7 +285,7 @@ export class PlayView extends SheetView {
   // "+2 STR damage, +1 AC" from the bonuses that count while it's on.
   statusEffects(st) {
     const name = st.name.toLowerCase();
-    const bonuses = [...this.sheet.bonuses, ...this.sheet.inventory.filter((it) => it.equipped).flatMap((it) => it.bonuses || [])];
+    const bonuses = [...this.sheet.bonuses, ...this.gearBonuses()];
     return bonuses.filter((b) => b.during && b.during.toLowerCase() === name && b.active)
       .map((b) => `${typeof b.amount === "number" ? sign(b.amount) : `+${b.amount}`} ${targetLabel(b.target)}`).join(", ");
   }
@@ -428,62 +429,15 @@ export class PlayView extends SheetView {
   gear() {
     const s = this.sheet;
     return [
-      block("Coin", h("div.play-coins", COINS.map((c) => h("button.play-coin", {
-        onclick: () => this.coinSheet(c), disabled: !this.canEdit, "aria-label": `${s.currency[c] || 0} ${c}. Change`,
-      }, h("strong", s.currency[c] || 0), h("span", c))))),
-      block("Inventory", s.inventory.length === 0 ? h("p.empty", "Nothing carried.") : h("div.play-list", s.inventory.map((item) =>
-        h("div.play-row.item",
-          h("button.link.row-main", { onclick: () => this.itemSheet(item), "aria-label": `${item.name}: more` },
-            h("span", item.name || "Item", item.equipped && h("small.equipped", " equipped"), item.attuned && h("small.equipped", " attuned")),
-            item.notes && h("small.muted", item.notes)),
-          this.stepper(item.qty, (n) => { item.qty = Math.max(0, n); this.changed(`${item.name} ×${item.qty}`); }))))),
-      this.stash().el,
+      this.carried().el,
       s.features.length > 0 && block("Features & traits", h("ul.play-bullets", s.features.map((f) => h("li", f)))),
       s.proficiencies.length > 0 && block("Proficiencies & languages", h("p", s.proficiencies.join(", "))),
     ];
   }
 
-  // The party stash, taking into and putting in from this character. Kept across redraws.
-  stash() {
-    if (!this.canEdit) return { el: null };
-    return (this.stashView ||= new StashView(this.campaign.slug, {
-      character: this.id,
-      beforeMove: () => this.flush(),
-      onCharacter: (r) => {
-        Object.assign(this, { sheet: r.sheet, derived: r.derived, log: r.log, files: r.files || this.files });
-        // The stash changed too, which undo can't take back: start over from here.
-        this.shadow = structuredClone(this.sheet);
-        this.undoStack = [];
-        this.rerender();  // what's equipped changes AC and the rest
-      },
-    }));
-  }
-
-  // An item: its notes and bonuses, equipping and attuning it, and putting it in the stash.
-  itemSheet(item) {
-    const toggle = (key, label) => h("label.play-toggle",
-      h("input", {
-        type: "checkbox", checked: item[key], disabled: !this.canEdit,
-        onchange: (e) => {
-          item[key] = e.target.checked;
-          this.changed(`${item.name} ${e.target.checked ? "" : "un"}${key}`);  // the save brings back the new AC etc.
-          this.renderPanel();
-        },
-      }), label);
-    const bonuses = item.bonuses || [];
-    const dialog = bottomSheet(item.name || "Item",
-      item.notes ? h("p", item.notes) : h("p.muted", "No notes. Add them in Edit."),
-      item.value_gp > 0 && h("p.muted.small", `Worth ${worth(item.value_gp)}${item.qty !== 1 ? ` each, ${worth(item.value_gp * item.qty)} in all` : ""}`),
-      bonuses.length > 0 && h("p.muted.small", bonuses.map((b) => `${typeof b.amount === "number" ? sign(b.amount) : b.amount} ${b.target}`).join(", ")
-        + (item.requires_attunement ? " · needs attunement" : "")),
-      h("div.item-toggles", toggle("equipped", "Equipped"), item.requires_attunement && toggle("attuned", "Attuned")),
-      this.canEdit && h("button.wide", {
-        onclick: async () => {
-          dialog.close();
-          const qty = await askQty(`Put ${item.name} in the party stash`, item.qty, "Put in the stash");
-          if (qty) this.stash().move("stash", { [item.name]: qty });
-        },
-      }, "Put in the party stash"));
+  // Bonuses from what they have equipped (as the server worked it out: attunement, the item's definition).
+  gearBonuses() {
+    return (this.inventory?.items || []).filter((i) => i.active).flatMap((i) => i.bonuses || []);
   }
 
   notesTab() {
@@ -573,26 +527,6 @@ export class PlayView extends SheetView {
         h("button.ok-solid", { onclick: go((n) => this.action("POST", `/api/characters/${this.id}/hp`, { delta: n }, `healed ${n}`)) }, "Heal"),
         h("button", { onclick: go((n) => { this.sheet.hp.temp = n; this.changed(`temp hp ${n}`); this.rerender(); }) }, "Set temp")),
     );
-  }
-
-  coinSheet(coin) {
-    const cur = this.sheet.currency;
-    let amount = 0;
-    const go = (dir) => () => {
-      if (!amount) return;
-      dialog.close();
-      const next = (cur[coin] || 0) + dir * amount;
-      if (next < 0) return toast(`Only ${cur[coin] || 0} ${coin}.`, true);
-      cur[coin] = next;
-      this.changed(`${dir > 0 ? "+" : "−"}${amount} ${coin}`);
-      this.renderPanel();
-    };
-    const dialog = bottomSheet(`${coin.toUpperCase()}: ${cur[coin] || 0}`,
-      ...keypad((n) => (amount = n)),
-      h("div.hp-buttons",
-        h("button.danger-solid", { onclick: go(-1) }, "Spend"),
-        h("button.ok-solid", { onclick: go(1) }, "Gain"),
-        h("button", { onclick: () => { if (!amount) return; dialog.close(); this.stash().move("stash", {}, { [coin]: amount }); } }, "To stash")));
   }
 
   // Start or end a status. Starting one spends a use of its resource (Rage), and
@@ -702,7 +636,7 @@ export class PlayView extends SheetView {
   // Statuses that change this attack's numbers (Rage): offered as toggles before rolling.
   attackStatuses(i) {
     const a = this.sheet.attacks[i];
-    const bonuses = [...this.sheet.bonuses, ...this.sheet.inventory.filter((it) => it.equipped).flatMap((it) => it.bonuses || [])];
+    const bonuses = [...this.sheet.bonuses, ...this.gearBonuses()];
     const names = new Set(bonuses.filter((b) => b.during && /^(attack|damage)/.test(b.target)).map((b) => b.during.toLowerCase()));
     return a ? this.sheet.statuses.filter((st) => names.has(st.name.toLowerCase())) : [];
   }
@@ -1029,16 +963,6 @@ function partRows(v) {
 }
 
 const capFirst = (s) => s.charAt(0).toUpperCase() + s.slice(1);
-
-// "damage:str" -> "STR damage", "save" -> "saves", "ac" -> "AC".
-function targetLabel(t) {
-  const [what, which] = t.split(":");
-  const names = { ac: "AC", hp_max: "max HP", speed: "speed", initiative: "initiative", attack: "to hit", damage: "damage",
-    save: "saves", skill: "skills", check: "checks", passive_perception: "passive Perception", spell_dc: "spell DC",
-    spell_attack: "spell attack", score: "", score_set: "" };
-  const base = names[what] ?? what;
-  return which ? `${which.length <= 3 ? which.toUpperCase() : which} ${base}`.trim() : base;
-}
 
 function loadCombat(id) {
   try {

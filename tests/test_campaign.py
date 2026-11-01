@@ -4,7 +4,8 @@ from pathlib import Path
 import pymupdf
 import pytest
 
-from campaign.charsheet import Attack, Bonus, CharacterSheet, Damage, Item, PartyStash, Status, merge_patch, move, rest
+from campaign.charsheet import Attack, Bonus, CharacterFile, CharacterSheet, Damage, Item, ItemMechanics, Status, merge_patch, rest
+from campaign.inventory import Inventory, InventoryError
 from campaign.db import Store
 from campaign.ingest import chunk_file, chunk_markdown
 from campaign.tools import ToolContext, build_tools
@@ -74,14 +75,16 @@ def test_read_only_tools_exclude_writers(store):
 
 def test_character_sheet_derived_and_patch(store):
     store.create_campaign("Chars", "player")
-    sheet = CharacterSheet.model_validate_json(EXAMPLE.read_text())
-    d = sheet.derived()
-    assert d["proficiency_bonus"] == 2
+    file = CharacterFile.model_validate_json(EXAMPLE.read_text())
+    sheet = file.sheet()
+    d = file.worn().derived()
+    assert d["proficiency_bonus"] == 2 and d["ac"]["total"] == 18  # the shield counts while it's equipped
     assert d["saves"]["wis"]["total"] == 5 and d["skills"]["insight"]["total"] == 5
     assert d["spell_save_dc"]["total"] == 13 and d["passive_perception"]["total"] == 13
 
     t = tools(store, "chars")
     t["update_character"](name=sheet.name, patch=sheet.model_dump(), reason="import")
+    assert "Rejected" in t["update_character"](name=sheet.name, patch={"currency": {"gp": 5}}, reason="bad")
     assert "Updated" in t["update_character"](name=sheet.name, patch={"hp": {"current": 10}}, reason="ghoul")
     assert "Rejected" in t["update_character"](name=sheet.name, patch={"hp": {"current": "lots"}}, reason="bad")
     saved = json.loads(t["get_character"](name=sheet.name))
@@ -96,7 +99,7 @@ def parts(value):
 
 def test_numbers_follow_the_character():
     """Numbers are kept as parts: change a score or a level and everything built on it moves."""
-    sheet = CharacterSheet.model_validate_json(EXAMPLE.read_text())
+    sheet = CharacterFile.model_validate_json(EXAMPLE.read_text()).worn()
     d = sheet.derived()
     assert d["attacks"][0]["to_hit"]["total"] == 4 and d["attacks"][0]["text"] == "1d8+2 bludgeoning"
     assert parts(d["ac"]) == {"Chain mail": 16, "Shield": 2}
@@ -116,9 +119,9 @@ def test_numbers_follow_the_character():
     sheet.inventory[2].equipped = False  # shield off
     sheet.inventory.append(Item(name="Cloak of protection", equipped=True, requires_attunement=True,
                                 bonuses=[Bonus(target="ac", amount=1), Bonus(target="save", amount=1)]))
-    assert sheet.derived()["ac"]["total"] == 16
+    assert sheet.worn().derived()["ac"]["total"] == 16
     sheet.inventory[-1].attuned = True
-    d = sheet.derived()
+    d = sheet.worn().derived()
     assert parts(d["ac"]) == {"Chain mail": 16, "Cloak of protection": 1}
     assert parts(d["saves"]["dex"]) == {"Cloak of protection": 1}  # DEX +0 isn't listed
 
@@ -163,50 +166,111 @@ def test_sheets_from_before_parts_keep_their_numbers():
         Bonus(target="ac", amount="lots")
 
 
-def test_moving_between_a_character_and_the_party_stash():
-    sheet = CharacterSheet.model_validate_json(EXAMPLE.read_text())
-    stash = PartyStash(items=[{"name": "Potion of Healing", "qty": 3}], currency={"gp": 100})
-    # Taking stacks onto what the character has, by name, ignoring case.
-    assert move(sheet, stash, "character", {"potion of healing": 2}, {"gp": 40}) == "Potion of Healing ×2, 40 gp"
-    assert next(i for i in sheet.inventory if i.name == "Potion of healing").qty == 4
-    assert stash.items[0].qty == 1 and stash.currency["gp"] == 60 and sheet.currency["gp"] == 78
-    # Putting in moves the whole stack when it's all of it, and makes a stash item.
-    move(sheet, stash, "stash", {"Shield": 1})
-    assert "Shield" not in [i.name for i in sheet.inventory] and stash.items[-1].name == "Shield"
-    # A magic item keeps its bonuses through the stash; it comes out unequipped.
-    sheet.inventory.append(Item(name="Cloak of protection", equipped=True, attuned=True, requires_attunement=True,
-                                bonuses=[Bonus(target="ac", amount=1)]))
-    move(sheet, stash, "stash", {"Cloak of protection": 1})
-    move(sheet, stash, "character", {"Cloak of protection": 1})
-    cloak = sheet.inventory[-1]
-    assert cloak.bonuses[0].amount == 1 and cloak.requires_attunement and not cloak.equipped and not cloak.attuned
-    # Its worth is per item, so it holds when a stack is split.
-    stash.items.append(Item(name="Gold idol", qty=3, value_gp=250))
-    move(sheet, stash, "character", {"Gold idol": 1})
-    assert sheet.inventory[-1].value_gp == 250 and stash.items[-1].qty == 2 and stash.items[-1].value_gp == 250
-    # Not enough changes nothing.
-    before = (sheet.model_dump(), stash.model_dump())
-    with pytest.raises(ValueError, match="only 1"):
-        move(sheet, stash, "character", {"Potion of Healing": 1, "Shield": 2})
-    with pytest.raises(ValueError, match="only 60 gp"):
-        move(sheet, stash, "character", {}, {"gp": 61})
-    with pytest.raises(ValueError, match="nothing"):
-        move(sheet, stash, "stash")
-    assert (sheet.model_dump(), stash.model_dump()) == before
+def test_the_party_inventory(store):
+    """One list of everything the party owns: claiming, giving and putting back are changes of hands."""
+    camp = store.create_campaign("Loot", "dm")
+    inv = Inventory(store, camp)
+    agrippa = inv.character_holder(store.create_character(CharacterSheet(name="Agrippa").model_dump(), camp.id))
+    brannoc = inv.character_holder(store.create_character(CharacterSheet(name="Brannoc").model_dump(), camp.id))
+    potions = inv.add("Potion of Healing", 3, reason="the crypt")
+    pearl = inv.add("Black pearl", value_gp=1000)
+    assert inv.add("potion of healing", 2) == potions and inv.holding(potions)["qty"] == 5  # the same thing stacks
+
+    # Claiming part of a stack splits it; claiming the rest joins the claimed part.
+    assert inv.move(potions, agrippa, 2) == "Agrippa took Potion of Healing ×2"
+    mine = inv.holdings(agrippa)[0]
+    assert mine["qty"] == 2 and inv.holding(potions)["qty"] == 3
+    inv.move(potions, agrippa)
+    assert [(h["name"], h["qty"]) for h in inv.holdings(agrippa)] == [("Potion of Healing", 5)]
+    assert [h["name"] for h in inv.holdings(None)] == ["Black pearl"]
+    inv.change(mine["id"], equipped=True)
+    assert inv.move(mine["id"], brannoc, 1) == "Agrippa gave Potion of Healing to Brannoc"
+    assert not inv.holdings(brannoc)[0]["equipped"]  # it arrives unequipped
+    with pytest.raises(InventoryError, match="only 4"):
+        inv.move(mine["id"], None, 5)
+    vulkan = inv.resolve_holder("Vulkan")  # someone the world didn't know is an NPC now
+    inv.move(pearl, vulkan, reason="to set in the trident")
+    assert inv.world.entity(vulkan)["kind"] == "npc" and inv.holdings(vulkan)[0]["name"] == "Black pearl"
+    assert inv.change(mine["id"], qty=0).startswith("Potion of Healing ×4 gone")
+
+    # Coin: changes, not totals; handing over; sharing the party's purse out evenly.
+    inv.coin(None, {"gp": 101, "sp": 3})
+    with pytest.raises(InventoryError, match="only has 101 gp"):
+        inv.coin(None, {"gp": -102})
+    inv.split()
+    assert inv.purse(agrippa)["gp"] == 50 and inv.purse(brannoc)["sp"] == 1 and inv.purse(None) == \
+        {"cp": 0, "sp": 1, "ep": 0, "gp": 1, "pp": 0}
+    inv.give_coin(agrippa, brannoc, {"gp": 10})
+    assert inv.purse(brannoc)["gp"] == 60
+
+    overview = inv.overview()
+    assert [h["name"] for h in overview["holders"]] == ["The party", "Agrippa", "Brannoc", "Vulkan"]
+    assert overview["worth_gp"] == 1000 + 1.1 + 40.1 + 60.1  # the pearl, then each purse
+    assert inv.log()[0]["text"] == "Agrippa gave 10 gp to Brannoc"
+    assert any("Black pearl" in r["statement"] for r in inv.world.timeline(vulkan))  # on the world's timeline too
 
 
-def test_party_stash_tools(store):
+def test_items_are_defined_once_and_counted_from_what_is_equipped(store):
+    """An item that does something points at its world item's definition; sheets count what's equipped."""
+    camp = store.create_campaign("Defs", "dm")
+    inv = Inventory(store, camp)
+    ch = store.create_character(CharacterSheet(name="Agrippa", ac={"base": 16, "abilities": []}).model_dump(), camp.id)
+    agrippa = inv.character_holder(ch)
+    cloak = ItemMechanics(requires_attunement=True, bonuses=[Bonus(target="ac", amount=1)], value_gp=500)
+    item = inv.define("Cloak of Protection", cloak)
+    held = inv.add("cloak of protection", holder_id=agrippa)  # by name, linked to the definition
+    assert inv.holding(held)["item"]["id"] == item and inv.holding(held)["value_gp"] == 500
+    assert inv.sheet(store.character(ch)).derived()["ac"]["total"] == 16
+    inv.change(held, equipped=True, attuned=True)
+    assert inv.sheet(store.character(ch)).derived()["ac"]["total"] == 17
+    # Fixing the definition fixes it for every copy.
+    inv.define("Cloak of Protection", cloak.model_copy(update={"bonuses": [Bonus(target="ac", amount=2)]}))
+    assert inv.sheet(store.character(ch)).derived()["ac"]["total"] == 18
+    assert inv.world.held_by(item) == [{"holder": "Agrippa", "qty": 1}]
+
+    # A secret definition: the DM's sheet counts it, a player's doesn't, and a player can't overwrite it.
+    sword = inv.add("Xiphos sword of magical", holder_id=agrippa)
+    secret = inv.define("Sword of Vengeance", ItemMechanics(bonuses=[Bonus(target="attack", amount=-1)]), party_knows=False)
+    inv.link(sword, secret)
+    inv.change(sword, equipped=True)
+    from dataclasses import replace
+    player = Inventory(store, replace(camp, role="player"))
+    assert player.holding(sword)["item"] == {"id": None, "name": None, "defined": False, "secret": False}
+    assert player.holding(sword)["name"] == "Xiphos sword of magical"
+    assert inv.holding(sword)["item"]["secret"] and inv.holding(sword)["bonuses"]
+    with pytest.raises(InventoryError, match="DM"):
+        player.define("Sword of Vengeance", ItemMechanics())
+    assert [g.name for g in inv.gear(agrippa)] == ["cloak of protection", "Xiphos sword of magical"]
+    assert [g.name for g in player.gear(agrippa)] == ["cloak of protection"]
+
+    # A character file brings its gear in: items that do something get definitions.
+    file = CharacterFile.model_validate_json(EXAMPLE.read_text())
+    other = store.create_character(file.sheet().model_dump(), camp.id)
+    inv.bring_in(inv.character_holder(other), file.inventory, file.currency)
+    assert inv.sheet(store.character(other)).derived()["ac"]["total"] == 18  # chain mail 16 + the shield's 2
+    shield = next(h for h in inv.holdings(inv.character_holder(other)) if h["name"] == "Shield")
+    assert shield["item"]["name"] == "Shield" and inv.purse(inv.character_holder(other))["gp"] == 38
+    assert [i.name for i in inv.carried(inv.character_holder(other))] == [i.name for i in file.inventory]
+
+
+def test_party_inventory_tools(store):
     store.create_campaign("Loot", "dm")
     t = tools(store, "loot")
-    assert json.loads(t["get_party_stash"]())["items"] == []
-    assert "Updated" in t["update_party_stash"](patch={"currency": {"gp": 340}}, reason="the crypt")
-    assert "Rejected" in t["update_party_stash"](patch={"items": [{"qty": 2}]}, reason="bad")
-    t["update_party_stash"](patch={"items": [{"name": "Silver mirror", "value_gp": 25}]}, reason="the crypt")
-    stash = json.loads(t["get_party_stash"]())
-    assert stash["currency"]["gp"] == 340 and [(i["name"], i["qty"]) for i in stash["items"]] == [("Silver mirror", 1)]
-    assert stash["items"][0]["value_gp"] == 25
-    assert "Rejected" in t["update_party_stash"](patch={"items": [{"name": "Mirror", "value_gp": -1}]}, reason="bad")
-    assert [r["reason"] for r in store.party_stash_log(store.campaign("loot").id)] == ["the crypt", "the crypt"]
+    t["update_character"](name="Agrippa", patch={}, reason="new")
+    assert "Added for the party: Silver mirror, Potion of healing ×2" in t["add_items"](
+        items=[{"name": "Silver mirror", "value_gp": 25}, {"name": "Potion of healing", "qty": 2}], reason="the crypt")
+    assert "Not done" in t["add_items"](items=[{"qty": 2}], reason="bad")
+    assert "+340 gp" in t["change_coin"](holder="party", change={"gp": 340}, reason="the crypt")
+    everything = json.loads(t["inventory"]())
+    party = everything["holders"][0]
+    assert party["purse"] == {"gp": 340} and party["items"][0] == {"id": 1, "name": "Silver mirror", "value_gp": 25}
+    assert t["give_item"](item_id=2, to="Agrippa", qty=1) == "Agrippa took Potion of healing"
+    assert "AC" not in t["define_item"](name="Ring of Protection", item_id=1, requires_attunement=True,
+                                        bonuses=[{"target": "ac", "amount": 1}], value_gp=3500)
+    mirror = json.loads(t["inventory"]())["holders"][0]["items"][0]
+    assert mirror["world_item"] == "Ring of Protection" and mirror["requires_attunement"]
+    character = json.loads(t["get_character"](name="Agrippa"))
+    assert character["carrying"] == [{"id": 3, "name": "Potion of healing"}]
 
 
 def test_merge_patch():
@@ -251,11 +315,11 @@ def test_situational_damage_and_dice_that_scale_with_a_class():
 
 
 def test_items_can_raise_or_set_ability_scores():
-    sheet = CharacterSheet(name="Cid", classes=[{"name": "Barbarian", "level": 7}], abilities={"str": 17, "cha": 10},
-                           skill_proficiencies=["athletics"], inventory=[
+    sheet = CharacterFile(name="Cid", classes=[{"name": "Barbarian", "level": 7}], abilities={"str": 17, "cha": 10},
+                          skill_proficiencies=["athletics"], inventory=[
         Item(name="Breastplate of Mytros", equipped=True, bonuses=[Bonus(target="score:cha", amount=1)]),
         Item(name="Gauntlets of Ogre Power", equipped=True, bonuses=[Bonus(target="score_set:str", amount=19)]),
-    ])
+    ]).worn()
     d = sheet.derived()
     assert parts(d["scores"]["cha"]) == {"Base": 10, "Breastplate of Mytros": 1} and d["modifiers"]["cha"] == 0
     assert d["scores"]["str"]["total"] == 19 and d["skills"]["athletics"]["total"] == 4 + 3
@@ -342,3 +406,32 @@ def test_markdown_footnotes_travel_with_what_cites_them():
     assert "bone knight_ (Source: _Eberron: Rising from the Last War_) stat block" in text
     assert "roll (A d10, or a d20 for big parties.) on the table" in text
     assert "[^" not in text and "]:" not in text
+
+
+def test_inventories_and_the_stash_move_into_the_party_inventory(tmp_path):
+    """v15: what sheets carried, and the party stash, become holdings and purses."""
+    from campaign.db import V12_PARTY_STASH
+
+    db = tmp_path / "old.db"
+    s = Store(db)
+    camp = s.create_campaign("Odyssey", "dm")
+    old = json.loads(EXAMPLE.read_text())  # a sheet as v14 kept it, inventory and coin and all
+    cid = s.create_character(old, camp.id)
+    s.conn.executescript(f"DROP TABLE inventory_log; DROP TABLE purses; DROP TABLE holdings; {V12_PARTY_STASH}"
+                         " PRAGMA user_version = 14;")
+    s.conn.execute("INSERT INTO party_stash VALUES (?, ?, 'then')", (camp.id, json.dumps(
+        {"items": [{"name": "Black pearl", "value_gp": 1000}], "currency": {"gp": 809, "pp": 56}})))
+    s.conn.commit()
+    s.close()
+
+    s = Store(db)  # migrates
+    inv = Inventory(s, camp)
+    ch = s.character(cid)
+    assert "inventory" not in ch["sheet"] and "currency" not in ch["sheet"]
+    holder = inv.character_holder(cid)
+    assert [i.name for i in inv.carried(holder)] == [i["name"] for i in old["inventory"]]
+    assert inv.purse(holder)["sp"] == 14 and inv.sheet(ch).derived()["ac"]["total"] == 18  # the shield, now defined
+    assert inv.holdings(None)[0]["name"] == "Black pearl" and inv.holdings(None)[0]["value_gp"] == 1000
+    assert inv.purse(None) == {"cp": 0, "sp": 0, "ep": 0, "gp": 809, "pp": 56}
+    assert not s.conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'party_stash'").fetchone()
+    s.close()

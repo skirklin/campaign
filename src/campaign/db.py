@@ -498,6 +498,119 @@ V14_CHAT_USAGE = """
 ALTER TABLE conversation_messages ADD COLUMN usage TEXT;  -- JSON, or NULL
 """
 
+# v15: one party inventory (inventory.py). Everything the party owns is a
+# holding, held by the party (unclaimed: holder_id NULL), a character (their
+# world entity) or anyone else in the world (left with an NPC). A holding of
+# an item that does something points at the world item that defines it (a
+# "mechanics" fact), so its details are never copied. Coin is in purses, one
+# per holder. Characters' inventories and coin, and the party stash, move in.
+V15_INVENTORY = """
+CREATE TABLE holdings (
+    id          INTEGER PRIMARY KEY,
+    campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    holder_id   INTEGER REFERENCES entities(id) ON DELETE SET NULL,  -- NULL: the party's, unclaimed
+    item_id     INTEGER REFERENCES entities(id) ON DELETE SET NULL,  -- the world item defining it, if any
+    name        TEXT NOT NULL,                  -- what the party calls it
+    qty         INTEGER NOT NULL CHECK (qty > 0),
+    equipped    INTEGER NOT NULL DEFAULT 0,
+    attuned     INTEGER NOT NULL DEFAULT 0,
+    notes       TEXT NOT NULL DEFAULT '',       -- about this one: "needs repair"
+    value_gp    REAL NOT NULL DEFAULT 0,        -- each, when no definition says
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+CREATE INDEX holdings_campaign ON holdings(campaign_id, holder_id);
+CREATE INDEX holdings_item ON holdings(item_id);
+CREATE TABLE purses (
+    id          INTEGER PRIMARY KEY,
+    campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    holder_id   INTEGER REFERENCES entities(id) ON DELETE CASCADE,  -- NULL: the party's purse
+    coins       TEXT NOT NULL                   -- JSON: {"cp": 0, "sp": 0, "ep": 0, "gp": 0, "pp": 0}
+);
+CREATE UNIQUE INDEX purses_holder ON purses(campaign_id, holder_id) WHERE holder_id IS NOT NULL;
+CREATE UNIQUE INDEX purses_party ON purses(campaign_id) WHERE holder_id IS NULL;
+CREATE TABLE inventory_log (
+    id          INTEGER PRIMARY KEY,
+    campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    session     INTEGER NOT NULL,
+    text        TEXT NOT NULL,
+    item_id     INTEGER REFERENCES entities(id) ON DELETE SET NULL,
+    from_holder INTEGER REFERENCES entities(id) ON DELETE SET NULL,
+    to_holder   INTEGER REFERENCES entities(id) ON DELETE SET NULL,
+    user_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX inventory_log_campaign ON inventory_log(campaign_id, id);
+"""
+
+
+def _v15_inventory(conn: sqlite3.Connection) -> None:
+    from .charsheet import Item, no_coins  # charsheet imports nothing of ours
+
+    for statement in V15_INVENTORY.split(";"):
+        if statement.strip():
+            conn.execute(statement)
+    stamp = now()
+    runs: dict[int, int] = {}
+
+    def definition(campaign_id: int, item: Item) -> int | None:
+        """The world item an item with bonuses is, given those bonuses if it has none yet."""
+        mechanics = item.mechanics
+        if mechanics is None:
+            return None
+        row = conn.execute("SELECT id FROM entities WHERE campaign_id = ? AND kind = 'item' AND name = ? COLLATE NOCASE",
+                           (campaign_id, item.name.strip())).fetchone()
+        entity_id = row[0] if row else conn.execute(
+            "INSERT INTO entities (campaign_id, kind, name, created_at) VALUES (?, 'item', ?, ?)",
+            (campaign_id, item.name.strip(), stamp)).lastrowid
+        if not conn.execute("SELECT 1 FROM facts WHERE entity_id = ? AND attribute = 'mechanics' AND valid_to IS NULL",
+                            (entity_id,)).fetchone():
+            session = conn.execute("SELECT coalesce(max(number), 0) FROM sessions WHERE campaign_id = ?",
+                                   (campaign_id,)).fetchone()[0]
+            if campaign_id not in runs:
+                runs[campaign_id] = conn.execute(
+                    "INSERT INTO runs (campaign_id, kind, session, label, created_at) VALUES (?, 'manual', ?, ?, ?)",
+                    (campaign_id, session, "item definitions from character sheets", stamp)).lastrowid
+            conn.execute(
+                "INSERT INTO facts (campaign_id, entity_id, attribute, value, statement, valid_from, party_knows_from,"
+                " run_id, created_at) VALUES (?, ?, 'mechanics', ?, ?, ?, ?, ?, ?)",
+                (campaign_id, entity_id, mechanics.model_dump_json(), f"{item.name.strip()}: {mechanics.describe()}",
+                 session, session, runs[campaign_id], stamp))
+        return entity_id
+
+    def move_in(campaign_id: int, holder_id: int | None, items: list[Any], coins: dict[str, Any]) -> None:
+        for raw in items:
+            item = Item.model_validate({**raw, "qty": max(1, int(raw.get("qty", 1) or 1))})
+            item_id = definition(campaign_id, item)
+            conn.execute(
+                "INSERT INTO holdings (campaign_id, holder_id, item_id, name, qty, equipped, attuned, notes, value_gp,"
+                " created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (campaign_id, holder_id, item_id, item.name.strip(), item.qty, item.equipped, item.attuned, item.notes,
+                 0 if item_id else item.value_gp, stamp, stamp))
+        conn.execute("INSERT INTO purses (campaign_id, holder_id, coins) VALUES (?, ?, ?)",
+                     (campaign_id, holder_id, json.dumps(no_coins() | {k: int(v) for k, v in coins.items()})))
+
+    for ch in conn.execute("SELECT id, campaign_id, name, sheet, entity_id FROM characters").fetchall():
+        sheet = json.loads(ch[3])
+        entity_id = ch[4]
+        if entity_id is None:  # every character is a pc in its world; linked here if it wasn't yet
+            row = conn.execute(
+                "SELECT id FROM entities WHERE campaign_id = ? AND kind = 'pc' AND name = ? COLLATE NOCASE"
+                " AND id NOT IN (SELECT entity_id FROM characters WHERE entity_id IS NOT NULL)", (ch[1], ch[2])).fetchone()
+            taken = conn.execute("SELECT 1 FROM entities WHERE campaign_id = ? AND kind = 'pc' AND name = ? COLLATE NOCASE",
+                                 (ch[1], ch[2])).fetchone()
+            entity_id = row[0] if row else conn.execute(
+                "INSERT INTO entities (campaign_id, kind, name, created_at) VALUES (?, 'pc', ?, ?)",
+                (ch[1], f"{ch[2]} (#{ch[0]})" if taken else ch[2], stamp)).lastrowid
+            conn.execute("UPDATE characters SET entity_id = ? WHERE id = ?", (entity_id, ch[0]))
+        move_in(ch[1], entity_id, sheet.pop("inventory", []), sheet.pop("currency", {}))
+        conn.execute("UPDATE characters SET sheet = ? WHERE id = ?", (json.dumps(sheet), ch[0]))
+    for campaign_id, stash in conn.execute("SELECT campaign_id, stash FROM party_stash").fetchall():
+        stash = json.loads(stash)
+        move_in(campaign_id, None, stash.get("items", []), stash.get("currency", {}))
+    conn.execute("DROP TABLE party_stash_log")
+    conn.execute("DROP TABLE party_stash")
+
 # Append only, for changes small enough to migrate.
 #
 # Deploys are rolling: the new server starts, and runs these, while the old
@@ -519,6 +632,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (12, V12_PARTY_STASH),
     (13, V13_CHARACTER_FILES),
     (14, V14_CHAT_USAGE),
+    (15, _v15_inventory),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 
@@ -665,9 +779,6 @@ class Store:
             for r in old.execute("SELECT l.id, l.character_id, l.change, l.reason, l.created_at FROM character_log l"
                                  " JOIN characters c ON c.id = l.character_id WHERE c.campaign_id IS NOT NULL"):
                 self.conn.execute("INSERT INTO character_log VALUES (?, ?, ?, ?, ?)", tuple(r))
-            if "party_stash" in tables:
-                for r in old.execute("SELECT campaign_id, stash, updated_at FROM party_stash"):
-                    self.conn.execute("INSERT INTO party_stash VALUES (?, ?, ?)", tuple(r))
             if "digests" in tables:
                 for r in old.execute("SELECT * FROM digests"):
                     self.conn.execute("INSERT INTO digests VALUES (?, ?, ?, ?, ?, ?, ?)", tuple(r))
@@ -1532,48 +1643,6 @@ class Store:
     def delete_character(self, character_id: int) -> bool:
         with self.conn:
             return self.conn.execute("DELETE FROM characters WHERE id = ?", (character_id,)).rowcount > 0
-
-    # -- the party stash -----------------------------------------------------
-
-    def party_stash(self, campaign_id: int) -> dict[str, Any]:
-        """The campaign's party stash as stored ({} if nothing's been put in it yet)."""
-        row = self.conn.execute("SELECT stash FROM party_stash WHERE campaign_id = ?", (campaign_id,)).fetchone()
-        return json.loads(row[0]) if row else {}
-
-    def update_party_stash(
-        self, campaign_id: int, stash: dict[str, Any], reason: str = "", user_id: int | None = None,
-        character: tuple[int, dict[str, Any], str] | None = None,
-    ) -> None:
-        """Save the stash; with `character` (id, sheet, reason), save that sheet in the same transaction."""
-        with self.conn:
-            self.conn.execute(
-                "INSERT INTO party_stash (campaign_id, stash, updated_at) VALUES (?, ?, ?)"
-                " ON CONFLICT (campaign_id) DO UPDATE SET stash = excluded.stash, updated_at = excluded.updated_at",
-                (campaign_id, json.dumps(stash), now()),
-            )
-            self.conn.execute(
-                "INSERT INTO party_stash_log (campaign_id, change, reason, user_id, created_at) VALUES (?, ?, ?, ?, ?)",
-                (campaign_id, json.dumps(stash), reason, user_id, now()),
-            )
-            if character is not None:
-                character_id, sheet, why = character
-                self.conn.execute(
-                    "UPDATE characters SET sheet = ?, updated_at = ? WHERE id = ?", (json.dumps(sheet), now(), character_id)
-                )
-                self._log_character(character_id, sheet, why)
-
-    def party_stash_version(self, campaign_id: int) -> int:
-        """Changes on each save, so an edit made against an older stash can be refused."""
-        row = self.conn.execute("SELECT MAX(id) FROM party_stash_log WHERE campaign_id = ?", (campaign_id,)).fetchone()
-        return row[0] or 0
-
-    def party_stash_log(self, campaign_id: int, limit: int = 30) -> list[dict[str, Any]]:
-        rows = self.conn.execute(
-            "SELECT l.created_at, l.reason, u.email AS who FROM party_stash_log l"
-            " LEFT JOIN users u ON u.id = l.user_id WHERE l.campaign_id = ? ORDER BY l.id DESC LIMIT ?",
-            (campaign_id, limit),
-        )
-        return [dict(r) for r in rows]
 
     def character_log(self, character_id: int, limit: int = 20) -> list[dict[str, Any]]:
         rows = self.conn.execute(

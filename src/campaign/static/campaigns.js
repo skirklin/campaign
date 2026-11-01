@@ -4,7 +4,7 @@
 import { api, h, toast, enc, whoami, canEdit, live, streamPost } from "./util.js";
 import { membersTab } from "./people.js";
 import { characterCard, newCharacterForm } from "./sheet.js";
-import { StashView } from "./stash.js";
+import { InventoryView } from "./inventory.js";
 import { renderMarkdown, inline, statBlockFromData } from "./markdown.js";
 import { encounterFence } from "./encounter.js";
 
@@ -299,10 +299,10 @@ async function partyTab(c) {
   const elsewhere = mine.filter((x) => x.mine && x.campaign.slug !== c.slug);
   const pick = h("select", { "aria-label": "Character to copy" },
     elsewhere.map((x) => h("option", { value: x.id }, `${x.name} (${x.campaign.name})`)));
-  const stash = new StashView(c.slug);
+  const inventory = new InventoryView(c.slug);
   return h("div",
     cards,
-    h("div.stash-wrap", stash.el),
+    h("div.inventory-wrap", inventory.el),
     h("h2.section-title", "Add a character"),
     newCharacterForm([], c),
     scanForm(c, jobs),
@@ -1049,7 +1049,7 @@ function factSections(c, e, t, isNow) {
     treasure.length > 0 && h("section.card.treasure",
       h("h2", "Treasure"),
       h("ul.facts", treasure.map((f) => factRow(f, inline(f.statement.slice(TREASURE.length))))),
-      isNow && h("p.muted.small", "When the party takes something, mark it no longer true (×) and add it to the party stash.")),
+      isNow && h("p.muted.small", "When the party takes something, mark it no longer true (×) and add it to the party's inventory (Party tab).")),
     ...statBlocks.map((f) => h("div.statblock-wrap",
       statBlockFromData(e.name, JSON.parse(f.value)), h("p.fact-meta", sourceLabel(f)))),
     maybe.length > 0 && h("section.card", h("h2", "Rumors and possibilities"),

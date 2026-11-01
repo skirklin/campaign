@@ -798,19 +798,24 @@ button.ok-solid { background: var(--ok); border-color: var(--ok); color: #fff; }
 .condition-grid button { padding: .65rem .4rem; text-transform: capitalize; border-radius: 10px; }
 .condition-grid button.on { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
 
-/* -- party stash ------------------------------------------------------------------ */
+/* -- the party's inventory ---------------------------------------------------------- */
 
-.stash-wrap { max-width: 40rem; }
-.stash .play-coins { margin-bottom: .4rem; }
-.stash .play-row .row-main { text-align: left; }
-.stash .play-row > button:not(.row-main) { padding: .35rem .8rem; }
-.stash-target { display: flex; align-items: center; gap: .5rem; margin-bottom: .5rem; font-size: .9rem; color: var(--muted); }
-.stash-target select { width: auto; flex: 1; }
-.stash-log { margin-top: .5rem; }
-.stash-log summary { cursor: pointer; }
+.inventory-wrap { max-width: 44rem; }
+.inventory { display: flex; flex-direction: column; gap: .6rem; }
+.inventory .holder .play-coins { margin-bottom: .4rem; }
+.inventory .holder.party { border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); }
+.inventory .holder.other { background: var(--surface-2); }
+.inventory .play-row .row-main { text-align: left; }
+.inventory .play-row > button:not(.row-main) { padding: .35rem .8rem; }
+.inventory-search { width: 100%; }
+.inventory-log summary { cursor: pointer; }
+.inventory .session-tag { color: var(--muted); font-variant-numeric: tabular-nums; }
+.magic { color: var(--accent); }
+.pick-list { display: flex; flex-direction: column; gap: .3rem; margin-bottom: .6rem; }
+.pick-list button.wide { margin-top: 0; text-align: left; }
 .hp-buttons.second { margin-top: .4rem; }
-.stash-form { display: flex; flex-direction: column; gap: .5rem; }
-.stash-fields { display: grid; grid-template-columns: 1fr 5rem; gap: .5rem; }
+.item-form { display: flex; flex-direction: column; gap: .5rem; }
+.item-fields { display: grid; grid-template-columns: 1fr 5.5rem; gap: .5rem; }
 .qty-pick { display: flex; align-items: center; justify-content: center; gap: .8rem; margin: .4rem 0 .8rem; }
 .qty-pick .stepper button { width: 3rem; height: 3rem; }
 .qty-pick .step-value { min-width: 3rem; font-size: 1.4rem; }

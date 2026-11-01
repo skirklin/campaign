@@ -39,8 +39,9 @@ from .auth import install as install_auth
 from .mcp_server import remote_server
 from .oauth import Provider
 from .oauth import install as install_oauth
-from .charsheet import CharacterSheet, PartyStash, apply_hp, move, rest
+from .charsheet import Bonus, CharacterFile, CharacterSheet, ItemMechanics, apply_hp, rest
 from .db import Campaign, Store
+from .inventory import Inventory, InventoryError
 from .jobs import JobLoop
 from .library import add_reference, reindex
 from .world import World
@@ -88,21 +89,49 @@ class RestRequest(BaseModel):
     long: bool = True
 
 
-class StashUpdate(BaseModel):
-    stash: dict[str, Any]
-    reason: str = "edited"
-    version: int | None = None  # the version it was edited from; refused if the stash has moved on
+# The party's inventory. A holder is a world entity's id (a character's, or an NPC's); None is the party.
+
+class NewHolding(BaseModel):
+    name: str
+    qty: int = Field(1, ge=1)
+    notes: str = ""
+    value_gp: float = Field(0, ge=0)
+    holder: int | None = None
+
+
+class HoldingChange(BaseModel):
+    name: str | None = None
+    qty: int | None = Field(None, ge=0)  # 0 removes it
+    notes: str | None = None
+    value_gp: float | None = Field(None, ge=0)
+    equipped: bool | None = None
+    attuned: bool | None = None
+
+
+class HoldingMove(BaseModel):
+    to: int | None = None
+    to_name: str | None = None  # someone else in the world, by name (added as an NPC if new)
+    qty: int | None = None  # all of it if not given
 
 
 class CoinChange(BaseModel):
+    holder: int | None = None
     currency: dict[str, int]  # gains positive, spending negative
 
 
-class StashMove(BaseModel):
-    character: int
-    to: str  # "character": take from the stash; "stash": put in
-    items: dict[str, int] = {}
-    currency: dict[str, int] = {}
+class CoinGive(BaseModel):
+    holder: int | None = None
+    to: int | None = None
+    to_name: str | None = None
+    currency: dict[str, int]
+
+
+class Definition(BaseModel):
+    name: str | None = None  # the world item's name, for a holding that has none yet; default its own
+    requires_attunement: bool = False
+    bonuses: list[Bonus] = []
+    value_gp: float = Field(0, ge=0)
+    party_knows: bool = True  # False: the DM's secret until the party identifies it
 
 
 class NewFact(BaseModel):
@@ -893,8 +922,21 @@ def create_app(
         c = s.campaign_by_id(campaign_id)
         return {"slug": c.slug, "name": c.name}
 
+    def viewer(s: Store, request: Request, campaign_id: int) -> Campaign:
+        """A campaign as the current user sees it; someone no longer in it sees it as a player."""
+        c = s.campaign_by_id(campaign_id)
+        if local:
+            return c
+        m = Accounts(s).membership(campaign_id, user_of(request)["id"])
+        return replace(c, role=m["role"] if m else "player", access=m["access"] if m else "viewer")
+
+    def inventory_of(s: Store, request: Request, campaign_id: int) -> Inventory:
+        return Inventory(s, viewer(s, request, campaign_id), user_id(request))
+
     def sheet_payload(s: Store, request: Request, ch: dict[str, Any]) -> dict[str, Any]:
-        sheet = CharacterSheet.model_validate(ch["sheet"])
+        inv = inventory_of(s, request, ch["campaign_id"])
+        sheet = inv.sheet(ch)
+        holder = inv.character_holder(ch["id"])
         origin = s.character(ch["copied_from"]) if ch["copied_from"] else None
         copied_from = None
         if origin:
@@ -905,6 +947,8 @@ def create_app(
             "id": ch["id"], "campaign": campaign_label(s, ch["campaign_id"]), "can_edit": ch["can_edit"],
             "entity_id": s.link_character(ch["id"]), "copied_from": copied_from,
             "sheet": sheet.model_dump(), "derived": sheet.derived(), "log": s.character_log(ch["id"], limit=30),
+            "inventory": {"holder": holder, "items": inv.holdings(holder), "purse": inv.purse(holder),
+                          "log": inv.log(holder, everyone=False, limit=30)},
             "files": [{"id": f["id"], "name": f["name"], "created_at": f["created_at"],
                        "url": f"/api/characters/{ch['id']}/files/{f['id']}"} for f in s.character_files(ch["id"])],
         }
@@ -917,7 +961,7 @@ def create_app(
         return sheet_payload(s, request, character_or_404(s, request, ch["id"]))
 
     def character_card(s: Store, request: Request, ch: dict[str, Any]) -> dict[str, Any]:
-        sheet = CharacterSheet.model_validate(ch["sheet"])
+        sheet = inventory_of(s, request, ch["campaign_id"]).sheet(ch)
         return {
             "id": ch["id"],
             "name": sheet.name,
@@ -955,16 +999,26 @@ def create_app(
         return c.id
 
     def create(
-        s: Store, request: Request, sheet: CharacterSheet, campaign_id: int, reason: str, copied_from: int | None = None,
+        s: Store, request: Request, file: CharacterFile, campaign_id: int, reason: str, copied_from: int | None = None,
     ) -> dict:
+        """A new character from a sheet file: the sheet, and what they carry into the party's inventory."""
         owner_id = None if local else user_of(request)["id"]
         try:
             character_id = s.create_character(
-                sheet.model_dump(), campaign_id, owner_id, reason=reason, copied_from=copied_from,
+                file.sheet().model_dump(), campaign_id, owner_id, reason=reason, copied_from=copied_from,
             )
         except sqlite3.IntegrityError:
-            raise HTTPException(409, f"this campaign already has a character called {sheet.name}")
+            raise HTTPException(409, f"this campaign already has a character called {file.name}")
+        inv = inventory_of(s, request, campaign_id)
+        inv.bring_in(inv.character_holder(character_id), file.inventory, file.currency, reason=f"{file.name}'s, {reason}")
         return sheet_payload(s, request, character_or_404(s, request, character_id))
+
+    def character_file(s: Store, request: Request, ch: dict[str, Any]) -> CharacterFile:
+        """A character as a file, carrying what they have."""
+        inv = inventory_of(s, request, ch["campaign_id"])
+        holder = inv.character_holder(ch["id"])
+        return CharacterFile.model_validate(ch["sheet"] | {
+            "inventory": [i.model_dump() for i in inv.carried(holder)], "currency": inv.purse(holder)})
 
     @app.post("/api/characters", status_code=201)
     def new_character(body: NewCharacter, request: Request, s: Store = Depends(store)) -> dict[str, Any]:
@@ -972,14 +1026,14 @@ def create_app(
         if not name:
             raise HTTPException(422, "name is required")
         campaign_id = campaign_for_new_character(s, request, body.campaign)
-        return create(s, request, CharacterSheet(name=name), campaign_id, "created")
+        return create(s, request, CharacterFile(name=name), campaign_id, "created")
 
     @app.post("/api/characters/import", status_code=201)
     def import_character(
         request: Request, file: UploadFile = File(...), campaign: str = Form(""), s: Store = Depends(store),
     ) -> dict[str, Any]:
         try:
-            sheet = CharacterSheet.model_validate_json(file.file.read())
+            sheet = CharacterFile.model_validate_json(file.file.read())
         except ValidationError as err:
             raise HTTPException(422, str(err))
         campaign_id = campaign_for_new_character(s, request, campaign or None)
@@ -993,15 +1047,19 @@ def create_app(
         if campaign_id == ch["campaign_id"]:
             raise HTTPException(422, "the character is already in that campaign")
         origin = s.campaign_by_id(ch["campaign_id"]).name
-        sheet = CharacterSheet.model_validate(ch["sheet"])
-        made = create(s, request, sheet, campaign_id, f"copied from {origin}", copied_from=ch["id"])
+        made = create(s, request, character_file(s, request, ch), campaign_id, f"copied from {origin}", copied_from=ch["id"])
         for f in s.character_files(ch["id"]):  # the scan goes with it
             s.add_character_file(made["id"], f["blob"], f["name"])
         return sheet_payload(s, request, character_or_404(s, request, made["id"]))
 
+    @app.get("/api/characters/{character_id}/export")
+    def export_character(character_id: int, request: Request, s: Store = Depends(store)) -> dict[str, Any]:
+        """The character as a file: the sheet and what they carry, to import elsewhere."""
+        return character_file(s, request, character_or_404(s, request, character_id)).model_dump()
+
     # Files kept with a character: the scan it was read from, or anything its owner attaches.
     @app.get("/api/characters/{character_id}/files/{file_id}")
-    def character_file(character_id: int, file_id: int, request: Request, s: Store = Depends(store)) -> FileResponse:
+    def get_character_file(character_id: int, file_id: int, request: Request, s: Store = Depends(store)) -> FileResponse:
         character_or_404(s, request, character_id)
         f = s.character_file(character_id, file_id)
         if f is None or not s.blobs.exists(f["blob"]):
@@ -1043,92 +1101,163 @@ def create_app(
 
     @app.delete("/api/characters/{character_id}", status_code=204)
     def delete_character(character_id: int, request: Request, s: Store = Depends(store)) -> None:
-        character_or_404(s, request, character_id, write=True)
+        ch = character_or_404(s, request, character_id, write=True)
+        inv = inventory_of(s, request, ch["campaign_id"])
+        inv.release(inv.character_holder(character_id), reason=f"{ch['name']} was deleted")
         s.delete_character(character_id)
 
     @app.post("/api/characters/{character_id}/hp")
     def hp(character_id: int, body: HpChange, request: Request, s: Store = Depends(store)) -> dict[str, Any]:
         ch = character_or_404(s, request, character_id, write=True)
-        sheet = CharacterSheet.model_validate(ch["sheet"])
+        sheet = inventory_of(s, request, ch["campaign_id"]).sheet(ch)
         apply_hp(sheet, body.delta)
         return save(s, request, ch, sheet, f"hp {body.delta:+d}")
 
     @app.post("/api/characters/{character_id}/rest")
     def take_rest(character_id: int, body: RestRequest, request: Request, s: Store = Depends(store)) -> dict:
         ch = character_or_404(s, request, character_id, write=True)
-        sheet = CharacterSheet.model_validate(ch["sheet"])
+        sheet = inventory_of(s, request, ch["campaign_id"]).sheet(ch)
         rest(sheet, body.long)
         return save(s, request, ch, sheet, "long rest" if body.long else "short rest")
 
-    # -- the party stash -----------------------------------------------------------
-    # What the party holds in common. It's the party's shared bag, so anyone
-    # in the campaign can change it, whatever their access; every change is
-    # logged with who made it. Moving things between it and a character also
-    # needs the right to change that character.
-
-    def stash_payload(s: Store, request: Request, c: Campaign) -> dict[str, Any]:
-        party = s.characters(campaign_ids=[c.id])
-        return {
-            "stash": PartyStash.model_validate(s.party_stash(c.id)).model_dump(),
-            "version": s.party_stash_version(c.id),
-            "log": s.party_stash_log(c.id),
-            "characters": [{"id": ch["id"], "name": ch["name"], "can_edit": character_rights(s, request, ch)[1]}
-                           for ch in party],
-        }
+    # -- the party's inventory --------------------------------------------------------
+    # Everything the party owns, by who has it (inventory.py). What the party
+    # holds in common, and anything left with someone outside the party, anyone
+    # in the campaign can change. A character's things need the right to change
+    # that character. Taking from the party's things is acting for whoever gets
+    # them; giving away your own needs only yours. Saying what an item does
+    # (its definition, in the world) needs editor access, like the rest of the world.
 
     def user_id(request: Request) -> int | None:
         return None if local else user_of(request)["id"]
 
-    @app.get("/api/campaigns/{slug}/stash")
-    def get_stash(request: Request, c: Campaign = Depends(reader), s: Store = Depends(store)) -> dict[str, Any]:
-        return stash_payload(s, request, c)
+    def holder_rights(s: Store, request: Request, inv: Inventory, holder: int | None) -> bool:
+        ch = inv.character_of(holder)
+        return ch is None or character_rights(s, request, s.character(ch["id"]))[1]
 
-    @app.put("/api/campaigns/{slug}/stash")
-    def put_stash(body: StashUpdate, request: Request, c: Campaign = Depends(reader), s: Store = Depends(store)) -> dict:
+    def must_hold(s: Store, request: Request, inv: Inventory, holder: int | None) -> None:
+        if not holder_rights(s, request, inv, holder):
+            raise HTTPException(403, f"only {inv.holder_name(holder)}'s owner or the DM can change what they have")
+
+    def holder_in(inv: Inventory, holder: int | None) -> int | None:
+        if holder is not None and inv.world.entity(holder) is None:
+            raise HTTPException(404, "nobody like that in this campaign")
+        return holder
+
+    def inventory_payload(s: Store, request: Request, inv: Inventory) -> dict[str, Any]:
+        out = inv.overview()
+        for h in out["holders"]:
+            h["can_edit"] = holder_rights(s, request, inv, h["id"])
+        out["log"] = inv.log()
+        out["can_define"] = at_least(inv.campaign.access, "editor")
+        out["dm"] = not inv.campaign.spoiler_safe
+        return out
+
+    def inventory_dep(request: Request, c: Campaign = Depends(reader), s: Store = Depends(store)) -> Inventory:
+        return Inventory(s, c, user_id(request))
+
+    def inventory_call(s: Store, request: Request, inv: Inventory, fn: Callable[[], Any]) -> dict[str, Any]:
         try:
-            stash = PartyStash.model_validate(body.stash)
-        except ValidationError as err:
-            raise HTTPException(422, err.errors(include_url=False, include_context=False))
-        if body.version is not None and body.version != s.party_stash_version(c.id):
-            raise HTTPException(409, "someone else changed the party stash just now; here it is as it stands")
-        s.update_party_stash(c.id, stash.model_dump(), reason=body.reason, user_id=user_id(request))
-        return stash_payload(s, request, c)
-
-    @app.post("/api/campaigns/{slug}/stash/coin")
-    def stash_coin(body: CoinChange, request: Request, c: Campaign = Depends(reader), s: Store = Depends(store)) -> dict:
-        """Add to or spend from the shared purse. A change, not a total, so two at once both count."""
-        stash = PartyStash.model_validate(s.party_stash(c.id))
-        purse = dict(stash.currency)
-        for coin, delta in body.currency.items():
-            if purse.get(coin, 0) + delta < 0:
-                raise HTTPException(422, f"the party only has {purse.get(coin, 0)} {coin}")
-            purse[coin] = purse.get(coin, 0) + delta
-        stash.currency = purse
-        what = ", ".join(f"{'+' if d > 0 else '−'}{abs(d)} {coin}" for coin, d in body.currency.items() if d)
-        if not what:
-            raise HTTPException(422, "nothing to change")
-        s.update_party_stash(c.id, stash.model_dump(), reason=what, user_id=user_id(request))
-        return stash_payload(s, request, c)
-
-    @app.post("/api/campaigns/{slug}/stash/move")
-    def move_stash(body: StashMove, request: Request, c: Campaign = Depends(reader), s: Store = Depends(store)) -> dict:
-        """Take things from the stash into a character's inventory, or put them in."""
-        ch = character_or_404(s, request, body.character, write=True)
-        if ch["campaign_id"] != c.id:
-            raise HTTPException(404, "no such character in this campaign")
-        sheet = CharacterSheet.model_validate(ch["sheet"])
-        stash = PartyStash.model_validate(s.party_stash(c.id))
-        try:
-            what = move(sheet, stash, body.to, body.items, body.currency)
-        except ValueError as err:
+            fn()
+        except InventoryError as err:
             raise HTTPException(422, str(err))
-        took = body.to == "character"
-        s.update_party_stash(
-            c.id, stash.model_dump(), user_id=user_id(request),
-            reason=f"{sheet.name} {'took' if took else 'put in'} {what}",
-            character=(ch["id"], sheet.model_dump(), f"{'took' if took else 'put'} {what} {'from' if took else 'in'} the party stash"),
-        )
-        return {"stash": stash_payload(s, request, c), "character": sheet_payload(s, request, character_or_404(s, request, ch["id"]))}
+        return inventory_payload(s, request, inv)
+
+    def holding_of(inv: Inventory, holding_id: int) -> dict[str, Any]:
+        try:
+            return inv.holding(holding_id)
+        except InventoryError as err:
+            raise HTTPException(404, str(err))
+
+    @app.get("/api/campaigns/{slug}/inventory")
+    def get_inventory(request: Request, inv: Inventory = Depends(inventory_dep), s: Store = Depends(store)) -> dict:
+        return inventory_payload(s, request, inv)
+
+    @app.post("/api/campaigns/{slug}/inventory/items")
+    def add_item(body: NewHolding, request: Request, inv: Inventory = Depends(inventory_dep),
+                 s: Store = Depends(store)) -> dict:
+        must_hold(s, request, inv, holder_in(inv, body.holder))
+        return inventory_call(s, request, inv, lambda: inv.add(body.name, body.qty, body.holder, body.notes, body.value_gp))
+
+    @app.patch("/api/campaigns/{slug}/inventory/items/{holding_id}")
+    def change_item(holding_id: int, body: HoldingChange, request: Request, inv: Inventory = Depends(inventory_dep),
+                    s: Store = Depends(store)) -> dict:
+        must_hold(s, request, inv, holding_of(inv, holding_id)["holder_id"])
+        return inventory_call(s, request, inv, lambda: inv.change(holding_id, **body.model_dump(exclude_none=True)))
+
+    @app.delete("/api/campaigns/{slug}/inventory/items/{holding_id}")
+    def remove_item(holding_id: int, request: Request, inv: Inventory = Depends(inventory_dep),
+                    s: Store = Depends(store)) -> dict:
+        must_hold(s, request, inv, holding_of(inv, holding_id)["holder_id"])
+        return inventory_call(s, request, inv, lambda: inv.remove(holding_id))
+
+    def recipient(inv: Inventory, to: int | None, to_name: str | None) -> int | None:
+        if to_name and to_name.strip():
+            try:
+                return inv.resolve_holder(to_name)
+            except InventoryError as err:
+                raise HTTPException(422, str(err))
+        return holder_in(inv, to)
+
+    @app.post("/api/campaigns/{slug}/inventory/items/{holding_id}/move")
+    def move_item(holding_id: int, body: HoldingMove, request: Request, inv: Inventory = Depends(inventory_dep),
+                  s: Store = Depends(store)) -> dict:
+        """Claim it, give it, or put it back."""
+        src = holding_of(inv, holding_id)["holder_id"]
+        to = recipient(inv, body.to, body.to_name)
+        must_hold(s, request, inv, src)
+        if src is None:
+            must_hold(s, request, inv, to)
+        return inventory_call(s, request, inv, lambda: inv.move(holding_id, to, body.qty))
+
+    @app.put("/api/campaigns/{slug}/inventory/items/{holding_id}/definition")
+    def define_item(holding_id: int, body: Definition, request: Request, inv: Inventory = Depends(inventory_dep),
+                    s: Store = Depends(store)) -> dict:
+        """Say what an item does: its world item's definition, shared by every holding of it."""
+        if not at_least(inv.campaign.access, "editor"):
+            raise HTTPException(403, "saying what an item does needs editor access to the campaign")
+        h = holding_of(inv, holding_id)
+        mechanics = ItemMechanics(requires_attunement=body.requires_attunement, bonuses=body.bonuses, value_gp=body.value_gp)
+
+        def run() -> None:
+            linked = h["item"]["id"] if h["item"] else None
+            if h["item"] and linked is None:  # linked to something this viewer can't see
+                raise InventoryError("the DM has said what this item does; ask them to change it")
+            item_id = inv.define((body.name or h["name"]).strip(), mechanics, body.party_knows, item_id=linked)
+            if item_id != linked:
+                inv.link(holding_id, item_id)
+
+        return inventory_call(s, request, inv, run)
+
+    @app.delete("/api/campaigns/{slug}/inventory/items/{holding_id}/definition")
+    def unlink_item(holding_id: int, request: Request, inv: Inventory = Depends(inventory_dep),
+                    s: Store = Depends(store)) -> dict:
+        """Make it a plain item again; the world item and its definition stay."""
+        if not at_least(inv.campaign.access, "editor"):
+            raise HTTPException(403, "this needs editor access to the campaign")
+        holding_of(inv, holding_id)
+        return inventory_call(s, request, inv, lambda: inv.unlink(holding_id))
+
+    @app.post("/api/campaigns/{slug}/inventory/coin")
+    def change_coin(body: CoinChange, request: Request, inv: Inventory = Depends(inventory_dep),
+                    s: Store = Depends(store)) -> dict:
+        """Gain or spend coin: a change, not a total, so two at once both count."""
+        must_hold(s, request, inv, holder_in(inv, body.holder))
+        return inventory_call(s, request, inv, lambda: inv.coin(body.holder, body.currency))
+
+    @app.post("/api/campaigns/{slug}/inventory/coin/give")
+    def give_coin(body: CoinGive, request: Request, inv: Inventory = Depends(inventory_dep),
+                  s: Store = Depends(store)) -> dict:
+        src, to = holder_in(inv, body.holder), recipient(inv, body.to, body.to_name)
+        must_hold(s, request, inv, src)
+        if src is None:
+            must_hold(s, request, inv, to)
+        return inventory_call(s, request, inv, lambda: inv.give_coin(src, to, body.currency))
+
+    @app.post("/api/campaigns/{slug}/inventory/coin/split")
+    def split_coin(request: Request, inv: Inventory = Depends(inventory_dep), s: Store = Depends(store)) -> dict:
+        """Share the party's purse evenly among the characters."""
+        return inventory_call(s, request, inv, lambda: inv.split())
 
     # -- static app ------------------------------------------------------------------
 

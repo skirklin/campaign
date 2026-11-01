@@ -210,7 +210,10 @@ def test_a_scan_becomes_a_character(scan_job, monkeypatch):
     sheet = ch["sheet"]
     assert ch["owner_id"] == owner and ch["campaign_id"] == camp.id
     assert sheet["abilities"]["int"] == 17 and sheet["save_proficiencies"] == ["int", "wis"]
-    assert sheet["skill_proficiencies"] == ["arcana", "history"] and sheet["currency"]["gp"] == 12
+    assert sheet["skill_proficiencies"] == ["arcana", "history"] and "currency" not in sheet
+    from campaign.inventory import Inventory
+    inv = Inventory(s, camp)
+    assert inv.purse(inv.character_holder(ch["id"]))["gp"] == 12  # their coin is in the party's inventory
     assert sheet["notes"].startswith("Has a cat.") and "Wisdom score; skill: Basket weaving" in sheet["notes"]
     assert calls[0]["messages"][0]["content"][0]["type"] == "document"
     assert calls[0]["thinking"]["display"] == "summarized"  # else the thinking shown as progress is empty
@@ -317,7 +320,8 @@ def test_ingests_move_over_to_jobs_keeping_their_ids(tmp_path):
     camp = s.create_campaign("Strahd", "dm")
     # The database as the v10 server left it: an ingest in the ingests table, no jobs.
     s.conn.executescript("DROP TABLE character_files; DROP TABLE job_log; DROP TABLE jobs;"
-                         " DROP TABLE party_stash_log; DROP TABLE party_stash; ALTER TABLE conversation_messages DROP COLUMN usage; PRAGMA user_version = 10;")
+                         " DROP TABLE inventory_log; DROP TABLE purses; DROP TABLE holdings;"
+                         " ALTER TABLE conversation_messages DROP COLUMN usage; PRAGMA user_version = 10;")
     s.conn.execute(
         "INSERT INTO ingests (id, campaign_id, session, input_blob, input_name, transcript_blob, played_on, role,"
         " state, attempts, error, created_at, updated_at)"
@@ -453,7 +457,10 @@ def test_scans_read_before_files_were_kept_get_attached(tmp_path):
     failed = s.add_job(camp, "scan", {"blob": blob, "name": "other.pdf"}, None)
     s.update_job(failed, state="failed")
     # The database as the v12 server left it: no files table.
-    s.conn.executescript("DROP TABLE character_files; ALTER TABLE conversation_messages DROP COLUMN usage; PRAGMA user_version = 12;")
+    from campaign.db import V12_PARTY_STASH
+    s.conn.executescript("DROP TABLE character_files; ALTER TABLE conversation_messages DROP COLUMN usage;"
+                         " DROP TABLE inventory_log; DROP TABLE purses; DROP TABLE holdings;"
+                         f" {V12_PARTY_STASH} PRAGMA user_version = 12;")
     s.close()
     s = Store(db)  # migrates
     assert [(f["name"], f["blob"]) for f in s.character_files(character_id)] == [("cid character sheet.pdf", blob)]

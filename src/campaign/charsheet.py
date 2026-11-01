@@ -3,6 +3,12 @@
 Fields cover what's on the paper sheet; anything else (homebrew resources,
 custom trackers) can go in `extra`. Derived numbers (modifiers, proficiency
 bonus, skill totals) are computed rather than stored so they can't drift.
+
+What a character carries isn't on the sheet: it's in the party's inventory
+(inventory.py), held by them. Items that do something are world items with a
+definition (ItemMechanics); the sheet's numbers count the bonuses of what the
+character has equipped, handed to it as `gear`. A sheet as a file (export,
+import, a scan) carries its gear along: CharacterFile.
 """
 
 from __future__ import annotations
@@ -10,7 +16,7 @@ from __future__ import annotations
 import re
 from typing import Annotated, Any, Literal
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 ABILITIES = ("str", "dex", "con", "int", "wis", "cha")
 
@@ -135,9 +141,51 @@ class ArmorClass(Model):
     max_dex: int | None = None
 
 
-class Item(Model):
+COINS = ("cp", "sp", "ep", "gp", "pp")
+GP_PER_COIN = {"cp": 0.01, "sp": 0.1, "ep": 0.5, "gp": 1, "pp": 10}
+
+
+def no_coins() -> dict[str, int]:
+    return {c: 0 for c in COINS}
+
+
+class ItemMechanics(Model):
+    """What a kind of item does, shared by every copy of it: a world item's definition.
+
+    Bonuses count for whoever has one equipped (and attuned, if it needs it).
+    """
+
+    requires_attunement: bool = False
+    bonuses: list[Bonus] = []
+    value_gp: float = Field(0, ge=0)  # what one is worth, in gold pieces; 0 if nobody's said
+
+    def describe(self) -> str:
+        """In a few words: "+1 AC, +1 save; needs attunement; worth 400 gp"."""
+        parts = [", ".join(f"{_signed(b.amount)} {b.target}" + (f" during {b.during}" if b.during else "")
+                           for b in self.bonuses)]
+        if self.requires_attunement:
+            parts.append("needs attunement")
+        if self.value_gp:
+            parts.append(f"worth {self.value_gp:g} gp")
+        return "; ".join(p for p in parts if p) or "no bonuses"
+
+
+def _signed(amount: int | str) -> str:
+    return f"{amount:+d}" if isinstance(amount, int) else f"+{amount}"
+
+
+class Gear(Model):
+    """Something a character has equipped whose bonuses count: from their holdings, for working out the sheet."""
+
     name: str
-    qty: int = 1
+    bonuses: list[Bonus] = []
+
+
+class Item(Model):
+    """An item as a sheet file carries it: a holding and, for one that does something, its definition."""
+
+    name: str
+    qty: int = Field(1, ge=1)
     equipped: bool = False
     attuned: bool = False
     requires_attunement: bool = False
@@ -146,8 +194,11 @@ class Item(Model):
     value_gp: float = Field(0, ge=0)  # what one is worth, in gold pieces; 0 if nobody's said
 
     @property
-    def active(self) -> bool:
-        return self.equipped and (self.attuned or not self.requires_attunement)
+    def mechanics(self) -> ItemMechanics | None:
+        """Its definition, if it has more to it than a name: bonuses, or attunement."""
+        if not (self.bonuses or self.requires_attunement):
+            return None
+        return ItemMechanics(requires_attunement=self.requires_attunement, bonuses=self.bonuses, value_gp=self.value_gp)
 
 
 _DICE = re.compile(r"^\s*(?:(\d+)|\((.+)\))\s*d\s*(\d+)\s*$")
@@ -314,20 +365,23 @@ class CharacterSheet(Model):
     resources: list[Resource] = []
     spellcasting_ability: str = ""
     spells: list[Spell] = []
-    inventory: list[Item] = []
-    currency: dict[str, int] = Field(
-        default_factory=lambda: {"cp": 0, "sp": 0, "ep": 0, "gp": 0, "pp": 0}
-    )
     features: list[str] = []
     proficiencies: list[str] = []  # armor, weapons, tools, languages
     personality: str = ""
     notes: str = ""
     extra: dict[str, Any] = {}
+    # What the character has equipped, from their holdings: not saved with the sheet.
+    _gear: list[Gear] = PrivateAttr(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod
     def _from_older_sheets(cls, data: Any) -> Any:
         return _upgrade(data) if isinstance(data, dict) else data
+
+    def with_gear(self, gear: list[Gear]) -> CharacterSheet:
+        """This sheet, counting the bonuses of `gear` (what the character has equipped)."""
+        self._gear = list(gear)
+        return self
 
     @property
     def level(self) -> int:
@@ -386,16 +440,15 @@ class CharacterSheet(Model):
 
     def active_bonuses(self) -> list[Bonus]:
         """Bonuses that count now: switched on, their status (if any) on, and from the sheet
-        or from an item that's equipped (and attuned, where it needs to be)."""
+        or from the gear the character has equipped (and attuned, where it needs to be)."""
         statuses = self.active_statuses
 
         def on(b: Bonus) -> bool:
             return b.active and (not b.during or b.during.strip().lower() in statuses)
 
         out = [b for b in self.bonuses if on(b)]
-        for item in self.inventory:
-            if item.active:
-                out += [b.model_copy(update={"source": b.source or item.name}) for b in item.bonuses if on(b)]
+        for item in self._gear:
+            out += [b.model_copy(update={"source": b.source or item.name}) for b in item.bonuses if on(b)]
         return out
 
     def _bonuses(self, *targets: str) -> list[tuple[str, int]]:
@@ -551,72 +604,23 @@ def _damage_text(damage: list[dict[str, Any]]) -> str:
     return " ".join([text, *(f"({e})" for e in extra)]).strip()
 
 
-class PartyStash(Model):
-    """What the party holds in common: loot nobody has claimed, the shared purse.
+class CharacterFile(CharacterSheet):
+    """A character as a file: the sheet plus what they carry, for exporting, importing and scans.
 
-    Items are whole items, bonuses and all, so a magic item put in and taken
-    out again still works; nobody wears what's in the stash, so it comes in
-    unequipped and unattuned.
+    Importing one puts its items in the party's inventory, held by the
+    character, and its coin in their purse.
     """
 
-    items: list[Item] = []
-    currency: dict[str, int] = Field(
-        default_factory=lambda: {"cp": 0, "sp": 0, "ep": 0, "gp": 0, "pp": 0}
-    )
+    inventory: list[Item] = []
+    currency: dict[str, int] = Field(default_factory=no_coins)
 
+    def sheet(self) -> CharacterSheet:
+        return CharacterSheet.model_validate(self.model_dump(exclude={"inventory", "currency"}))
 
-def move(
-    sheet: CharacterSheet, stash: PartyStash, to: str,
-    items: dict[str, int] | None = None, currency: dict[str, int] | None = None,
-) -> str:
-    """Move items (by name) and coin between a character and the party stash.
-
-    `to` is "character" (taking from the stash) or "stash" (putting in).
-    Items stack by name, case-insensitively. Raises ValueError, changing
-    nothing, if the giver doesn't have enough. Returns what moved, in words.
-    """
-    if to not in ("character", "stash"):
-        raise ValueError("to must be 'character' or 'stash'")
-    src_items, dst_items = (stash.items, sheet.inventory) if to == "character" else (sheet.inventory, stash.items)
-    src_coin, dst_coin = (stash.currency, sheet.currency) if to == "character" else (sheet.currency, stash.currency)
-    src_items = [i.model_copy() for i in src_items]
-    dst_items = [i.model_copy() for i in dst_items]
-    src_coin, dst_coin = dict(src_coin), dict(dst_coin)
-    moved = []
-
-    def find(lst: list[Any], name: str) -> Any:
-        return next((i for i in lst if i.name.strip().lower() == name.strip().lower()), None)
-
-    for name, qty in (items or {}).items():
-        if qty <= 0:
-            continue
-        have = find(src_items, name)
-        if have is None or have.qty < qty:
-            raise ValueError(f"only {have.qty if have else 0} × {name} to give")
-        have.qty -= qty
-        if have.qty == 0:
-            src_items.remove(have)
-        if (there := find(dst_items, name)) is not None:
-            there.qty += qty
-        else:
-            stowed = {"equipped": False, "attuned": False} if to == "stash" else {}
-            dst_items.append(have.model_copy(update={"qty": qty, **stowed}))
-        moved.append(f"{have.name}{f' ×{qty}' if qty != 1 else ''}")
-    for coin, n in (currency or {}).items():
-        if n <= 0:
-            continue
-        if src_coin.get(coin, 0) < n:
-            raise ValueError(f"only {src_coin.get(coin, 0)} {coin} to give")
-        src_coin[coin] -= n
-        dst_coin[coin] = dst_coin.get(coin, 0) + n
-        moved.append(f"{n} {coin}")
-    if not moved:
-        raise ValueError("nothing to move")
-    if to == "character":
-        stash.items, sheet.inventory, stash.currency, sheet.currency = src_items, dst_items, src_coin, dst_coin
-    else:
-        sheet.inventory, stash.items, sheet.currency, stash.currency = src_items, dst_items, src_coin, dst_coin
-    return ", ".join(moved)
+    def worn(self) -> CharacterFile:
+        """This file, counting the bonuses of what it says the character has equipped."""
+        return self.with_gear([Gear(name=i.name, bonuses=i.bonuses) for i in self.inventory
+                               if i.equipped and (i.attuned or not i.requires_attunement) and i.bonuses])
 
 
 def apply_hp(sheet: CharacterSheet, delta: int) -> None:
@@ -656,8 +660,8 @@ def merge_patch(target: Any, patch: Any) -> Any:
     return result
 
 
-def render(sheet: CharacterSheet) -> str:
-    """Plain-text sheet for the terminal or for pasting into a chat."""
+def render(sheet: CharacterSheet, inventory: list[Item] = (), currency: dict[str, int] | None = None) -> str:
+    """Plain-text sheet for the terminal or for pasting into a chat, with what the character carries."""
     d = sheet.derived()
 
     def sign(n: int) -> str:
@@ -706,15 +710,15 @@ def render(sheet: CharacterSheet) -> str:
             by_level.setdefault(s.level, []).append(s.name + ("" if s.prepared else " (unprepared)"))
         for lvl in sorted(by_level):
             lines.append(f"  {'Cantrips' if lvl == 0 else f'Level {lvl}'}: {', '.join(by_level[lvl])}")
-    if sheet.inventory:
+    if inventory:
         lines.append(
             "Inventory: "
             + ", ".join(
                 f"{i.name}{f' x{i.qty}' if i.qty != 1 else ''}{' (E)' if i.equipped else ''}"
-                for i in sheet.inventory
+                for i in inventory
             )
         )
-    coins = ", ".join(f"{v} {k}" for k, v in sheet.currency.items() if v)
+    coins = ", ".join(f"{v} {k}" for k, v in (currency or {}).items() if v)
     if coins:
         lines.append("Coin: " + coins)
     if sheet.features:

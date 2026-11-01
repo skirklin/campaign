@@ -249,38 +249,51 @@ def test_character_from_a_scan(client, monkeypatch):
     assert [f["name"] for f in copy["files"]] == ["ireth.pdf"]
 
 
-def test_party_stash(client):
+def test_party_inventory(client):
     client.post("/api/campaigns", json={"name": "Strahd"})
-    cid = client.post("/api/characters/import", files={"file": ("c.json", EXAMPLE.read_bytes())},
-                      data={"campaign": "strahd"}).json()["id"]
-    r = client.get("/api/campaigns/strahd/stash").json()
-    assert r["stash"]["items"] == [] and r["version"] == 0
-    assert r["characters"] == [{"id": cid, "name": "Brannoc Ashvale", "can_edit": True}]
+    r = client.post("/api/characters/import", files={"file": ("c.json", EXAMPLE.read_bytes())}, data={"campaign": "strahd"})
+    cid, me = r.json()["id"], r.json()["inventory"]["holder"]
+    # What the file carried is the character's in the party's inventory, and their sheet counts the shield.
+    assert r.json()["derived"]["ac"]["total"] == 18 and r.json()["inventory"]["purse"]["gp"] == 38
+    assert [i["name"] for i in r.json()["inventory"]["items"]][:3] == ["Warhammer", "Chain mail", "Shield"]
+    base = "/api/campaigns/strahd/inventory"
+    inv = client.get(base).json()
+    assert [(h["name"], h["kind"], h["can_edit"]) for h in inv["holders"]] == [
+        ("The party", "party", True), ("Brannoc Ashvale", "character", True)]
+    assert inv["can_define"] and inv["dm"]
 
-    r = client.put("/api/campaigns/strahd/stash", json={
-        "stash": {"items": [{"name": "Potion of healing", "qty": 3}]}, "reason": "added potions", "version": 0})
-    assert r.status_code == 200
-    version = r.json()["version"]
-    # An edit made against an older stash is refused rather than undoing the newer one.
-    stale = client.put("/api/campaigns/strahd/stash", json={"stash": {"items": []}, "version": 0})
-    assert stale.status_code == 409
-    assert client.put("/api/campaigns/strahd/stash", json={"stash": {"items": [{"qty": 1}]}}).status_code == 422
+    # Loot for the party; claiming some; giving it to an NPC by name.
+    inv = client.post(f"{base}/items", json={"name": "Potion of healing", "qty": 3}).json()
+    loot = inv["holders"][0]["items"][0]["id"]
+    assert client.post(f"{base}/items", json={"name": " ", "qty": 1}).status_code == 422
+    inv = client.post(f"{base}/items/{loot}/move", json={"to": me, "qty": 2}).json()
+    mine = inv["holders"][1]["items"]
+    assert next(i for i in mine if i["name"] == "Potion of healing")["qty"] == 4  # joined the two they had
+    inv = client.post(f"{base}/items/{loot}/move", json={"to_name": "Vulkan"}).json()
+    assert inv["holders"][-1]["name"] == "Vulkan" and inv["holders"][-1]["kind"] == "other"
+    assert inv["log"][0]["text"] == "Vulkan took Potion of healing"
+    assert client.post(f"{base}/items/999/move", json={"to": me}).status_code == 404
 
-    # Coin goes in and out as changes, never below zero.
-    assert client.post("/api/campaigns/strahd/stash/coin", json={"currency": {"gp": 50}}).json()["stash"]["currency"]["gp"] == 50
-    assert client.post("/api/campaigns/strahd/stash/coin", json={"currency": {"gp": -60}}).status_code == 422
+    # Equipping and defining: the sheet follows the definition.
+    shield = next(i for i in mine if i["name"] == "Shield")
+    assert shield["item"]["name"] == "Shield" and shield["bonuses"][0]["amount"] == 2
+    client.put(f"{base}/items/{shield['id']}/definition", json={"bonuses": [{"target": "ac", "amount": 3}]})
+    assert client.get(f"/api/characters/{cid}").json()["derived"]["ac"]["total"] == 19
+    client.patch(f"{base}/items/{shield['id']}", json={"equipped": False})
+    assert client.get(f"/api/characters/{cid}").json()["derived"]["ac"]["total"] == 16
 
-    # Taking moves it into the character's inventory, logged on both.
-    r = client.post("/api/campaigns/strahd/stash/move",
-                    json={"character": cid, "to": "character", "items": {"Potion of healing": 2}, "currency": {"gp": 20}})
-    assert r.status_code == 200
-    assert [(i["name"], i["qty"]) for i in r.json()["stash"]["stash"]["items"]] == [("Potion of healing", 1)]
-    assert r.json()["stash"]["version"] > version
-    sheet = r.json()["character"]["sheet"]
-    assert next(i for i in sheet["inventory"] if i["name"] == "Potion of healing")["qty"] == 4
-    assert sheet["currency"]["gp"] == 58
-    assert r.json()["character"]["log"][0]["reason"] == "took Potion of healing ×2, 20 gp from the party stash"
-    assert r.json()["stash"]["log"][0]["reason"] == "Brannoc Ashvale took Potion of healing ×2, 20 gp"
-    bad = client.post("/api/campaigns/strahd/stash/move", json={"character": cid, "to": "stash", "items": {"Lute": 1}})
-    assert bad.status_code == 422 and "only 0" in bad.json()["detail"]
+    # Coin: changes, never below zero; sharing the party's purse.
+    assert client.post(f"{base}/coin", json={"currency": {"gp": 51}}).json()["holders"][0]["purse"]["gp"] == 51
+    assert client.post(f"{base}/coin", json={"currency": {"gp": -60}}).status_code == 422
+    inv = client.post(f"{base}/coin/split").json()
+    assert inv["holders"][1]["purse"]["gp"] == 38 + 51 and inv["holders"][0]["purse"]["gp"] == 0
+    inv = client.post(f"{base}/coin/give", json={"holder": me, "to": None, "currency": {"gp": 9}}).json()
+    assert inv["holders"][0]["purse"]["gp"] == 9
+
+    # Exported, the character carries their things; deleted, they go back to the party.
+    exported = client.get(f"/api/characters/{cid}/export").json()
+    assert exported["currency"]["gp"] == 80 and any(i["name"] == "Shield" and i["bonuses"] for i in exported["inventory"])
+    assert client.delete(f"/api/characters/{cid}").status_code == 204
+    inv = client.get(base).json()
+    assert [h["name"] for h in inv["holders"]] == ["The party", "Vulkan"] and inv["holders"][0]["purse"]["gp"] == 89
 
