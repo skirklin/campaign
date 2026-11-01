@@ -331,6 +331,12 @@ app to sign in with Google and asks you to allow it, then acts as you:
   question, as you, and returns its answer, the lookups it made and what
   it cost. The exchange is saved as one of your conversations, so it can
   be read and continued in the app. Useful for testing how the app answers.
+- **Digests, for development** (`digest_status`, `digest_source`; editor
+  access): each source's digest progress, the models it was digested with
+  and what it cost; and digesting a source again with the configured
+  model (`CAMPAIGN_DIGEST_MODEL`), e.g. after changing it. The app's own
+  Digest button only finishes a digest; anything more involved stays a
+  tool, to keep the UI simple.
 - **OAuth 2.1** (`oauth.py`): dynamic client registration, PKCE, codes and
   tokens stored as hashes, access tokens for an hour and rotating refresh
   tokens for 30 days, all tied to your user. The Account page lists

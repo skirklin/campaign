@@ -798,6 +798,18 @@ def run(
         store.close()
 
 
+def request(store: Store, source_id: int) -> None:
+    """Ask for a source to be digested with the configured model, giving failed sections another go.
+
+    Idempotent. A source digested with another model is planned against
+    this one now (no API calls), so its sections show as still to do at
+    once rather than when the loop gets to it. The caller wakes the loop.
+    """
+    store.set_digest_target(source_id, MODEL, EFFORT)
+    plan(store, source_id, model=MODEL)
+    retry_failed(store, source_id, model=MODEL)
+
+
 def retry_failed(store: Store, source_id: int, model: str = MODEL) -> int:
     """Forget the failures of a source's sections, so the next run tries them again."""
     root = plan(store, source_id, model, save=False)

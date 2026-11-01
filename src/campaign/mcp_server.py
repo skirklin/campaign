@@ -129,8 +129,11 @@ def campaign_tools(db: Path | str) -> list[tuple[Callable[..., str], bool]]:
     return out
 
 
-def remote_server(db: Path | str, cfg: AuthConfig) -> tuple[MCPServer, Any]:
-    """The MCP server and its ASGI app, serving /mcp plus the OAuth endpoints at the site root."""
+def remote_server(db: Path | str, cfg: AuthConfig, wake_digest: Callable[[], None] = lambda: None) -> tuple[MCPServer, Any]:
+    """The MCP server and its ASGI app, serving /mcp plus the OAuth endpoints at the site root.
+
+    `wake_digest` nudges the digest loop after a digest is asked for.
+    """
     provider = Provider(db, cfg)
     server = MCPServer(
         name="campaign",
@@ -225,7 +228,83 @@ def remote_server(db: Path | str, cfg: AuthConfig) -> tuple[MCPServer, Any]:
 
         return await anyio.to_thread.run_sync(run)
 
+    def _digest_rows(s: Store, c: Campaign, only: int | None = None) -> list[dict[str, Any]]:
+        from . import digest
+
+        rows = []
+        for src in s.sources(c):
+            if src["kind"] == "transcript" or (c.spoiler_safe and src["dm_only"]) or only not in (None, src["id"]):
+                continue
+            st = s.digest_status(src["id"])
+            rows.append({
+                "id": src["id"], "title": src["title"], "target_model": src["digest_model"],
+                "sections": st["total"], "done": st["done"], "failed": st["failed"], "entities": st["entities"],
+                "digested_with": {u["model"]: u["input_tokens"] + u["output_tokens"] for u in s.digest_usage(src["id"])},
+                "spent_usd": round(digest.spent(s.digest_usage(src["id"])), 4),
+            })
+        return rows
+
+    def _digest_campaign(s: Store, campaign: str) -> Campaign | str:
+        c = _campaign_for(s, user_id_of(get_access_token()), campaign)
+        if c is None:
+            return f"No campaign {campaign!r} for you. Call list_campaigns for the slugs."
+        if not at_least(c.access, "editor"):
+            return f"You have {c.access} access to {c.name}; digests need editor access."
+        return c
+
+    def digest_status(campaign: str) -> str:
+        """Each reference source's digest: sections done of total, failures, the model it's set to digest
+        with, the tokens spent per model so far and their cost, and the model a digest would use now.
+
+        For development and debugging; needs editor access.
+
+        Args:
+            campaign: The campaign's slug, from list_campaigns.
+        """
+        from . import digest
+
+        s = Store(db)
+        try:
+            c = _digest_campaign(s, campaign)
+            if isinstance(c, str):
+                return c
+            return json.dumps({"configured_model": digest.MODEL, "sources": _digest_rows(s, c)})
+        finally:
+            s.close()
+
+    def digest_source(campaign: str, source_id: int) -> str:
+        """Digest a reference source with the configured model: again, if it was digested with another
+        model (or an older version of the digest), else only the sections not yet done or failed.
+
+        Spends API money: returns the estimate of what's left to digest, then runs in the background;
+        check on it with digest_status. Sections already digested with this model are reused from the
+        cache. For development and debugging; needs editor access.
+
+        Args:
+            campaign: The campaign's slug, from list_campaigns.
+            source_id: The source's id, from digest_status or list_sources.
+        """
+        from . import digest
+
+        s = Store(db)
+        try:
+            c = _digest_campaign(s, campaign)
+            if isinstance(c, str):
+                return c
+            rows = _digest_rows(s, c, only=source_id)
+            if not rows:
+                return f"No source {source_id} to digest in {c.name}. Call digest_status for the ids."
+            digest.request(s, source_id)
+            estimate = digest.estimate(s, digest.plan(s, source_id, model=digest.MODEL, save=False), model=digest.MODEL)
+            wake_digest()
+            return json.dumps({"digesting": True, "model": digest.MODEL, "estimate": estimate,
+                               "status": _digest_rows(s, c, only=source_id)[0]})
+        finally:
+            s.close()
+
     read_only = ToolAnnotations(readOnlyHint=True)
+    server.add_tool(digest_status, annotations=read_only)
+    server.add_tool(digest_source, annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
     server.add_tool(list_campaigns, annotations=read_only)
     server.add_tool(campaign_overview, annotations=read_only)
     # Not read-only: the conversation is saved, and the assistant may record what it's told happened.
