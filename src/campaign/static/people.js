@@ -94,15 +94,29 @@ export async function membersTab(c) {
     const change = async (m, patch) => {
       try {
         await api("PATCH", `${base}/members/${m.user_id}`, patch);
+        if (m.user_id === me && patch.role) {
+          location.reload();  // what you can see in every tab follows your role
+          return;
+        }
         toast(`Updated ${m.email}`);
       } catch (err) {
         toast(err.message, true);
       }
       render();
     };
-    const select = (m, field, options) => can_manage && m.user_id !== me
-      ? h("select", { value: m[field], "aria-label": `${field} for ${m.email}`, onchange: (e) => change(m, { [field]: e.target.value }) },
-        options.map(([v, label]) => h("option", { value: v }, label)))
+    // Owners change anyone's role and access, their own included (the server keeps at least one owner).
+    const select = (m, field, options) => can_manage
+      ? h("select", {
+        value: m[field], "aria-label": `${field} for ${m.email}`,
+        onchange: (e) => {
+          const lowering = m.user_id === me && field === "access" && e.target.value !== "owner";
+          if (lowering && !confirm("Give up owning this campaign? You won't be able to manage its members.")) {
+            e.target.value = m[field];
+            return;
+          }
+          change(m, { [field]: e.target.value });
+        },
+      }, options.map(([v, label]) => h("option", { value: v }, label)))
       : h("span", options.find(([v]) => v === m[field])[1]);
     const invites = can_manage && pendingInvites(`${base}/invites`, `${base}/invites`);
     box.replaceChildren(

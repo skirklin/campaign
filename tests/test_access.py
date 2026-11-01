@@ -212,3 +212,40 @@ def test_cli_bootstrap_claims_unowned_campaigns(site):
     site.sign_in(b, "me@example.com")
     assert [(c["slug"], c["role"], c["access"]) for c in b.get("/api/campaigns").json()] == [
         ("made-locally", "player", "owner")]
+
+
+def test_a_dm_can_show_a_book_to_players_and_hide_it_again(site):
+    dm, src = setup_campaign(site)
+    player, _, _ = join(site, dm, "pc@example.com")
+    editor, _, _ = join(site, dm, "notes@example.com", access="editor")
+    ent = dm.get("/api/campaigns/strahd/entities").json()["entities"][0]["id"]
+    facts = lambda who: [f["statement"] for f in who.get(f"/api/campaigns/strahd/entities/{ent}").json()["facts"]]  # noqa: E731
+    assert "A night hag." not in facts(player)
+
+    # A player-side editor can't reach a DM-only book, so can't reveal it either.
+    assert editor.patch(f"/api/campaigns/strahd/sources/{src}", json={"dm_only": False}).status_code == 404
+    assert player.patch(f"/api/campaigns/strahd/sources/{src}", json={"dm_only": False}).status_code == 403
+
+    assert dm.patch(f"/api/campaigns/strahd/sources/{src}", json={"dm_only": False}).json() == {"id": src, "dm_only": False}
+    assert [s["id"] for s in player.get("/api/campaigns/strahd/sources").json()] == [src]
+    assert "A night hag." in facts(player)  # the book's facts come with it
+    names = player.get("/api/campaigns/strahd/entities").json()["entities"][0]["aliases"]
+    assert "the windmill hag" in names
+
+    # Hidden again: the book's facts go, but what the party learned in play stays.
+    dm.patch(f"/api/campaigns/strahd/sources/{src}", json={"dm_only": True})
+    assert player.get("/api/campaigns/strahd/sources").json() == []
+    assert facts(player) == ["Morgantha bakes pies in the windmill"]
+
+
+def test_an_owner_can_change_their_own_role(site):
+    dm, _ = setup_campaign(site)
+    dm_id = dm.get("/api/me").json()["id"]
+    r = dm.patch(f"/api/campaigns/strahd/members/{dm_id}", json={"role": "player"})
+    assert r.status_code == 200
+    assert dm.get("/api/campaigns").json()[0]["role"] == "player"
+    src = dm.get("/api/campaigns/strahd/sources").json()[0]["id"]
+    assert dm.get(f"/api/campaigns/strahd/sources/{src}/outline").status_code == 404  # now sees what players see
+    # Still the owner: can hand the DM role back to themself, but not give up the last ownership.
+    assert dm.patch(f"/api/campaigns/strahd/members/{dm_id}", json={"role": "dm"}).status_code == 200
+    assert dm.patch(f"/api/campaigns/strahd/members/{dm_id}", json={"access": "editor"}).status_code == 409

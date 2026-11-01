@@ -638,7 +638,28 @@ function sourceRow(c, s, refresh) {
   return h("div.source",
     h("div",
       h("a", { href: `#/campaigns/${c.slug}/source/${s.id}` }, h("strong", s.title)), " ",
-      h("span.badge", s.kind), s.dm_only ? h("span.badge.dm", "DM only") : "",
+      h("span.badge", s.kind), " ",
+      s.kind === "transcript" || !canEdit(c) || c.role !== "dm"
+        ? (s.dm_only ? h("span.badge.dm", "DM only") : "")
+        : h("select.visibility", {
+          value: s.dm_only ? "dm" : "all", "aria-label": `Who can see ${s.title}`,
+          title: "DM only: players and their assistant never see it. Everyone: players see it, and what the world took from it.",
+          onchange: async (e) => {
+            const dmOnly = e.target.value === "dm";
+            if (!dmOnly && !confirm(`Show ${s.title} to players? They'll see its text and everything the world took from it.`)) {
+              e.target.value = "dm";
+              return;
+            }
+            try {
+              await api("PATCH", `${base}/sources/${s.id}`, { dm_only: dmOnly });
+              toast(dmOnly ? `${s.title} is DM only` : `Players can see ${s.title}`);
+              refresh();
+            } catch (err) {
+              toast(err.message, true);
+              e.target.value = s.dm_only ? "dm" : "all";
+            }
+          },
+        }, h("option", { value: "dm" }, "DM only"), h("option", { value: "all" }, "Everyone")),
       h("div.muted.small",
         `${s.chunks} chunks${s.first_page ? ` · pages ${s.first_page}–${s.last_page}` : ""} · `,
         s.has_original

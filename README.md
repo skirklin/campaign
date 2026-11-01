@@ -113,8 +113,9 @@ uv run campaign web            # http://127.0.0.1:8765
     recording. Each past session has its recap and a **Revert** button.
     An ingest is a [job](#background-jobs): it continues with the page
     closed and survives restarts and deploys.
-  - **Reference**: upload module PDFs and notes, mark them DM-only, and
-    search the text directly.
+  - **Reference**: upload module PDFs and notes, mark them DM-only (or
+    switch one to Everyone later: players then see its text and what the
+    world took from it), and search the text directly.
   - **World state**: every person, place, item and quest, from the book and
     from play, with their current status and location. Filter it to what
     the table has touched. Each entry opens to a page with:
@@ -133,7 +134,10 @@ localhost without it, unless you pass `--no-auth`. With sign-in on:
 
 - **Campaigns are shared by invite link.** Each member is a DM (sees
   everything) or a player (sees only what the party knows), with owner,
-  editor or viewer access. A campaign's **Members** tab manages this.
+  editor or viewer access. A campaign's **Members** tab manages this:
+  owners change anyone's role and access, their own included (making
+  someone else the DM, or playing in a campaign they set up), but a
+  campaign always keeps at least one owner.
 - **Character sheets belong to their players.** Everyone in the campaign
   can read them; their owner and the campaign's DMs can change them.
 - **A character lives in one campaign**, on its **Party** tab. The sheet is
