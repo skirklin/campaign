@@ -423,3 +423,21 @@ def test_recaps_put_past_play_on_the_same_timeline(store):
     assert t["add_recap"](title="The call", summary="The boar hunt, the Oracle, the prophecy.", number=1).startswith("Recap 1")
     assert "isn't a recap" in t["add_recap"](title="x", summary="y", number=5)
     assert store.next_ingest_session(camp) == 3
+
+
+def test_tools_for_characters_whose_sheets_are_kept_elsewhere(store):
+    camp = store.create_campaign("Odyssey", "dm")
+    t = tools(store, "odyssey")
+    assert t["add_party_member"](name="Agrippa", sheet_url="https://www.dndbeyond.com/characters/1").startswith(
+        "Added Agrippa")
+    assert "already in the party" in t["add_party_member"](name="agrippa")
+    got = json.loads(t["get_character"](name="Agrippa"))
+    assert got["sheet"] is None and got["sheet_kept_elsewhere"].startswith("https://") and got["carrying"] == []
+    assert "kept elsewhere" in t["update_character"](name="Agrippa", patch={"hp": {"current": 3}}, reason="x")
+    t["add_items"](items=[{"name": "Shield"}], holder="Agrippa", reason="claimed")
+    assert json.loads(t["get_character"](name="Agrippa"))["carrying"][0]["name"] == "Shield"
+    # They count toward the party's size; the level comes from the sheets that are here.
+    from campaign.encounters import party_of
+    assert party_of(store, camp) is None
+    t["update_character"](name="Cid", patch={"classes": [{"name": "Barbarian", "level": 7}]}, reason="new")
+    assert party_of(store, camp).model_dump() == {"size": 2, "level": 7}

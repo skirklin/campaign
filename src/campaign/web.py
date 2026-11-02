@@ -58,6 +58,13 @@ class NewCampaign(BaseModel):
 class NewCharacter(BaseModel):
     name: str
     campaign: str
+    in_app: bool = True  # False: the sheet is kept elsewhere (D&D Beyond, paper); the app tracks what they carry
+    sheet_url: str = ""  # where, if it's online
+
+
+class CharacterDetails(BaseModel):
+    name: str | None = None
+    sheet_url: str | None = None  # "" clears it
 
 
 class CopyCharacter(BaseModel):
@@ -934,6 +941,7 @@ def create_app(
         return Inventory(s, viewer(s, request, campaign_id), user_id(request))
 
     def sheet_payload(s: Store, request: Request, ch: dict[str, Any]) -> dict[str, Any]:
+        """A character as the current user may see it. Without an in-app sheet, `sheet` and `derived` are None."""
         inv = inventory_of(s, request, ch["campaign_id"])
         sheet = inv.sheet(ch)
         holder = inv.character_holder(ch["id"])
@@ -944,9 +952,11 @@ def create_app(
                            # Linked only for someone who can still open the original.
                            "id": origin["id"] if character_rights(s, request, origin)[0] else None}
         return {
-            "id": ch["id"], "campaign": campaign_label(s, ch["campaign_id"]), "can_edit": ch["can_edit"],
+            "id": ch["id"], "name": ch["name"], "campaign": campaign_label(s, ch["campaign_id"]),
+            "can_edit": ch["can_edit"], "owned": local or ch["owner_id"] is not None, "sheet_url": ch["sheet_url"],
             "entity_id": s.link_character(ch["id"]), "copied_from": copied_from,
-            "sheet": sheet.model_dump(), "derived": sheet.derived(), "log": s.character_log(ch["id"], limit=30),
+            "sheet": sheet.model_dump() if sheet else None, "derived": sheet.derived() if sheet else None,
+            "log": s.character_log(ch["id"], limit=30),
             "inventory": {"holder": holder, "items": inv.holdings(holder), "purse": inv.purse(holder),
                           "log": inv.log(holder, everyone=False, limit=30)},
             "files": [{"id": f["id"], "name": f["name"], "created_at": f["created_at"],
@@ -962,11 +972,17 @@ def create_app(
 
     def character_card(s: Store, request: Request, ch: dict[str, Any]) -> dict[str, Any]:
         sheet = inventory_of(s, request, ch["campaign_id"]).sheet(ch)
-        return {
+        card = {
             "id": ch["id"],
-            "name": sheet.name,
+            "name": ch["name"],
             "campaign": campaign_label(s, ch["campaign_id"]),
             "mine": local or ch["owner_id"] == user_of(request)["id"],
+            "in_app": sheet is not None,
+            "sheet_url": ch["sheet_url"],
+        }
+        if sheet is None:
+            return card | {"summary": "", "species": "", "hp": None}
+        return card | {
             "summary": " / ".join(f"{c.name} {c.level}" for c in sheet.classes),
             "species": sheet.species,
             "hp": sheet.hp.model_dump() | {"max": sheet.hp_max},
@@ -1000,12 +1016,15 @@ def create_app(
 
     def create(
         s: Store, request: Request, file: CharacterFile, campaign_id: int, reason: str, copied_from: int | None = None,
+        in_app: bool = True, sheet_url: str | None = None,
     ) -> dict:
-        """A new character from a sheet file: the sheet, and what they carry into the party's inventory."""
+        """A new character from a sheet file: the sheet (unless it's kept elsewhere), and what they carry
+        into the party's inventory."""
         owner_id = None if local else user_of(request)["id"]
         try:
             character_id = s.create_character(
-                file.sheet().model_dump(), campaign_id, owner_id, reason=reason, copied_from=copied_from,
+                file.sheet().model_dump() if in_app else None, campaign_id, owner_id, reason=reason,
+                copied_from=copied_from, name=file.name, sheet_url=sheet_url,
             )
         except sqlite3.IntegrityError:
             raise HTTPException(409, f"this campaign already has a character called {file.name}")
@@ -1017,7 +1036,7 @@ def create_app(
         """A character as a file, carrying what they have."""
         inv = inventory_of(s, request, ch["campaign_id"])
         holder = inv.character_holder(ch["id"])
-        return CharacterFile.model_validate(ch["sheet"] | {
+        return CharacterFile.model_validate((ch["sheet"] or {"name": ch["name"]}) | {
             "inventory": [i.model_dump() for i in inv.carried(holder)], "currency": inv.purse(holder)})
 
     @app.post("/api/characters", status_code=201)
@@ -1026,7 +1045,31 @@ def create_app(
         if not name:
             raise HTTPException(422, "name is required")
         campaign_id = campaign_for_new_character(s, request, body.campaign)
-        return create(s, request, CharacterFile(name=name), campaign_id, "created")
+        return create(s, request, CharacterFile(name=name), campaign_id,
+                      "created" if body.in_app else "added; sheet kept elsewhere",
+                      in_app=body.in_app, sheet_url=body.sheet_url.strip() or None)
+
+    @app.patch("/api/characters/{character_id}")
+    def character_details(character_id: int, body: CharacterDetails, request: Request,
+                          s: Store = Depends(store)) -> dict[str, Any]:
+        """Rename a character, or say where its sheet is kept."""
+        ch = character_or_404(s, request, character_id, write=True)
+        try:
+            s.update_character_details(character_id, body.name, body.sheet_url,
+                                       reason="renamed" if body.name else "moved its sheet")
+        except ValueError as err:
+            raise HTTPException(422, str(err))
+        except sqlite3.IntegrityError:
+            raise HTTPException(409, f"this campaign already has a character called {body.name}")
+        return sheet_payload(s, request, character_or_404(s, request, ch["id"]))
+
+    @app.post("/api/characters/{character_id}/sheet")
+    def start_sheet(character_id: int, request: Request, s: Store = Depends(store)) -> dict[str, Any]:
+        """Start an in-app sheet for a character whose sheet was kept elsewhere; what they carry stays."""
+        ch = character_or_404(s, request, character_id, write=True)
+        if ch["sheet"] is not None:
+            raise HTTPException(409, f"{ch['name']} already has a sheet here")
+        return save(s, request, ch, CharacterSheet(name=ch["name"]), "started a sheet here")
 
     @app.post("/api/characters/import", status_code=201)
     def import_character(
@@ -1047,7 +1090,8 @@ def create_app(
         if campaign_id == ch["campaign_id"]:
             raise HTTPException(422, "the character is already in that campaign")
         origin = s.campaign_by_id(ch["campaign_id"]).name
-        made = create(s, request, character_file(s, request, ch), campaign_id, f"copied from {origin}", copied_from=ch["id"])
+        made = create(s, request, character_file(s, request, ch), campaign_id, f"copied from {origin}", copied_from=ch["id"],
+                      in_app=ch["sheet"] is not None, sheet_url=ch["sheet_url"])
         for f in s.character_files(ch["id"]):  # the scan goes with it
             s.add_character_file(made["id"], f["blob"], f["name"])
         return sheet_payload(s, request, character_or_404(s, request, made["id"]))
@@ -1110,6 +1154,8 @@ def create_app(
     def hp(character_id: int, body: HpChange, request: Request, s: Store = Depends(store)) -> dict[str, Any]:
         ch = character_or_404(s, request, character_id, write=True)
         sheet = inventory_of(s, request, ch["campaign_id"]).sheet(ch)
+        if sheet is None:
+            raise HTTPException(409, f"{ch['name']}'s sheet is kept elsewhere")
         apply_hp(sheet, body.delta)
         return save(s, request, ch, sheet, f"hp {body.delta:+d}")
 
@@ -1117,6 +1163,8 @@ def create_app(
     def take_rest(character_id: int, body: RestRequest, request: Request, s: Store = Depends(store)) -> dict:
         ch = character_or_404(s, request, character_id, write=True)
         sheet = inventory_of(s, request, ch["campaign_id"]).sheet(ch)
+        if sheet is None:
+            raise HTTPException(409, f"{ch['name']}'s sheet is kept elsewhere")
         rest(sheet, body.long)
         return save(s, request, ch, sheet, "long rest" if body.long else "short rest")
 
@@ -1132,8 +1180,15 @@ def create_app(
         return None if local else user_of(request)["id"]
 
     def holder_rights(s: Store, request: Request, inv: Inventory, holder: int | None) -> bool:
+        """Whether the current user may change what `holder` has: the party's and outsiders' things,
+        anyone in the campaign; a character's, whoever may change that character, and anyone's
+        for a character nobody here plays (someone who keeps their sheet elsewhere), which the
+        whole table looks after."""
         ch = inv.character_of(holder)
-        return ch is None or character_rights(s, request, s.character(ch["id"]))[1]
+        if ch is None:
+            return True
+        ch = s.character(ch["id"])
+        return ch["owner_id"] is None or character_rights(s, request, ch)[1]
 
     def must_hold(s: Store, request: Request, inv: Inventory, holder: int | None) -> None:
         if not holder_rights(s, request, inv, holder):

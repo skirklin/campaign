@@ -258,3 +258,37 @@ def test_an_owner_can_change_their_own_role(site):
     # Still the owner: can hand the DM role back to themself, but not give up the last ownership.
     assert dm.patch(f"/api/campaigns/strahd/members/{dm_id}", json={"role": "dm"}).status_code == 200
     assert dm.patch(f"/api/campaigns/strahd/members/{dm_id}", json={"access": "editor"}).status_code == 409
+
+
+def test_characters_whose_sheets_are_kept_elsewhere(site):
+    """A party member can keep their sheet on D&D Beyond or paper: the app tracks what they carry."""
+    dm, _ = setup_campaign(site)
+    alice, _, _ = join(site, dm, "alice@example.com")
+    bob, _, _ = join(site, dm, "bob@example.com")
+    url = "https://www.dndbeyond.com/characters/123"
+    r = alice.post("/api/characters", json={"name": "Agrippa", "campaign": "strahd", "in_app": False, "sheet_url": url})
+    assert r.status_code == 201 and r.json()["sheet"] is None and r.json()["derived"] is None
+    agrippa, holder = r.json()["id"], r.json()["inventory"]["holder"]
+    card = next(c for c in alice.get("/api/campaigns/strahd/characters").json() if c["id"] == agrippa)
+    assert card == card | {"in_app": False, "sheet_url": url, "hp": None}
+    # Claiming for them works like for anyone; Alice plays Agrippa, so Bob can't.
+    base = "/api/campaigns/strahd/inventory"
+    loot = dm.post(f"{base}/items", json={"name": "Shield of Volkan"}).json()["holders"][0]["items"][0]["id"]
+    assert bob.post(f"{base}/items/{loot}/move", json={"to": holder}).status_code == 403
+    assert alice.post(f"{base}/items/{loot}/move", json={"to": holder}).status_code == 200
+    assert alice.post(f"/api/characters/{agrippa}/hp", json={"delta": -3}).status_code == 409
+    # A character nobody here plays is the table's: anyone in the campaign looks after what they carry.
+    s = Store(site.db)
+    camp = s.campaign("strahd")
+    lyra = s.create_character(None, camp.id, name="Lyra", reason="added")
+    s.close()
+    lyra_holder = next(h["id"] for h in bob.get(base).json()["holders"] if h["name"] == "Lyra")
+    assert bob.post(f"{base}/items/{loot}/move", json={"to": lyra_holder}).status_code == 403  # not Bob's to give
+    potion = bob.post(f"{base}/items", json={"name": "Potion"}).json()["holders"][0]["items"][0]["id"]
+    assert bob.post(f"{base}/items/{potion}/move", json={"to": lyra_holder}).status_code == 200
+    # Renaming, moving the sheet, and starting one here later; what they carry stays.
+    assert alice.patch(f"/api/characters/{agrippa}", json={"name": "Agrippa the Bold"}).json()["name"] == "Agrippa the Bold"
+    assert alice.patch(f"/api/characters/{agrippa}", json={"sheet_url": ""}).json()["sheet_url"] is None
+    started = alice.post(f"/api/characters/{agrippa}/sheet").json()
+    assert started["sheet"]["name"] == "Agrippa the Bold" and started["inventory"]["items"][0]["name"] == "Shield of Volkan"
+    assert alice.post(f"/api/characters/{agrippa}/sheet").status_code == 409

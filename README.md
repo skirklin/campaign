@@ -177,6 +177,13 @@ localhost without it, unless you pass `--no-auth`. With sign-in on:
   it (Gauntlets of Ogre Power). Nicknames become the world entry's
   aliases. Sheets saved before this
   keep their numbers as flat amounts until edited.
+- **Sheets can be kept elsewhere.** A party member who uses D&D Beyond or
+  paper is added with "Their sheet is kept elsewhere" (and a link, if it's
+  online). Their page shows where the sheet is and what they carry; the
+  inventory, claiming, the world and recaps treat them like anyone else, and
+  "Start a sheet here instead" keeps everything they carry. A character
+  nobody here plays is the table's: anyone in the campaign can look after
+  what they carry. Encounters count them toward the party's size.
 - **The party's inventory** is one list of everything the party owns, by
   who has it: the party itself (loot nobody has claimed yet, and the
   shared purse), each character, and anyone they've left something with

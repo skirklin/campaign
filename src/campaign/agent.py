@@ -42,7 +42,10 @@ sources:
   for what's at a place or on a creature (and what's been taken), and
   roll_table to roll on the book's random encounter, treasure and other
   tables. Keyed areas answer to their map key ("C3").
-- Player character sheets: get_character, update_character.
+- Player characters: get_character, update_character. Some keep their sheet
+  outside the app (D&D Beyond, paper): then only what they carry is tracked
+  here, in the party's inventory, and their stats aren't known. add_party_member
+  adds such a character.
 - The party's inventory: everything the party owns and who has it, the
   party itself (loot nobody has claimed, the shared purse), a character, or
   someone they left it with (inventory). New loot goes in with add_items,
@@ -510,6 +513,7 @@ _DESCRIBE: dict[str, Callable[[dict[str, Any]], str]] = {
     "get_character": lambda a: f"Read {a.get('name', '')}'s sheet",
     "update_character": lambda a: f"Updated {a.get('name', '')}'s sheet" + (f": {a['reason']}" if a.get("reason") else ""),
     "create_character": lambda a: "Created a character",
+    "add_party_member": lambda a: f"Added {a.get('name', 'a character')} to the party",
     "inventory": lambda a: "Checked the party's inventory",
     "add_items": lambda a: "Added " + ", ".join(str(i.get("name", "?")) for i in a.get("items") or [])
                  + (f" for {a['holder']}" if a.get("holder") not in (None, "party") else ""),

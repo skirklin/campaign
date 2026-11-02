@@ -384,14 +384,26 @@ def test_the_schema_is_made_whole_and_the_deployed_database_brought_up_to_it(tmp
     db = tmp_path / "campaign.db"
     s = Store(db)
     assert s.schema_version == SCHEMA_VERSION
-    s.create_campaign("Odyssey", "dm")
-    # The deployment as it stands: version 16, with the tables jobs replaced still there.
-    s.conn.executescript("CREATE TABLE ingests (id INTEGER PRIMARY KEY); CREATE TABLE ingest_log (ingest_id INTEGER);"
-                         " PRAGMA user_version = 16;")
+    camp = s.create_campaign("Odyssey", "dm")
+    cid = s.create_character({"name": "Cid"}, camp.id)
+    s.add_character_file(cid, "blob", "scan.pdf")
+    # The deployment as it stands: version 17, where every character had a sheet here.
+    s.conn.executescript("""
+        PRAGMA foreign_keys = OFF;
+        CREATE TABLE characters_17 (id INTEGER PRIMARY KEY, campaign_id INTEGER NOT NULL REFERENCES campaigns(id),
+            owner_id INTEGER, name TEXT NOT NULL, sheet TEXT NOT NULL, entity_id INTEGER, copied_from INTEGER,
+            updated_at TEXT NOT NULL, UNIQUE (campaign_id, name));
+        INSERT INTO characters_17 SELECT id, campaign_id, owner_id, name, sheet, entity_id, copied_from, updated_at
+            FROM characters;
+        DROP TABLE characters; ALTER TABLE characters_17 RENAME TO characters;
+        PRAGMA user_version = 17; PRAGMA foreign_keys = ON;""")
     s.close()
     s = Store(db)
-    assert s.schema_version == SCHEMA_VERSION and s.campaign("odyssey").name == "Odyssey"
-    assert not s.conn.execute("SELECT 1 FROM sqlite_master WHERE name IN ('ingests', 'ingest_log')").fetchone()
+    assert s.schema_version == SCHEMA_VERSION
+    ch = s.character(cid)
+    assert ch["sheet"] == {"name": "Cid"} and ch["sheet_url"] is None
+    # Rebuilding the table left what hangs off it alone.
+    assert [l["reason"] for l in s.character_log(cid)] == ["created"] and len(s.character_files(cid)) == 1
     assert list((tmp_path / "backups").glob(f"campaign-*-pre-v{SCHEMA_VERSION}.db"))
     s.close()
     assert Store(db).schema_version == SCHEMA_VERSION  # reopening changes nothing
