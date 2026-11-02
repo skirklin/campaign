@@ -155,7 +155,8 @@ export async function sheetView(id) {
   if (data.sheet === null) return memberView(data);
   // A new, empty character opens in Edit: there's nothing to play yet.
   const play = preferredMode() === "play" && data.sheet.classes.length > 0;
-  return new (play ? PlayView : SheetView)(data).el;
+  const view = new (play ? PlayView : SheetView)(data).el;
+  return data.sheet_source === "dndbeyond" ? h("div.mirrored", mirrorPanel(data), view) : view;
 }
 
 export class SheetView {
@@ -975,6 +976,7 @@ function memberView(data) {
     h("p.muted", "Their sheet is kept outside the app, so it's not here: what they carry is, in the party's inventory.",
       data.owned ? "" : " Nobody here plays them, so anyone in the campaign can look after what they carry."),
     data.can_edit && h("label.field", h("span", "Where their sheet is"), url),
+    (data.can_edit || !data.owned) && readFromDndBeyond(data),
     inventory.el,
     h("p.small", h("a", { href: `#/campaigns/${data.campaign.slug}/entity/${data.entity_id}` }, "In the world")),
     data.can_edit && h("div.actions",
@@ -993,4 +995,95 @@ function memberView(data) {
         location.hash = `#/campaigns/${data.campaign.slug}/party`;
       } }, "Remove")),
   );
+}
+
+// -- D&D Beyond -----------------------------------------------------------------------
+// A sheet on D&D Beyond can be mirrored here (dndbeyond.py): read when it's public there, or from
+// its data pasted by someone who can see it. D&D Beyond stays its source: a refresh replaces the
+// sheet here. What they carry stays the party inventory's; the differences are offered to bring in.
+
+const ddbId = (url) => /dndbeyond\.com\/(?:[^?#]*\/)?characters?\/(\d+)/.exec(url || "")?.[1] || null;
+const ddbData = (id) => `https://character-service.dndbeyond.com/character/v5/character/${id}`;
+
+async function rerender(id) {
+  document.getElementById("view").replaceChildren(await sheetView(id));
+}
+
+// Read it from D&D Beyond: fetched by the server if it's public, else pasted from the browser.
+async function readDndBeyond(data, body) {
+  try {
+    await api("POST", `/api/characters/${data.id}/dndbeyond`, body);
+    rerender(data.id);
+    return true;
+  } catch (err) {
+    toast(err.message, true);
+    return false;
+  }
+}
+
+function pasteBox(data) {
+  const id = ddbId(data.sheet_url);
+  const box = h("textarea", { rows: 4, placeholder: "Paste everything the page shows, from { to }", "aria-label": "D&D Beyond data" });
+  return h("details.ddb-paste",
+    h("summary.small", "Not public on D&D Beyond? Paste its data"),
+    h("p.small.muted", "Someone who can see the character on D&D Beyond (signed in there) opens ",
+      id ? h("a", { href: ddbData(id), target: "_blank", rel: "noopener" }, "its data") : "its data link",
+      ", selects all, copies and pastes it here. Nothing is signed in from the app."),
+    box,
+    h("button", { onclick: () => box.value.trim() && readDndBeyond(data, { data: box.value }) }, "Read pasted data"));
+}
+
+// On the page of a character whose sheet is kept elsewhere: start mirroring it from D&D Beyond.
+function readFromDndBeyond(data) {
+  const id = ddbId(data.sheet_url);
+  return h("div.play-block.ddb",
+    h("div.block-head", h("h2", "From D&D Beyond"),
+      h("span.muted.small", "its numbers here, kept up to date by hand")),
+    id ? h("button.primary", { onclick: (e) => { e.target.disabled = true; readDndBeyond(data, {}).finally(() => (e.target.disabled = false)); } },
+      "Read their sheet from D&D Beyond")
+      : h("p.small.muted", "Put their D&D Beyond link above to read their sheet from there."),
+    id && pasteBox(data));
+}
+
+// Above a mirrored sheet: where it's from, refreshing it, and how what it carries differs from here.
+function mirrorPanel(data) {
+  const when = data.synced_at ? new Date(data.synced_at).toLocaleString() : "";
+  const diff = data.dndbeyond?.differences || { missing: [], extra: [], coin: {} };
+  const picks = new Set(diff.missing.map((m) => m.index));
+  const bring = async (body) => {
+    try {
+      await api("POST", `/api/characters/${data.id}/dndbeyond/bring`, body);
+      rerender(data.id);
+    } catch (err) {
+      toast(err.message, true);
+    }
+  };
+  const coins = Object.entries(diff.coin);
+  const editable = data.can_edit || !data.owned;
+  return h("section.ddb-mirror",
+    h("p.small",
+      h("strong", "From D&D Beyond"), when && ` · read ${when}`, ". Its numbers are D&D Beyond's: changes here are replaced when it's read again. ",
+      data.sheet_url && h("a", { href: data.sheet_url, target: "_blank", rel: "noopener" }, "Open on D&D Beyond ↗")),
+    editable && h("div.actions",
+      h("button", { onclick: (e) => { e.target.disabled = true; readDndBeyond(data, {}).finally(() => (e.target.disabled = false)); } }, "Read it again"),
+      h("button", { onclick: async () => {
+        if (!confirm("Keep this sheet here from now on? It stops being read from D&D Beyond, and edits here are the sheet.")) return;
+        await api("DELETE", `/api/characters/${data.id}/dndbeyond`);
+        rerender(data.id);
+      } }, "Keep it here instead")),
+    editable && pasteBox(data),
+    (diff.missing.length > 0 || coins.length > 0) && h("div.ddb-diff",
+      h("p.small", "D&D Beyond says they carry things the party's inventory doesn't:"),
+      diff.missing.length > 0 && h("ul.ddb-missing", diff.missing.map((m) => h("li", h("label.mini",
+        h("input", { type: "checkbox", checked: true, disabled: !editable,
+          onchange: (e) => (e.target.checked ? picks.add(m.index) : picks.delete(m.index)) }),
+        m.qty !== 1 ? `${m.name} ×${m.qty}` : m.name)))),
+      coins.length > 0 && h("p.small", "Coin on D&D Beyond: ", coins.map(([c, v]) => `${v.dndbeyond} ${c} (here ${v.here})`).join(", ")),
+      editable && h("div.actions",
+        diff.missing.length > 0 && h("button", { onclick: () => bring({ items: [...picks] }) }, "Add the ticked ones to what they carry"),
+        coins.length > 0 && h("button", { onclick: () => bring({ coin: true }) }, "Use D&D Beyond's coin"))),
+    diff.extra.length > 0 && h("p.small.muted", "In the party's inventory but not on D&D Beyond: ",
+      diff.extra.map((x) => (x.qty !== 1 ? `${x.name} ×${x.qty}` : x.name)).join(", ")),
+    data.dndbeyond?.not_read?.length > 0 && h("details.small", h("summary.muted", "Not read from D&D Beyond"),
+      h("ul", data.dndbeyond.not_read.map((n) => h("li", n)))));
 }

@@ -184,6 +184,16 @@ localhost without it, unless you pass `--no-auth`. With sign-in on:
   "Start a sheet here instead" keeps everything they carry. A character
   nobody here plays is the table's: anyone in the campaign can look after
   what they carry. Encounters count them toward the party's size.
+- **Sheets on D&D Beyond can be mirrored.** On the page of a character whose
+  sheet is on D&D Beyond, **Read their sheet from D&D Beyond** fetches it if
+  it's public there; if not, someone who can see it opens its data link in
+  their signed-in browser and pastes it. The app then shows D&D Beyond's
+  numbers (its equipped items count, as they do there) and **Read it again**
+  refreshes them; edits here are replaced on refresh, and **Keep it here
+  instead** makes the sheet the app's own. What they carry stays the party
+  inventory's: the sheet lists what D&D Beyond has that the inventory
+  doesn't, and its coin, to bring in. Nothing signs in to D&D Beyond, polls
+  it or writes back (`dndbeyond.py`; chat: `refresh_from_dndbeyond`).
 - **The party's inventory** is one list of everything the party owns, by
   who has it: the party itself (loot nobody has claimed yet, and the
   shared purse), each character, and anyone they've left something with

@@ -297,3 +297,85 @@ def test_party_inventory(client):
     inv = client.get(base).json()
     assert [h["name"] for h in inv["holders"]] == ["The party", "Vulkan"] and inv["holders"][0]["purse"]["gp"] == 89
 
+
+
+DDB = Path(__file__).parent / "fixtures" / "dndbeyond_character.json"
+
+
+def test_dndbeyond_link_parsing_and_reading():
+    from campaign import dndbeyond
+
+    assert dndbeyond.character_id("https://www.dndbeyond.com/characters/123456") == "123456"
+    assert dndbeyond.character_id("https://www.dndbeyond.com/profile/someone/characters/123456/builder") == "123456"
+    assert dndbeyond.character_id("123456") == "123456"
+    with pytest.raises(dndbeyond.DndBeyondError, match="isn't a D&D Beyond"):
+        dndbeyond.character_id("https://example.com/sheet")
+    with pytest.raises(dndbeyond.DndBeyondError, match="from { to }"):
+        dndbeyond.parse("<html>not json")
+    file, leftover = dndbeyond.to_file(dndbeyond.parse(DDB.read_text()))
+    d = file.derived()
+    assert (file.name, file.species, file.alignment, file.level) == ("Agrippa", "Mountain Dwarf", "NG", 5)
+    assert file.abilities["con"] == 16  # 14, +2 from being a mountain dwarf
+    assert {p["label"]: p["value"] for p in d["ac"]["parts"]} == {"Chain Mail": 16, "Shield": 2, "Cloak of Protection": 1}
+    assert d["hp_max"]["total"] == 44 + 3 * 5 + 2 * 5 and file.hp.current == 69 - 10  # Tough; 10 damage taken
+    assert file.save_proficiencies == ["con", "str"] and "perception" in file.skill_proficiencies
+    assert d["attacks"][0]["to_hit"]["total"] == 3 + 3 + 1 and d["attacks"][0]["text"] == "1d8+4 slashing"
+    assert file.currency["gp"] == 120 and "Extra Attack" in file.features and "Indomitable" not in file.features
+    assert leftover and "limited uses" in leftover[-1]
+
+
+def test_a_sheet_mirrored_from_dndbeyond(client, monkeypatch):
+    from campaign import dndbeyond
+
+    client.post("/api/campaigns", json={"name": "Odyssey"})
+    r = client.post("/api/characters", json={"name": "Agrippa", "campaign": "odyssey", "in_app": False,
+                                             "sheet_url": "https://www.dndbeyond.com/characters/123456"})
+    cid = r.json()["id"]
+    # Fetched if public; a private one says to make it public or paste its data.
+    def private(link, timeout=15):
+        raise dndbeyond.DndBeyondError("D&D Beyond won't share that character: it isn't public")
+    monkeypatch.setattr(dndbeyond, "fetch", private)
+    assert "isn't public" in client.post(f"/api/characters/{cid}/dndbeyond", json={}).json()["detail"]
+    monkeypatch.setattr(dndbeyond, "fetch", lambda link, timeout=15: dndbeyond.parse(DDB.read_text()))
+    r = client.post(f"/api/characters/{cid}/dndbeyond", json={}).json()
+    assert r["sheet_source"] == "dndbeyond" and r["synced_at"] and r["sheet"]["classes"][0]["name"] == "Fighter"
+    assert r["derived"]["ac"]["total"] == 19  # D&D Beyond's equipped gear counts, as it does there
+    diff = r["dndbeyond"]["differences"]
+    assert [m["name"] for m in diff["missing"]][:2] == ["Chain Mail", "Shield"] and diff["coin"]["gp"] == \
+        {"dndbeyond": 120, "here": 0}
+    assert r["dndbeyond"]["data_url"].endswith("/character/v5/character/123456")
+
+    # Bringing some of it, and their coin, into the party's inventory.
+    potions = next(m["index"] for m in diff["missing"] if m["name"] == "Potion of Healing")
+    r = client.post(f"/api/characters/{cid}/dndbeyond/bring", json={"items": [potions, 3], "coin": True}).json()
+    assert {i["name"]: i["qty"] for i in r["inventory"]["items"]} == {"Potion of Healing": 2, "Cloak of Protection": 1}
+    assert r["inventory"]["purse"]["gp"] == 120 and r["dndbeyond"]["differences"]["coin"] == {}
+    cloak = next(i for i in r["inventory"]["items"] if i["name"] == "Cloak of Protection")
+    assert cloak["item"]["defined"] and cloak["requires_attunement"]  # a world item that does something now
+
+    # Pasted data works the same; keeping it here stops the mirroring.
+    r = client.post(f"/api/characters/{cid}/dndbeyond", json={"data": DDB.read_text()}).json()
+    assert r["sheet_source"] == "dndbeyond"
+    assert client.delete(f"/api/characters/{cid}/dndbeyond").json()["sheet_source"] == "app"
+
+
+def test_dndbeyond_fetch_says_what_went_wrong(monkeypatch):
+    import io
+    import urllib.error
+
+    from campaign import dndbeyond
+
+    def answer(code):
+        def urlopen(req, timeout):
+            assert req.full_url == "https://character-service.dndbeyond.com/character/v5/character/123456"
+            if code == 200:
+                return io.BytesIO(DDB.read_bytes())
+            raise urllib.error.HTTPError(req.full_url, code, "no", {}, None)
+        return urlopen
+
+    monkeypatch.setattr(dndbeyond.urllib.request, "urlopen", answer(200))
+    assert dndbeyond.fetch("https://www.dndbeyond.com/characters/123456")["name"] == "Agrippa"
+    for code, words in ((403, "isn't public"), (404, "no character"), (500, "answered 500")):
+        monkeypatch.setattr(dndbeyond.urllib.request, "urlopen", answer(code))
+        with pytest.raises(dndbeyond.DndBeyondError, match=words):
+            dndbeyond.fetch("123456")

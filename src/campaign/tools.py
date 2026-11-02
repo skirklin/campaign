@@ -13,7 +13,7 @@ from typing import Any, Callable
 
 from pydantic import ValidationError
 
-from . import encounters, tables
+from . import dndbeyond, encounters, tables
 from .charsheet import Bonus, CharacterFile, CharacterSheet, ItemMechanics, merge_patch
 from .db import Campaign, Store
 from .inventory import Inventory, InventoryError
@@ -564,7 +564,9 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         if found["sheet"] is None:
             return _json({"name": found["name"], "sheet": None,
                           "sheet_kept_elsewhere": found["sheet_url"] or "elsewhere (not in the app)"} | carried)
-        return _json({"sheet": found["sheet"], "derived": inv.sheet(found).derived()} | carried)
+        source = {"sheet_from": f"D&D Beyond ({found['sheet_url']}), as read {found['synced_at']}"} \
+            if found["sheet_source"] == "dndbeyond" else {}
+        return _json(source | {"sheet": found["sheet"], "derived": inv.sheet(found).derived()} | carried)
 
     def update_character(name: str, patch: dict[str, Any], reason: str) -> str:
         """Change a character sheet with a JSON merge patch; creates the character if new.
@@ -643,6 +645,31 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         character_id = store.create_character(None, campaign.id, ctx.user_id if mine else None,
                                               reason="added; sheet kept elsewhere", name=name, sheet_url=sheet_url)
         return f"Added {name} to the party (id {character_id}); their sheet is kept elsewhere."
+
+    def refresh_from_dndbeyond(name: str, link: str = "") -> str:
+        """Read a character's sheet from D&D Beyond again (or for the first time, with their link), when
+        it's set to Public there. D&D Beyond is then the sheet's source; what they carry stays the party
+        inventory's, and the answer says how the two differ (bring items in with add_items).
+
+        Args:
+            name: The character.
+            link: Their D&D Beyond link, if the app doesn't have it yet.
+        """
+        found = _find_character(name)
+        if found is None:
+            return f"No character {name!r} in this campaign; add_party_member first."
+        try:
+            url = f"https://www.dndbeyond.com/characters/{dndbeyond.character_id(link or found['sheet_url'] or '')}"
+            data = dndbeyond.fetch(url)
+            file, leftover = dndbeyond.to_file(data)
+        except dndbeyond.DndBeyondError as err:
+            return f"Not done: {err}"
+        store.mirror_character(found["id"], file.sheet().model_dump(), url, json.dumps(data).encode(),
+                               "refreshed from D&D Beyond")
+        inv = Inventory(store, campaign, ctx.user_id)
+        holder = inv.character_holder(found["id"])
+        return _json({"refreshed": file.name, "level": file.level, "not_read": leftover,
+                      "carrying_differs": dndbeyond.differences(file, inv.holdings(holder), inv.purse(holder))})
 
     def create_character(sheet: CharacterFile, reason: str = "created") -> str:
         """Add a new player character to this campaign from a complete sheet.
@@ -852,6 +879,6 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         inventory,
     ]
     writers = [add_recap, record_fact, end_fact, retract_fact, party_learned, add_journal_entry, delete_journal_entry,
-               update_character, create_character, add_party_member, add_items, change_item, give_item, link_item, change_coin,
+               update_character, create_character, add_party_member, refresh_from_dndbeyond, add_items, change_item, give_item, link_item, change_coin,
                split_party_coin, define_item]
     return readers + (writers if writable else [])

@@ -386,23 +386,17 @@ def test_the_schema_is_made_whole_and_the_deployed_database_brought_up_to_it(tmp
     assert s.schema_version == SCHEMA_VERSION
     camp = s.create_campaign("Odyssey", "dm")
     cid = s.create_character({"name": "Cid"}, camp.id)
+    agrippa = s.create_character(None, camp.id, name="Agrippa", sheet_url="https://www.dndbeyond.com/characters/1")
     s.add_character_file(cid, "blob", "scan.pdf")
-    # The deployment as it stands: version 17, where every character had a sheet here.
+    # The deployment as it stands: version 18, which didn't say where a sheet is kept.
     s.conn.executescript("""
-        PRAGMA foreign_keys = OFF;
-        CREATE TABLE characters_17 (id INTEGER PRIMARY KEY, campaign_id INTEGER NOT NULL REFERENCES campaigns(id),
-            owner_id INTEGER, name TEXT NOT NULL, sheet TEXT NOT NULL, entity_id INTEGER, copied_from INTEGER,
-            updated_at TEXT NOT NULL, UNIQUE (campaign_id, name));
-        INSERT INTO characters_17 SELECT id, campaign_id, owner_id, name, sheet, entity_id, copied_from, updated_at
-            FROM characters;
-        DROP TABLE characters; ALTER TABLE characters_17 RENAME TO characters;
-        PRAGMA user_version = 17; PRAGMA foreign_keys = ON;""")
+        ALTER TABLE characters DROP COLUMN sheet_source; ALTER TABLE characters DROP COLUMN synced_at;
+        ALTER TABLE characters DROP COLUMN synced_blob; PRAGMA user_version = 18;""")
     s.close()
     s = Store(db)
     assert s.schema_version == SCHEMA_VERSION
-    ch = s.character(cid)
-    assert ch["sheet"] == {"name": "Cid"} and ch["sheet_url"] is None
-    # Rebuilding the table left what hangs off it alone.
+    assert s.character(cid)["sheet_source"] == "app" and s.character(agrippa)["sheet_source"] == "elsewhere"
+    assert s.character(agrippa)["sheet_url"].endswith("/1")
     assert [l["reason"] for l in s.character_log(cid)] == ["created"] and len(s.character_files(cid)) == 1
     assert list((tmp_path / "backups").glob(f"campaign-*-pre-v{SCHEMA_VERSION}.db"))
     s.close()

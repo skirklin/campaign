@@ -1,0 +1,93 @@
+{
+  "id": 123456,
+  "success": true,
+  "message": "Character successfully received.",
+  "data": {
+    "id": 123456,
+    "name": "Agrippa",
+    "username": "agrippas_player",
+    "alignmentId": 2,
+    "currentXp": 6500,
+    "baseHitPoints": 44,
+    "bonusHitPoints": null,
+    "overrideHitPoints": null,
+    "removedHitPoints": 10,
+    "temporaryHitPoints": 0,
+    "stats": [{"id": 1, "value": 16}, {"id": 2, "value": 12}, {"id": 3, "value": 14},
+              {"id": 4, "value": 10}, {"id": 5, "value": 13}, {"id": 6, "value": 8}],
+    "bonusStats": [{"id": 1, "value": null}, {"id": 2, "value": null}, {"id": 3, "value": null},
+                   {"id": 4, "value": null}, {"id": 5, "value": null}, {"id": 6, "value": null}],
+    "overrideStats": [{"id": 1, "value": null}, {"id": 2, "value": null}, {"id": 3, "value": null},
+                      {"id": 4, "value": null}, {"id": 5, "value": null}, {"id": 6, "value": null}],
+    "race": {
+      "fullName": "Mountain Dwarf", "baseName": "Dwarf",
+      "weightSpeeds": {"normal": {"walk": 25, "fly": 0, "swim": 0}},
+      "racialTraits": [{"definition": {"name": "Darkvision"}}, {"definition": {"name": "Dwarven Resilience"}}]
+    },
+    "background": {"definition": {"name": "Soldier"}},
+    "classes": [{
+      "level": 5,
+      "isStartingClass": true,
+      "definition": {"name": "Fighter", "spellCastingAbilityId": null},
+      "subclassDefinition": {"name": "Champion"},
+      "classFeatures": [
+        {"definition": {"name": "Fighting Style", "requiredLevel": 1}},
+        {"definition": {"name": "Second Wind", "requiredLevel": 1}},
+        {"definition": {"name": "Action Surge", "requiredLevel": 2}},
+        {"definition": {"name": "Ability Score Improvement", "requiredLevel": 4}},
+        {"definition": {"name": "Extra Attack", "requiredLevel": 5}},
+        {"definition": {"name": "Indomitable", "requiredLevel": 9}}
+      ]
+    }],
+    "feats": [{"definition": {"name": "Tough"}}],
+    "modifiers": {
+      "race": [
+        {"type": "bonus", "subType": "constitution-score", "value": 2, "friendlySubtypeName": "Constitution Score"},
+        {"type": "language", "subType": "dwarvish", "value": null, "friendlySubtypeName": "Dwarvish"}
+      ],
+      "class": [
+        {"type": "proficiency", "subType": "strength-saving-throws", "value": null, "friendlySubtypeName": "Strength Saving Throws"},
+        {"type": "proficiency", "subType": "constitution-saving-throws", "value": null, "friendlySubtypeName": "Constitution Saving Throws"},
+        {"type": "proficiency", "subType": "athletics", "value": null, "friendlySubtypeName": "Athletics"},
+        {"type": "proficiency", "subType": "perception", "value": null, "friendlySubtypeName": "Perception"},
+        {"type": "proficiency", "subType": "heavy-armor", "value": null, "friendlySubtypeName": "Heavy Armor"}
+      ],
+      "background": [
+        {"type": "proficiency", "subType": "intimidation", "value": null, "friendlySubtypeName": "Intimidation"},
+        {"type": "language", "subType": "common", "value": null, "friendlySubtypeName": "Common"}
+      ],
+      "feat": [
+        {"type": "bonus", "subType": "hit-points-per-level", "value": 2, "friendlySubtypeName": "Hit Points per Level"}
+      ],
+      "item": [],
+      "condition": []
+    },
+    "inventory": [
+      {"id": 1, "quantity": 1, "equipped": true, "isAttuned": false,
+       "definition": {"id": 101, "name": "Chain Mail", "armorTypeId": 3, "armorClass": 16, "filterType": "Armor",
+                      "canAttune": false, "cost": 75, "grantedModifiers": []}},
+      {"id": 2, "quantity": 1, "equipped": true, "isAttuned": false,
+       "definition": {"id": 102, "name": "Shield", "armorTypeId": 4, "armorClass": 2, "filterType": "Armor",
+                      "canAttune": false, "cost": 10, "grantedModifiers": []}},
+      {"id": 3, "quantity": 1, "equipped": true, "isAttuned": false,
+       "definition": {"id": 103, "name": "Longsword, +1", "filterType": "Weapon", "attackType": 1, "range": 5,
+                      "damage": {"diceString": "1d8"}, "damageType": "Slashing", "canAttune": false,
+                      "properties": [{"name": "Versatile"}],
+                      "grantedModifiers": [{"type": "bonus", "subType": "magic", "value": 1}]}},
+      {"id": 4, "quantity": 1, "equipped": true, "isAttuned": true,
+       "definition": {"id": 104, "name": "Cloak of Protection", "filterType": "Wondrous item", "canAttune": true,
+                      "grantedModifiers": [{"type": "bonus", "subType": "armor-class", "value": 1},
+                                           {"type": "bonus", "subType": "saving-throws", "value": 1}]}},
+      {"id": 5, "quantity": 2, "equipped": false, "isAttuned": false,
+       "definition": {"id": 105, "name": "Potion of Healing", "filterType": "Potion", "canAttune": false, "cost": 50,
+                      "grantedModifiers": []}},
+      {"id": 6, "quantity": 1, "equipped": false, "isAttuned": false,
+       "definition": {"id": 106, "name": "Rope, Hempen (50 feet)", "filterType": "Other Gear", "canAttune": false,
+                      "cost": 1, "grantedModifiers": []}}
+    ],
+    "currencies": {"cp": 0, "sp": 14, "gp": 120, "ep": 0, "pp": 2},
+    "classSpells": [],
+    "spells": {"race": [], "class": [], "item": [], "feat": []},
+    "traits": {"personalityTraits": "Stubborn as stone.", "ideals": null, "bonds": null, "flaws": null}
+  }
+}

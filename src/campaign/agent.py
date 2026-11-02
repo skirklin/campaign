@@ -45,7 +45,9 @@ sources:
 - Player characters: get_character, update_character. Some keep their sheet
   outside the app (D&D Beyond, paper): then only what they carry is tracked
   here, in the party's inventory, and their stats aren't known. add_party_member
-  adds such a character.
+  adds such a character. A sheet on D&D Beyond can be mirrored here
+  (refresh_from_dndbeyond, when it's public there); it's then read-only in
+  spirit: D&D Beyond is its source, and a refresh replaces it.
 - The party's inventory: everything the party owns and who has it, the
   party itself (loot nobody has claimed, the shared purse), a character, or
   someone they left it with (inventory). New loot goes in with add_items,
@@ -514,6 +516,7 @@ _DESCRIBE: dict[str, Callable[[dict[str, Any]], str]] = {
     "update_character": lambda a: f"Updated {a.get('name', '')}'s sheet" + (f": {a['reason']}" if a.get("reason") else ""),
     "create_character": lambda a: "Created a character",
     "add_party_member": lambda a: f"Added {a.get('name', 'a character')} to the party",
+    "refresh_from_dndbeyond": lambda a: f"Read {a.get('name', 'a character')} from D&D Beyond",
     "inventory": lambda a: "Checked the party's inventory",
     "add_items": lambda a: "Added " + ", ".join(str(i.get("name", "?")) for i in a.get("items") or [])
                  + (f" for {a['holder']}" if a.get("holder") not in (None, "party") else ""),

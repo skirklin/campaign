@@ -548,10 +548,14 @@ class CharacterFile(CharacterSheet):
     def sheet(self) -> CharacterSheet:
         return CharacterSheet.model_validate(self.model_dump(exclude={"inventory", "currency"}))
 
+    def gear(self) -> list[Gear]:
+        """What this file says the character has equipped whose bonuses count."""
+        return [Gear(name=i.name, bonuses=i.bonuses) for i in self.inventory
+                if i.equipped and (i.attuned or not i.requires_attunement) and i.bonuses]
+
     def worn(self) -> CharacterFile:
         """This file, counting the bonuses of what it says the character has equipped."""
-        return self.with_gear([Gear(name=i.name, bonuses=i.bonuses) for i in self.inventory
-                               if i.equipped and (i.attuned or not i.requires_attunement) and i.bonuses])
+        return self.with_gear(self.gear())
 
 
 def apply_hp(sheet: CharacterSheet, delta: int) -> None:

@@ -441,3 +441,18 @@ def test_tools_for_characters_whose_sheets_are_kept_elsewhere(store):
     assert party_of(store, camp) is None
     t["update_character"](name="Cid", patch={"classes": [{"name": "Barbarian", "level": 7}]}, reason="new")
     assert party_of(store, camp).model_dump() == {"size": 2, "level": 7}
+
+
+def test_the_dndbeyond_tool(store, monkeypatch):
+    from campaign import dndbeyond
+
+    store.create_campaign("Odyssey", "dm")
+    t = tools(store, "odyssey")
+    t["add_party_member"](name="Agrippa")
+    fixture = Path(__file__).parent / "fixtures" / "dndbeyond_character.json"
+    monkeypatch.setattr(dndbeyond, "fetch", lambda link, timeout=15: dndbeyond.parse(fixture.read_text()))
+    assert "isn't a D&D Beyond" in t["refresh_from_dndbeyond"](name="Agrippa")  # no link yet
+    out = json.loads(t["refresh_from_dndbeyond"](name="Agrippa", link="https://www.dndbeyond.com/characters/123456"))
+    assert out["level"] == 5 and out["carrying_differs"]["coin"]["gp"]["dndbeyond"] == 120
+    got = json.loads(t["get_character"](name="Agrippa"))
+    assert got["sheet_from"].startswith("D&D Beyond") and got["derived"]["ac"]["total"] == 19
