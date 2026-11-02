@@ -9,7 +9,7 @@ import pymupdf
 import pytest
 
 from campaign import digest, library
-from campaign.db import BASELINE, SCHEMA_VERSION, Store
+from campaign.db import Store
 from campaign.digest import BranchOutput, Entity, LeafOutput, Merge, RollTable, TableRow
 from campaign.ingest import parse_pdf
 from campaign.tools import ToolContext, build_tools
@@ -292,31 +292,6 @@ def test_reindex_from_original_keeps_id_and_cache(env, monkeypatch):
     assert library.reindex(store) == []  # now up to date
     src = store.source(r["id"])
     assert store.blobs.get(src["blob"]) == BOOK.format(intro="", church="Donavich prays.").encode()
-
-
-def test_pre_baseline_database_is_retired_and_restored(env, monkeypatch):
-    store, camp, db = env
-    r = upload(store, camp)
-    digest.run(db, r["id"], client=FakeDigest())
-    store.create_character({"name": "Brannoc"}, campaign_id=camp.id, reason="made")
-    store.upsert_session(camp, 1)
-    run = World(store, camp).start_run("ingest", session=1)
-    World(store, camp).add_event("Something happened", 1, run)
-    store.conn.execute(f"PRAGMA user_version = {BASELINE - 1}")  # pretend it's an old database
-    store.close()
-
-    fresh = Store(db)
-    assert fresh.schema_version == SCHEMA_VERSION
-    assert list((db.parent / "backups").glob("campaign-*-retired.db"))
-    assert fresh.find_character("Brannoc")["sheet"] == {"name": "Brannoc"}
-    camp2 = fresh.campaign("strahd")
-    src = fresh.sources(camp2)[0]
-    assert src["title"] == "Book" and src["has_original"]
-    assert fresh.digest_status(src["id"])["done"] == 8  # digest cache carried over: nothing to redo
-    world = World(fresh, camp2)
-    assert world.lookup("Morgantha") and world.events() == [] and fresh.sessions(camp2) == []
-    fresh.close()
-    assert Store(db).schema_version == SCHEMA_VERSION  # reopening is a no-op
 
 
 def test_pdf_outline_tree(tmp_path):

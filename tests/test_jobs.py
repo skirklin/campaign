@@ -314,30 +314,6 @@ def test_cancelling_a_scan_makes_nothing(scan_job, monkeypatch):
     assert s.job(job_id)["state"] == "cancelled" and s.characters([camp.id]) == []
 
 
-def test_ingests_move_over_to_jobs_keeping_their_ids(tmp_path):
-    db = tmp_path / "old.db"
-    s = Store(db)
-    camp = s.create_campaign("Strahd", "dm")
-    # The database as the v10 server left it: an ingest in the ingests table, no jobs.
-    s.conn.executescript("DROP TABLE character_files; DROP TABLE job_log; DROP TABLE jobs;"
-                         " DROP TABLE inventory_log; DROP TABLE purses; DROP TABLE holdings;"
-                         " ALTER TABLE conversation_messages DROP COLUMN usage; ALTER TABLE sessions DROP COLUMN kind; ALTER TABLE sessions DROP COLUMN covers; PRAGMA user_version = 10;")
-    s.conn.execute(
-        "INSERT INTO ingests (id, campaign_id, session, input_blob, input_name, transcript_blob, played_on, role,"
-        " state, attempts, error, created_at, updated_at)"
-        " VALUES (7, ?, 3, 'b1', 's3.m4a', 'b2', '2026-10-25', 'dm', 'failed', 3, 'boom', 'then', 'then')", (camp.id,))
-    s.conn.execute("INSERT INTO ingest_log (ingest_id, seq, kind, text) VALUES (7, 0, 'status', 'Transcribing…')")
-    s.conn.commit()
-    s.close()
-    s = Store(db)  # migrates
-    job = s.job(7)
-    assert job["kind"] == "ingest" and job["state"] == "failed" and job["error"] == "boom" and job["attempts"] == 3
-    assert job["input"] == {"session": 3, "blob": "b1", "name": "s3.m4a", "transcript_blob": "b2",
-                            "played_on": "2026-10-25"}
-    assert s.job_log(7) == [{"seq": 0, "kind": "status", "text": "Transcribing…"}]
-    s.close()
-
-
 def test_a_scan_looks_up_what_it_cannot_place_in_the_campaign_books(scan_job, monkeypatch):
     s, camp, db, job_id, _ = scan_job
     from campaign.library import add_reference
@@ -444,30 +420,3 @@ def test_explanations_and_prose_in_damage_get_sent_back_once(scan_job, monkeypat
     s.conn.commit()
     scan_client(monkeypatch, wordy.model_dump_json())
     assert loop.pass_once() and s.job(job_id)["state"] == "done"
-
-
-def test_scans_read_before_files_were_kept_get_attached(tmp_path):
-    db = tmp_path / "old.db"
-    s = Store(db)
-    camp = s.create_campaign("Odyssey", "dm")
-    character_id = s.create_character({"name": "Cid"}, camp.id)
-    blob = s.blobs.put(b"%PDF-1.7 cid")
-    job_id = s.add_job(camp, "scan", {"blob": blob, "name": "cid character sheet.pdf"}, None)
-    s.update_job(job_id, state="done", result={"character": character_id, "name": "Cid", "unreadable": []})
-    failed = s.add_job(camp, "scan", {"blob": blob, "name": "other.pdf"}, None)
-    s.update_job(failed, state="failed")
-    # The database as the v12 server left it: no files table.
-    from campaign.db import V12_PARTY_STASH
-    s.conn.executescript("DROP TABLE character_files; ALTER TABLE conversation_messages DROP COLUMN usage;"
-                         " DROP TABLE inventory_log; DROP TABLE purses; DROP TABLE holdings;"
-                         f" {V12_PARTY_STASH} ALTER TABLE sessions DROP COLUMN kind; ALTER TABLE sessions DROP COLUMN covers; PRAGMA user_version = 12;")
-    s.close()
-    s = Store(db)  # migrates
-    assert [(f["name"], f["blob"]) for f in s.character_files(character_id)] == [("cid character sheet.pdf", blob)]
-    s.close()
-
-
-def test_a_scan_stored_with_retired_fields_still_reads():
-    stored = SCAN.model_dump() | {"attacks_per_action": 2, "grapple_bonus_action": True}
-    stored["attacks"] = [a | {"uses": "action"} for a in stored["attacks"]]
-    assert sheetscan.ScannedSheet.model_validate(stored).model_dump() == SCAN.model_dump()

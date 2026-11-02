@@ -16,7 +16,7 @@ from __future__ import annotations
 import re
 from typing import Annotated, Any, Literal
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, PrivateAttr, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, PrivateAttr
 
 ABILITIES = ("str", "dex", "con", "int", "wis", "cha")
 
@@ -114,11 +114,6 @@ class Status(Model):
     note: str = ""  # what it's on: the spell being concentrated on
     resource: str = ""  # a resource's name, spent when switched on
     duration: int = Field(default=0, ge=0)  # rounds it lasts (Rage, Bless: 10), shown in combat; 0 if open-ended
-
-    @model_validator(mode="before")
-    @classmethod
-    def _retired(cls, data: Any) -> Any:
-        return without(data, "uses")  # what starting it took in a turn, since dropped
 
 
 class HitPoints(Model):
@@ -247,11 +242,6 @@ class Attack(Model):
     properties: list[str] = []  # "finesse", "versatile 1d10", "thrown 20/60", "reach"
     notes: str = ""  # what it does beyond its numbers, in a few words
 
-    @model_validator(mode="before")
-    @classmethod
-    def _retired(cls, data: Any) -> Any:
-        return without(data, "uses")  # the action it took, since dropped
-
 
 class AttackOption(Model):
     """A choice made when attacking, before the roll: Reckless Attack, Great Weapon Master's -5/+10.
@@ -286,60 +276,6 @@ class Spell(Model):
     notes: str = ""
 
 
-_DAMAGE_PART = re.compile(r"^\s*(\d+d\d+)?\s*([+-]?\s*\d+)?\s*(.*?)\s*$")
-
-
-def parse_damage(text: str) -> list[dict[str, Any]]:
-    """Free-text damage ("1d8+4 slashing + 1d6 fire") as flat parts, for sheets from before parts."""
-    parts = []
-    for piece in re.split(r"\s*\+\s*(?=\d+d\d+)", text.strip()):
-        m = _DAMAGE_PART.match(piece)
-        if piece and m:
-            dice, bonus, kind = m.groups()
-            parts.append({"dice": dice or "", "bonus": int(bonus.replace(" ", "")) if bonus else 0, "type": kind})
-    return parts
-
-
-# Fields sheets had briefly, for tracking actions in a turn, since dropped: read and ignored.
-RETIRED_SHEET_FIELDS = ("attacks_per_action", "grapple_bonus_action")
-
-
-def without(data: Any, *keys: str) -> Any:
-    """`data` without `keys`, if it's a dict: for reading what older sheets saved."""
-    return {k: v for k, v in data.items() if k not in keys} if isinstance(data, dict) else data
-
-
-def _upgrade(data: dict[str, Any]) -> dict[str, Any]:
-    """Sheets saved before numbers had parts: keep every number as it was.
-
-    A flat AC becomes a formula with that base and no abilities; HP max becomes
-    the hit-dice total less CON x level; a free-text attack becomes one with
-    its numbers as flat bonuses. They follow the character once edited.
-    """
-    data = without(data, *RETIRED_SHEET_FIELDS)
-    if isinstance(data.get("ac"), int):
-        data["ac"] = {"base": data["ac"], "abilities": []}
-    hp = data.get("hp")
-    if isinstance(hp, dict) and "max" in hp:
-        con = (int(data.get("abilities", {}).get("con", 10)) - 10) // 2
-        level = sum(int(c.get("level", 0)) for c in data.get("classes", []) if isinstance(c, dict))
-        hp = {k: v for k, v in hp.items() if k != "max"}
-        data["hp"] = hp | {"base": int(data["hp"]["max"]) - con * level}
-    attacks = []
-    for a in data.get("attacks", []):
-        if isinstance(a, dict) and (isinstance(a.get("to_hit"), str) or isinstance(a.get("damage"), str)):
-            a = dict(a)
-            to_hit = str(a.pop("to_hit", "") or "").replace(" ", "")
-            a.update(ability="none", proficient=False,
-                     hit_bonus=int(to_hit) if re.fullmatch(r"[+-]?\d+", to_hit) else 0)
-            if isinstance(a.get("damage"), str):
-                a["damage"] = parse_damage(a["damage"])
-        attacks.append(a)
-    if "attacks" in data:
-        data["attacks"] = attacks
-    return data
-
-
 class CharacterSheet(Model):
     name: str
     player: str = ""
@@ -372,11 +308,6 @@ class CharacterSheet(Model):
     extra: dict[str, Any] = {}
     # What the character has equipped, from their holdings: not saved with the sheet.
     _gear: list[Gear] = PrivateAttr(default_factory=list)
-
-    @model_validator(mode="before")
-    @classmethod
-    def _from_older_sheets(cls, data: Any) -> Any:
-        return _upgrade(data) if isinstance(data, dict) else data
 
     def with_gear(self, gear: list[Gear]) -> CharacterSheet:
         """This sheet, counting the bonuses of `gear` (what the character has equipped)."""

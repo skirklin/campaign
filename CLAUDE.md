@@ -15,6 +15,12 @@ and the code to what they should be. The only data that matters is the
 owner's own campaigns, so when it's cheap, a migration that carries that
 data over is worth writing, but it never shapes the design.
 
+The database has one schema and no migration history: `SCHEMA` in `db.py`.
+A schema change edits `SCHEMA` and bumps `SCHEMA_VERSION`. If the deployed
+data should survive it, add a step from the previous version to `UPGRADES`,
+and delete it once it has run. Code reads data only in its current shape:
+no readers for old formats.
+
 ## Checks
 
 ```bash

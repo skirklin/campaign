@@ -148,24 +148,6 @@ def test_attacks_resolve_finesse_spell_and_magic():
     assert bolt["to_hit"]["total"] == 4 and bolt["text"] == "1d10 fire"
 
 
-def test_sheets_from_before_parts_keep_their_numbers():
-    old = {
-        "name": "Old", "classes": [{"name": "Fighter", "level": 4}], "abilities": {"con": 14},
-        "ac": 17, "hp": {"max": 38, "current": 30, "temp": 0},
-        "attacks": [{"name": "Longsword", "to_hit": "+6", "damage": "1d8+3 slashing + 1d6 radiant", "notes": "silvered"}],
-    }
-    sheet = CharacterSheet.model_validate(old)
-    d = sheet.derived()
-    assert d["ac"]["total"] == 17 and d["hp_max"]["total"] == 38 and sheet.hp.base == 30
-    assert d["attacks"][0]["to_hit"]["total"] == 6
-    assert d["attacks"][0]["text"] == "1d8+3 slashing + 1d6 radiant" and sheet.attacks[0].notes == "silvered"
-    # A patch that sets the maximum (the old way) still works.
-    sheet = CharacterSheet.model_validate(merge_patch(sheet.model_dump(), {"hp": {"max": 40}}))
-    assert sheet.hp_max == 40
-    with pytest.raises(ValueError):
-        Bonus(target="ac", amount="lots")
-
-
 def test_the_party_inventory(store):
     """One list of everything the party owns: claiming, giving and putting back are changes of hands."""
     camp = store.create_campaign("Loot", "dm")
@@ -380,21 +362,6 @@ def test_statuses_can_say_how_many_rounds_they_last():
         CharacterSheet(name="X", statuses=[{"name": "Odd", "duration": -1}])
 
 
-def test_sheets_from_when_turns_were_tracked_still_load():
-    """Turn tracking (attacks per action, what an attack or status took) came and went: those
-    fields are read and dropped, so the sheets saved meanwhile load and save without them."""
-    saved = {
-        "name": "Cid", "attacks_per_action": 2, "grapple_bonus_action": True,
-        "statuses": [{"name": "Rage", "resource": "Rage", "uses": "bonus", "duration": 10}],
-        "attacks": [{"name": "Greataxe", "uses": "action"}, {"name": "Handaxe", "uses": "bonus"}],
-    }
-    sheet = CharacterSheet.model_validate(saved)
-    dumped = sheet.model_dump()
-    assert "attacks_per_action" not in dumped and "grapple_bonus_action" not in dumped
-    assert "uses" not in dumped["statuses"][0] and all("uses" not in a for a in dumped["attacks"])
-    assert dumped["statuses"][0]["duration"] == 10  # what's still a field stays
-
-
 def test_markdown_footnotes_travel_with_what_cites_them():
     from campaign.ingest import parse_markdown
 
@@ -406,35 +373,6 @@ def test_markdown_footnotes_travel_with_what_cites_them():
     assert "bone knight_ (Source: _Eberron: Rising from the Last War_) stat block" in text
     assert "roll (A d10, or a d20 for big parties.) on the table" in text
     assert "[^" not in text and "]:" not in text
-
-
-def test_inventories_and_the_stash_move_into_the_party_inventory(tmp_path):
-    """v15: what sheets carried, and the party stash, become holdings and purses."""
-    from campaign.db import V12_PARTY_STASH
-
-    db = tmp_path / "old.db"
-    s = Store(db)
-    camp = s.create_campaign("Odyssey", "dm")
-    old = json.loads(EXAMPLE.read_text())  # a sheet as v14 kept it, inventory and coin and all
-    cid = s.create_character(old, camp.id)
-    s.conn.executescript(f"DROP TABLE inventory_log; DROP TABLE purses; DROP TABLE holdings; {V12_PARTY_STASH}"
-                         " ALTER TABLE sessions DROP COLUMN kind; ALTER TABLE sessions DROP COLUMN covers; PRAGMA user_version = 14;")
-    s.conn.execute("INSERT INTO party_stash VALUES (?, ?, 'then')", (camp.id, json.dumps(
-        {"items": [{"name": "Black pearl", "value_gp": 1000}], "currency": {"gp": 809, "pp": 56}})))
-    s.conn.commit()
-    s.close()
-
-    s = Store(db)  # migrates
-    inv = Inventory(s, camp)
-    ch = s.character(cid)
-    assert "inventory" not in ch["sheet"] and "currency" not in ch["sheet"]
-    holder = inv.character_holder(cid)
-    assert [i.name for i in inv.carried(holder)] == [i["name"] for i in old["inventory"]]
-    assert inv.purse(holder)["sp"] == 14 and inv.sheet(ch).derived()["ac"]["total"] == 18  # the shield, now defined
-    assert inv.holdings(None)[0]["name"] == "Black pearl" and inv.holdings(None)[0]["value_gp"] == 1000
-    assert inv.purse(None) == {"cp": 0, "sp": 0, "ep": 0, "gp": 809, "pp": 56}
-    assert not s.conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'party_stash'").fetchone()
-    s.close()
 
 
 def test_items_are_world_items_by_their_own_name_or_when_someone_says_so(store):

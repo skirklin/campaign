@@ -210,14 +210,14 @@ kubectl -n campaign set image deployment/campaign campaign=ghcr.io/skirklin/camp
 - **Where it lives:** everything is on the `campaign-data` volume: the
   database, original uploads, and the snapshots taken before schema
   changes. Back up that volume the way the cluster backs up others.
-- **What redeploys keep:** schema changes migrate in place, or start clean
-  while keeping campaigns, character sheets, uploads and the digest cache.
-  See the README.
+- **What redeploys keep:** everything. A schema change upgrades the database
+  in place, after a snapshot, when it comes with a step for the deployed
+  version (`UPGRADES` in `db.py`); see the README.
 - **Deploys don't take the site down.** One replica normally; during a
   deploy the new pod starts beside the old one, takes traffic once it's
   ready, and then the old one finishes its requests and stops. For those
   seconds both use the SQLite database on the volume, which SQLite's locking
   handles. Background work takes a lease (only one copy runs the digest
-  loop) and is resumable, so nothing is lost or done twice. Schema changes
-  must keep the old code working while they run: add, backfill, use; drop
-  only in a later release (see the note above `MIGRATIONS` in `db.py`).
+  loop) and is resumable, so nothing is lost or done twice. An upgrade runs
+  while the old pod is still serving, so it shouldn't remove anything the old
+  code reads; drop such things in the release after.
