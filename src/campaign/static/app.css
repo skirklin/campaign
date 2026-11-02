@@ -1078,3 +1078,9 @@ select.visibility { width: auto; padding: .05rem .4rem; font-size: .78rem; borde
 .member-name:not(:disabled):hover, .member-name:focus { border-color: var(--border); }
 a.button { display: inline-block; padding: .42rem .85rem; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); text-decoration: none; color: inherit; }
 .member .actions { display: flex; gap: .5rem; margin-top: 1rem; }
+.ddb-mirror { max-width: 60rem; margin: 0 auto .6rem; padding: .6rem .8rem; border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border)); border-radius: var(--radius); background: var(--surface); }
+.ddb-mirror .actions { margin-top: .3rem; }
+.ddb-missing { list-style: none; padding: 0; margin: .2rem 0; display: flex; flex-wrap: wrap; gap: .2rem 1rem; }
+.ddb-paste { margin-top: .4rem; }
+.ddb-paste textarea { width: 100%; margin: .3rem 0; font-family: ui-monospace, monospace; font-size: .8rem; }
+.play-block.ddb { margin: .6rem 0; }

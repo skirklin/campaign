@@ -32,7 +32,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 
-from . import digest, encounters, sheetscan
+from . import digest, dndbeyond, encounters, sheetscan
 from .accounts import Accounts, at_least
 from .auth import AuthConfig
 from .auth import install as install_auth
@@ -60,6 +60,16 @@ class NewCharacter(BaseModel):
     campaign: str
     in_app: bool = True  # False: the sheet is kept elsewhere (D&D Beyond, paper); the app tracks what they carry
     sheet_url: str = ""  # where, if it's online
+
+
+class DndBeyondImport(BaseModel):
+    link: str | None = None  # the character's D&D Beyond link; default the one it has
+    data: str | None = None  # its data, pasted from the browser, for a character that isn't public
+
+
+class DndBeyondBring(BaseModel):
+    items: list[int] = []  # positions in the D&D Beyond inventory (from `missing`) to add to what they carry
+    coin: bool = False  # make their purse what D&D Beyond says
 
 
 class CharacterDetails(BaseModel):
@@ -954,6 +964,8 @@ def create_app(
         return {
             "id": ch["id"], "name": ch["name"], "campaign": campaign_label(s, ch["campaign_id"]),
             "can_edit": ch["can_edit"], "owned": local or ch["owner_id"] is not None, "sheet_url": ch["sheet_url"],
+            "sheet_source": ch["sheet_source"], "synced_at": ch["synced_at"],
+            "dndbeyond": mirrored(s, inv, ch, holder),
             "entity_id": s.link_character(ch["id"]), "copied_from": copied_from,
             "sheet": sheet.model_dump() if sheet else None, "derived": sheet.derived() if sheet else None,
             "log": s.character_log(ch["id"], limit=30),
@@ -962,6 +974,14 @@ def create_app(
             "files": [{"id": f["id"], "name": f["name"], "created_at": f["created_at"],
                        "url": f"/api/characters/{ch['id']}/files/{f['id']}"} for f in s.character_files(ch["id"])],
         }
+
+    def mirrored(s: Store, inv: Inventory, ch: dict[str, Any], holder: int) -> dict[str, Any] | None:
+        """For a sheet mirrored from D&D Beyond: how what it says they carry differs from the inventory."""
+        if ch["sheet_source"] != "dndbeyond" or not ch["synced_blob"] or not s.blobs.exists(ch["synced_blob"]):
+            return None
+        file, leftover = dndbeyond.to_file(dndbeyond.parse(s.blobs.get(ch["synced_blob"])))
+        return {"differences": dndbeyond.differences(file, inv.holdings(holder), inv.purse(holder)),
+                "not_read": leftover, "data_url": dndbeyond.service_url(ch["sheet_url"] or "")}
 
     def save(s: Store, request: Request, ch: dict[str, Any], sheet: CharacterSheet, reason: str) -> dict[str, Any]:
         try:
@@ -978,6 +998,7 @@ def create_app(
             "campaign": campaign_label(s, ch["campaign_id"]),
             "mine": local or ch["owner_id"] == user_of(request)["id"],
             "in_app": sheet is not None,
+            "sheet_source": ch["sheet_source"],
             "sheet_url": ch["sheet_url"],
         }
         if sheet is None:
@@ -1062,6 +1083,70 @@ def create_app(
         except sqlite3.IntegrityError:
             raise HTTPException(409, f"this campaign already has a character called {body.name}")
         return sheet_payload(s, request, character_or_404(s, request, ch["id"]))
+
+    def for_the_table(s: Store, request: Request, character_id: int) -> dict[str, Any]:
+        """A character this user may refresh from D&D Beyond: theirs, the DM's to change, or nobody's (the table's)."""
+        ch = character_or_404(s, request, character_id)
+        if not ch["can_edit"] and ch["owner_id"] is not None:
+            raise HTTPException(403, "only the character's owner or the campaign's DM can change it")
+        return ch
+
+    @app.post("/api/characters/{character_id}/dndbeyond")
+    def from_dndbeyond(character_id: int, body: DndBeyondImport, request: Request, s: Store = Depends(store)) -> dict:
+        """Mirror a character's sheet from D&D Beyond: fetched if it's public, else from data pasted from there.
+
+        D&D Beyond is the sheet's source from now on; what they carry stays the
+        party inventory's, and the answer says how the two differ.
+        """
+        ch = for_the_table(s, request, character_id)
+        link = (body.link or ch["sheet_url"] or "").strip()
+        try:
+            url = f"https://www.dndbeyond.com/characters/{dndbeyond.character_id(link)}" if link else None
+            if body.data and body.data.strip():
+                data = dndbeyond.parse(body.data)
+                url = url or (f"https://www.dndbeyond.com/characters/{data['id']}" if data.get("id") else None)
+            elif url:
+                data = dndbeyond.fetch(url)
+            else:
+                raise dndbeyond.DndBeyondError("give the character's D&D Beyond link, or paste its data")
+            file, _ = dndbeyond.to_file(data)
+        except dndbeyond.DndBeyondError as err:
+            raise HTTPException(422, str(err))
+        first = ch["sheet_source"] != "dndbeyond"
+        try:
+            s.mirror_character(character_id, file.sheet().model_dump(), url or "", json.dumps(data).encode(),
+                               "read from D&D Beyond" if first else "refreshed from D&D Beyond")
+        except sqlite3.IntegrityError:
+            raise HTTPException(409, f"this campaign already has another character called {file.name}")
+        return sheet_payload(s, request, character_or_404(s, request, character_id))
+
+    @app.post("/api/characters/{character_id}/dndbeyond/bring")
+    def bring_from_dndbeyond(character_id: int, body: DndBeyondBring, request: Request,
+                             s: Store = Depends(store)) -> dict:
+        """Bring what D&D Beyond says they carry into the party inventory: chosen items, and their coin."""
+        ch = for_the_table(s, request, character_id)
+        if ch["sheet_source"] != "dndbeyond" or not ch["synced_blob"]:
+            raise HTTPException(409, f"{ch['name']}'s sheet isn't mirrored from D&D Beyond")
+        file, _ = dndbeyond.to_file(dndbeyond.parse(s.blobs.get(ch["synced_blob"])))
+        inv = inventory_of(s, request, ch["campaign_id"])
+        holder = inv.character_holder(character_id)
+        diff = dndbeyond.differences(file, inv.holdings(holder), inv.purse(holder))
+        wanted = {m["index"]: m["qty"] for m in diff["missing"] if m["index"] in body.items}
+        items = [file.inventory[i].model_copy(update={"qty": qty}) for i, qty in wanted.items()]
+        try:
+            inv.bring_in(holder, items, {}, reason="from D&D Beyond")
+            if body.coin and (change := {c: v["dndbeyond"] - v["here"] for c, v in diff["coin"].items()}):
+                inv.coin(holder, change, "as on D&D Beyond")
+        except InventoryError as err:
+            raise HTTPException(422, str(err))
+        return sheet_payload(s, request, character_or_404(s, request, character_id))
+
+    @app.delete("/api/characters/{character_id}/dndbeyond")
+    def keep_here(character_id: int, request: Request, s: Store = Depends(store)) -> dict:
+        """Stop mirroring: the sheet as last read becomes the app's own."""
+        for_the_table(s, request, character_id)
+        s.keep_sheet_here(character_id)
+        return sheet_payload(s, request, character_or_404(s, request, character_id))
 
     @app.post("/api/characters/{character_id}/sheet")
     def start_sheet(character_id: int, request: Request, s: Store = Depends(store)) -> dict[str, Any]:

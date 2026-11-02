@@ -30,6 +30,7 @@ import json
 import sqlite3
 from typing import Any
 
+from . import dndbeyond
 from .charsheet import COINS, GP_PER_COIN, CharacterSheet, Gear, Item, ItemMechanics, no_coins
 from .db import Campaign, Store, now
 from .world import World
@@ -234,10 +235,18 @@ class Inventory:
         return [Gear(name=h["name"], bonuses=h["bonuses"]) for h in self.holdings(holder_id) if h["active"] and h["bonuses"]]
 
     def sheet(self, character: dict[str, Any]) -> CharacterSheet | None:
-        """A character's sheet, counting what they have equipped; None if it's kept elsewhere."""
+        """A character's sheet, counting what they have equipped; None if it's kept elsewhere.
+
+        A sheet mirrored from D&D Beyond counts what D&D Beyond says they have
+        equipped, as D&D Beyond does: its numbers are D&D Beyond's. (What they
+        carry here is the party inventory's, and may not match until brought in.)
+        """
         if character["sheet"] is None:
             return None
         sheet = CharacterSheet.model_validate(character["sheet"])
+        blob = character.get("synced_blob")
+        if character.get("sheet_source") == "dndbeyond" and blob and self.store.blobs.exists(blob):
+            return sheet.with_gear(dndbeyond.to_file(dndbeyond.parse(self.store.blobs.get(blob)))[0].gear())
         return sheet.with_gear(self.gear(self.character_holder(character["id"])))
 
     def carried(self, holder_id: int) -> list[Item]:
