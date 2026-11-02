@@ -560,8 +560,11 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
             return f"No character {name!r} in this campaign. Known: {', '.join(known) or 'none'}."
         inv = Inventory(store, campaign, ctx.user_id)
         holder = inv.character_holder(found["id"])
-        return _json({"sheet": found["sheet"], "derived": inv.sheet(found).derived(),
-                      "carrying": [_brief_holding(h) for h in inv.holdings(holder)], "purse": inv.purse(holder)})
+        carried = {"carrying": [_brief_holding(h) for h in inv.holdings(holder)], "purse": inv.purse(holder)}
+        if found["sheet"] is None:
+            return _json({"name": found["name"], "sheet": None,
+                          "sheet_kept_elsewhere": found["sheet_url"] or "elsewhere (not in the app)"} | carried)
+        return _json({"sheet": found["sheet"], "derived": inv.sheet(found).derived()} | carried)
 
     def update_character(name: str, patch: dict[str, Any], reason: str) -> str:
         """Change a character sheet with a JSON merge patch; creates the character if new.
@@ -609,6 +612,9 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
             reason: What happened, e.g. "took 9 damage from the ghoul".
         """
         found = _find_character(name)
+        if found and found["sheet"] is None:
+            return (f"{found['name']}'s sheet is kept elsewhere ({found['sheet_url'] or 'not in the app'}), so it"
+                    " can't be changed here; what they carry is in the party's inventory.")
         if {"inventory", "currency"} & set(patch):
             return ("Rejected: what a character carries and their coin are in the party's inventory;"
                     " use add_items, change_item, give_item or change_coin.")
@@ -622,6 +628,21 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         else:
             store.create_character(sheet.model_dump(), campaign_id=campaign.id, owner_id=ctx.user_id, reason=reason)
         return f"Updated {sheet.name}: {reason}"
+
+    def add_party_member(name: str, sheet_url: str = "", mine: bool = False) -> str:
+        """Add a player character whose sheet is kept outside the app (D&D Beyond, paper), so the party's
+        inventory can track what they carry and the world knows them. Nothing about their sheet is kept.
+
+        Args:
+            name: The character's name.
+            sheet_url: Where their sheet is, if it's online (a D&D Beyond link).
+            mine: Whether it's the character of whoever is asking; otherwise it's the table's to look after.
+        """
+        if found := _find_character(name):
+            return f"{found['name']} is already in the party."
+        character_id = store.create_character(None, campaign.id, ctx.user_id if mine else None,
+                                              reason="added; sheet kept elsewhere", name=name, sheet_url=sheet_url)
+        return f"Added {name} to the party (id {character_id}); their sheet is kept elsewhere."
 
     def create_character(sheet: CharacterFile, reason: str = "created") -> str:
         """Add a new player character to this campaign from a complete sheet.
@@ -831,6 +852,6 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         inventory,
     ]
     writers = [add_recap, record_fact, end_fact, retract_fact, party_learned, add_journal_entry, delete_journal_entry,
-               update_character, create_character, add_items, change_item, give_item, link_item, change_coin,
+               update_character, create_character, add_party_member, add_items, change_item, give_item, link_item, change_coin,
                split_party_coin, define_item]
     return readers + (writers if writable else [])

@@ -354,6 +354,8 @@ def _load(s: Store, name: str) -> tuple[int, CharacterSheet]:
     found = s.find_character(name)
     if found is None:
         raise typer.BadParameter(f"no character {name!r}")
+    if found["sheet"] is None:
+        raise typer.BadParameter(f"{found['name']}'s sheet is kept elsewhere ({found['sheet_url'] or 'not in the app'})")
     return found["id"], _inventory(s, found)[0].sheet(found)
 
 
@@ -375,6 +377,13 @@ def char_list() -> None:
 def char_show(name: str, as_json: Annotated[bool, typer.Option("--json")] = False) -> None:
     """Print a character sheet, with what they carry."""
     s = store()
+    found = s.find_character(name)
+    if found is not None and found["sheet"] is None:  # only what they carry is kept here
+        inv, holder = _inventory(s, found)
+        typer.echo(f"{found['name']}: sheet kept elsewhere ({found['sheet_url'] or 'not in the app'})")
+        typer.echo("Carrying: " + (", ".join(i.name + (f" x{i.qty}" if i.qty != 1 else "") for i in inv.carried(holder))
+                                   or "nothing"))
+        return
     character_id, sheet = _load(s, name)
     inv, holder = _inventory(s, s.character(character_id))
     if as_json:

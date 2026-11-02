@@ -1070,3 +1070,11 @@ ol.initiative { margin: .2rem 0 .6rem; padding-left: 1.4rem; font-variant-numeri
 select.visibility { width: auto; padding: .05rem .4rem; font-size: .78rem; border-radius: 999px; }
 .events .session-num { font-size: .85rem; margin-right: .2rem; }
 .as-written { text-transform: none; font-size: .85em; font-weight: 400; }
+.char-card.elsewhere { border-style: dashed; }
+.new-character .elsewhere-toggle { flex-basis: 100%; }
+.new-character input[type=url] { flex-basis: 100%; }
+.member-head { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; margin: .3rem 0; }
+.member-name { font: 600 1.5rem var(--serif); border-color: transparent; background: none; padding: .1rem .2rem; flex: 1; min-width: 10rem; }
+.member-name:not(:disabled):hover, .member-name:focus { border-color: var(--border); }
+a.button { display: inline-block; padding: .42rem .85rem; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); text-decoration: none; color: inherit; }
+.member .actions { display: flex; gap: .5rem; margin-top: 1rem; }

@@ -233,8 +233,10 @@ class Inventory:
         """What a character has equipped whose bonuses count, as this viewer knows them."""
         return [Gear(name=h["name"], bonuses=h["bonuses"]) for h in self.holdings(holder_id) if h["active"] and h["bonuses"]]
 
-    def sheet(self, character: dict[str, Any]) -> CharacterSheet:
-        """A character's sheet, counting what they have equipped."""
+    def sheet(self, character: dict[str, Any]) -> CharacterSheet | None:
+        """A character's sheet, counting what they have equipped; None if it's kept elsewhere."""
+        if character["sheet"] is None:
+            return None
         sheet = CharacterSheet.model_validate(character["sheet"])
         return sheet.with_gear(self.gear(self.character_holder(character["id"])))
 

@@ -79,6 +79,11 @@ export async function characterList() {
 }
 
 export function characterCard(c) {
+  if (!c.in_app) {
+    return h("a.card.char-card.elsewhere", { href: `#/characters/${c.id}` },
+      h("strong", c.name),
+      h("span.muted", sheetPlace(c.sheet_url)));
+  }
   return h("a.card.char-card", { href: `#/characters/${c.id}` },
     h("strong", c.name),
     h("span.muted", [c.species, c.summary].filter(Boolean).join(" · ") || "—"),
@@ -86,9 +91,24 @@ export function characterCard(c) {
   );
 }
 
-// Create or import a character: into `campaign` if given, else one picked from `campaigns`.
+// Where a sheet kept outside the app lives, in words: "Sheet on D&D Beyond".
+function sheetPlace(url) {
+  if (!url) return "Sheet kept elsewhere";
+  try {
+    const host = new URL(url).hostname.replace(/^www\./, "");
+    return host.endsWith("dndbeyond.com") ? "Sheet on D&D Beyond" : `Sheet on ${host}`;
+  } catch {
+    return "Sheet kept elsewhere";
+  }
+}
+
+// Create or import a character: into `campaign` if given, else one picked from `campaigns`. A character
+// can keep their sheet elsewhere (D&D Beyond, paper): then the app tracks what they carry, not the sheet.
 export function newCharacterForm(campaigns, campaign = null) {
   const nameInput = h("input", { placeholder: "New character name", required: true, "aria-label": "Character name" });
+  const urlInput = h("input", { type: "url", placeholder: "Link to their sheet (optional), e.g. on D&D Beyond",
+    "aria-label": "Link to their sheet", hidden: true });
+  const elsewhere = h("input", { type: "checkbox", onchange: () => (urlInput.hidden = !elsewhere.checked) });
   const pick = !campaign && h("select", { "aria-label": "Campaign", required: true },
     campaigns.map((c) => h("option", { value: c.slug }, c.name)));
   const slug = () => campaign?.slug || pick.value;
@@ -106,17 +126,19 @@ export function newCharacterForm(campaigns, campaign = null) {
       }
     },
   });
-  return h("form.inline-form", {
+  return h("form.inline-form.new-character", {
     onsubmit: async (e) => {
       e.preventDefault();
       try {
-        open(await api("POST", "/api/characters", { name: nameInput.value.trim(), campaign: slug() }));
+        open(await api("POST", "/api/characters", { name: nameInput.value.trim(), campaign: slug(),
+          in_app: !elsewhere.checked, sheet_url: elsewhere.checked ? urlInput.value.trim() : "" }));
       } catch (err) {
         toast(err.message, true);
       }
     },
   }, nameInput, pick || "", h("button.primary", { type: "submit" }, "Create"),
-    h("button", { type: "button", onclick: () => fileInput.click() }, "Import JSON…"), fileInput);
+    h("button", { type: "button", onclick: () => fileInput.click() }, "Import JSON…"), fileInput,
+    h("label.mini.elsewhere-toggle", elsewhere, "Their sheet is kept elsewhere (D&D Beyond, paper)"), urlInput);
 }
 
 function hpBar(hp) {
@@ -130,6 +152,7 @@ function hpBar(hp) {
 
 export async function sheetView(id) {
   const [data, { PlayView, preferredMode }] = await Promise.all([api("GET", `/api/characters/${id}`), import("./play.js")]);
+  if (data.sheet === null) return memberView(data);
   // A new, empty character opens in Edit: there's nothing to play yet.
   const play = preferredMode() === "play" && data.sheet.classes.length > 0;
   return new (play ? PlayView : SheetView)(data).el;
@@ -925,4 +948,49 @@ function stat(label, valueEl, cls = "") {
 
 function humanPath(path) {
   return path.replace(/\.\d+\./g, " ").replace(/\./g, " ");
+}
+
+// A character whose sheet is kept outside the app: who they are, where their sheet is, and what they
+// carry in the party's inventory. Starting a sheet here keeps everything they carry.
+function memberView(data) {
+  const base = `/api/characters/${data.id}`;
+  const reload = async () => document.getElementById("view").replaceChildren(await sheetView(data.id));
+  const change = async (body) => {
+    try {
+      await api("PATCH", base, body);
+      reload();
+    } catch (err) {
+      toast(err.message, true);
+    }
+  };
+  const name = h("input.member-name", { value: data.name, "aria-label": "Name", disabled: !data.can_edit,
+    onchange: (e) => e.target.value.trim() && change({ name: e.target.value.trim() }) });
+  const url = h("input", { type: "url", value: data.sheet_url || "", placeholder: "Link to their sheet, e.g. on D&D Beyond",
+    "aria-label": "Link to their sheet", disabled: !data.can_edit, onchange: (e) => change({ sheet_url: e.target.value.trim() }) });
+  const inventory = new InventoryView(data.campaign.slug, { focus: data.inventory.holder });
+  return h("section.page.member",
+    h("p", h("a", { href: `#/campaigns/${data.campaign.slug}/party` }, `← ${data.campaign.name}`)),
+    h("div.member-head", name,
+      data.sheet_url && h("a.button", { href: data.sheet_url, target: "_blank", rel: "noopener" }, `${sheetPlace(data.sheet_url)} ↗`)),
+    h("p.muted", "Their sheet is kept outside the app, so it's not here: what they carry is, in the party's inventory.",
+      data.owned ? "" : " Nobody here plays them, so anyone in the campaign can look after what they carry."),
+    data.can_edit && h("label.field", h("span", "Where their sheet is"), url),
+    inventory.el,
+    h("p.small", h("a", { href: `#/campaigns/${data.campaign.slug}/entity/${data.entity_id}` }, "In the world")),
+    data.can_edit && h("div.actions",
+      h("button", { onclick: async () => {
+        if (!confirm(`Start a sheet for ${data.name} here? What they carry stays as it is.`)) return;
+        try {
+          await api("POST", `${base}/sheet`);
+          reload();
+        } catch (err) {
+          toast(err.message, true);
+        }
+      } }, "Start a sheet here instead"),
+      h("button.danger", { onclick: async () => {
+        if (!confirm(`Remove ${data.name}? What they carry goes back to the party's things.`)) return;
+        await api("DELETE", base);
+        location.hash = `#/campaigns/${data.campaign.slug}/party`;
+      } }, "Remove")),
+  );
 }

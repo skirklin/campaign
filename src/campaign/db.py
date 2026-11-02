@@ -259,15 +259,18 @@ CREATE TABLE invites (
     revoked      INTEGER NOT NULL DEFAULT 0
 );
 
--- A character belongs to one campaign and to the person who made it, is the
--- same character as a player-character entity in that campaign's world, and
--- remembers the sheet it was copied from. What it carries is in holdings.
+-- A character is a member of one campaign's party: the same character as a
+-- player-character entity in that campaign's world, and the person who plays
+-- it (owner_id; NULL: nobody here has claimed it, so the table looks after it).
+-- Its sheet is in the app, or kept elsewhere (D&D Beyond, paper: sheet NULL,
+-- sheet_url saying where); either way, what it carries is in holdings.
 CREATE TABLE characters (
     id           INTEGER PRIMARY KEY,
     campaign_id  INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
     owner_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
     name         TEXT NOT NULL,
-    sheet        TEXT NOT NULL,              -- JSON: charsheet.CharacterSheet
+    sheet        TEXT,                       -- JSON: charsheet.CharacterSheet; NULL: kept elsewhere
+    sheet_url    TEXT,                       -- where the sheet is kept, if elsewhere and online
     entity_id    INTEGER REFERENCES entities(id) ON DELETE SET NULL,
     copied_from  INTEGER REFERENCES characters(id) ON DELETE SET NULL,
     updated_at   TEXT NOT NULL,
@@ -430,14 +433,34 @@ CREATE INDEX inventory_log_campaign ON inventory_log(campaign_id, id);
 # While this is a prototype there are no migrations: a schema change edits
 # SCHEMA and bumps the version, and if the data in the one deployment is worth
 # keeping, a step from the version before goes in UPGRADES until it has run.
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 # Steps that bring the deployed database up to SCHEMA_VERSION, keyed by the
 # version they start from. Delete each once the deployment has taken it.
+# They run with foreign keys off, so a table can be rebuilt without its
+# dependents cascading away; references are checked afterwards.
 UPGRADES: dict[int, str] = {
-    # 16: the flattened schema, less what nothing reads any more: the session
-    # ingest tables that jobs replaced.
-    16: "DROP TABLE ingest_log; DROP TABLE ingests;",
+    # 17: a character's sheet can be kept elsewhere (sheet NULL, sheet_url).
+    17: """
+CREATE TABLE characters_18 (
+    id           INTEGER PRIMARY KEY,
+    campaign_id  INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    owner_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    name         TEXT NOT NULL,
+    sheet        TEXT,
+    sheet_url    TEXT,
+    entity_id    INTEGER REFERENCES entities(id) ON DELETE SET NULL,
+    copied_from  INTEGER REFERENCES characters(id) ON DELETE SET NULL,
+    updated_at   TEXT NOT NULL,
+    UNIQUE (campaign_id, name)
+);
+INSERT INTO characters_18 (id, campaign_id, owner_id, name, sheet, entity_id, copied_from, updated_at)
+    SELECT id, campaign_id, owner_id, name, sheet, entity_id, copied_from, updated_at FROM characters;
+DROP TABLE characters;
+ALTER TABLE characters_18 RENAME TO characters;
+CREATE INDEX characters_owner ON characters(owner_id);
+CREATE INDEX characters_entity ON characters(entity_id);
+""",
 }
 
 
@@ -529,12 +552,17 @@ class Store:
         if has_tables and self.path != ":memory:":
             self.backup(f"pre-v{SCHEMA_VERSION}")
         step = UPGRADES[current] if has_tables else SCHEMA
-        # executescript would commit between statements; wrapped, a failed step leaves the database as it was.
+        # executescript would commit between statements; wrapped, a failed step leaves the database as it
+        # was. Foreign keys are off meanwhile (it can't change inside a transaction), so a rebuilt table's
+        # dependents don't cascade away when the old one is dropped.
+        self.conn.execute("PRAGMA foreign_keys = OFF")
         try:
             self.conn.executescript(f"BEGIN;\n{step}\nPRAGMA user_version = {SCHEMA_VERSION};\nCOMMIT;")
         except Exception:
             self.conn.rollback()
             raise
+        finally:
+            self.conn.execute("PRAGMA foreign_keys = ON")
         if broken := self.conn.execute("PRAGMA foreign_key_check").fetchall():
             raise RuntimeError(f"the schema upgrade left dangling references: {[tuple(r) for r in broken[:5]]}")
 
@@ -1254,11 +1282,14 @@ class Store:
     @staticmethod
     def _character(row: sqlite3.Row) -> dict[str, Any]:
         d = dict(row)
-        d["sheet"] = json.loads(d["sheet"])
+        d["sheet"] = None if d["sheet"] is None else json.loads(d["sheet"])
         return d
 
     def character(self, character_id: int) -> dict[str, Any] | None:
-        """{id, campaign_id, owner_id, name, sheet, entity_id, copied_from, updated_at}, or None."""
+        """{id, campaign_id, owner_id, name, sheet, sheet_url, entity_id, copied_from, updated_at}, or None.
+
+        `sheet` is None for a character whose sheet is kept elsewhere (`sheet_url` says where, if online).
+        """
         row = self.conn.execute("SELECT * FROM characters WHERE id = ?", (character_id,)).fetchone()
         return None if row is None else self._character(row)
 
@@ -1285,24 +1316,32 @@ class Store:
         return [self._character(r) for r in self.conn.execute(sql + " ORDER BY name", params)]
 
     def create_character(
-        self, sheet: dict[str, Any], campaign_id: int, owner_id: int | None = None,
-        reason: str = "created", copied_from: int | None = None,
+        self, sheet: dict[str, Any] | None, campaign_id: int, owner_id: int | None = None,
+        reason: str = "created", copied_from: int | None = None, name: str | None = None,
+        sheet_url: str | None = None,
     ) -> int:
         """Add a character to a campaign and link it to its world entity.
 
+        Without a `sheet`, its sheet is kept elsewhere: `name` is what it's
+        called, and `sheet_url` where the sheet is, if it's online.
         Raises sqlite3.IntegrityError if the campaign already has a character by that name.
         """
+        name = (sheet["name"] if sheet is not None else name or "").strip()
+        if not name:
+            raise ValueError("a character needs a name")
         with self.conn:
             character_id = self.conn.execute(
-                "INSERT INTO characters (campaign_id, owner_id, name, sheet, copied_from, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
-                (campaign_id, owner_id, sheet["name"], json.dumps(sheet), copied_from, now()),
+                "INSERT INTO characters (campaign_id, owner_id, name, sheet, sheet_url, copied_from, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (campaign_id, owner_id, name, None if sheet is None else json.dumps(sheet), sheet_url or None,
+                 copied_from, now()),
             ).lastrowid
             self._log_character(character_id, sheet, reason)
         self._nicknames(character_id, sheet)
         return character_id
 
     def update_character(self, character_id: int, sheet: dict[str, Any], reason: str = "") -> None:
+        """Save a character's in-app sheet (starting one, if its sheet was kept elsewhere)."""
         before = self.character(character_id)
         with self.conn:
             self.conn.execute(
@@ -1315,8 +1354,32 @@ class Store:
             self._world(before["campaign_id"]).rename_character(entity_id, sheet["name"])
         self._nicknames(character_id, sheet)
 
-    def _nicknames(self, character_id: int, sheet: dict[str, Any]) -> None:
+    def update_character_details(
+        self, character_id: int, name: str | None = None, sheet_url: str | None = None, reason: str = "",
+    ) -> None:
+        """Rename a character or say where its sheet is kept ("" clears it); a sheet in the app follows the name."""
+        before = self.character(character_id)
+        name = name.strip() if name is not None else before["name"]
+        if not name:
+            raise ValueError("a character needs a name")
+        sheet = before["sheet"]
+        if sheet is not None and sheet.get("name") != name:
+            sheet = sheet | {"name": name}
+        with self.conn:
+            self.conn.execute(
+                "UPDATE characters SET name = ?, sheet = ?, sheet_url = ?, updated_at = ? WHERE id = ?",
+                (name, None if sheet is None else json.dumps(sheet),
+                 before["sheet_url"] if sheet_url is None else (sheet_url.strip() or None), now(), character_id),
+            )
+            self._log_character(character_id, sheet, reason or "edited")
+        if before["name"] != name:
+            self._world(before["campaign_id"]).rename_character(self.link_character(character_id), name)
+
+    def _nicknames(self, character_id: int, sheet: dict[str, Any] | None) -> None:
         """The sheet's nicknames become aliases of its world entry, so the world knows them by either."""
+        if sheet is None:
+            self.link_character(character_id)
+            return
         entity_id = self.link_character(character_id)
         world = self._world(self.character(character_id)["campaign_id"])
         known = {a.lower() for a in world.entity(entity_id)["aliases"]}
@@ -1380,7 +1443,7 @@ class Store:
         row = self.conn.execute("SELECT id, name FROM characters WHERE entity_id = ?", (entity_id,)).fetchone()
         return None if row is None else dict(row)
 
-    def _log_character(self, character_id: int, sheet: dict[str, Any], reason: str) -> None:
+    def _log_character(self, character_id: int, sheet: dict[str, Any] | None, reason: str) -> None:
         self.conn.execute(
             "INSERT INTO character_log (character_id, change, reason, created_at) VALUES (?, ?, ?, ?)",
             (character_id, json.dumps(sheet), reason, now()),

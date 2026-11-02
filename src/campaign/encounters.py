@@ -20,7 +20,7 @@ import re
 from fractions import Fraction
 from typing import Any
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
 from .charsheet import CharacterSheet
 from .db import Store
@@ -97,19 +97,17 @@ def challenge_xp(challenge: str) -> tuple[str | None, int | None]:
 
 
 def party_of(store: Store, campaign: Any) -> Party | None:
-    """The campaign's party from its character sheets: how many, and their average level."""
-    levels = []
-    for c in store.characters([campaign.id]):
-        if c["campaign_id"] != campaign.id:
-            continue
-        try:
-            levels.append(CharacterSheet.model_validate(c["sheet"]).level)
-        except ValidationError:
-            continue
+    """The campaign's party: every character, and the average level of those whose sheets are here.
+
+    None if no sheet here says a level (characters whose sheets are kept
+    elsewhere count toward the size, not the level).
+    """
+    members = [c for c in store.characters([campaign.id]) if c["campaign_id"] == campaign.id]
+    levels = [CharacterSheet.model_validate(c["sheet"]).level for c in members if c["sheet"] is not None]
     levels = [lv for lv in levels if lv]
     if not levels:
         return None
-    return Party(size=len(levels), level=max(1, min(20, round(sum(levels) / len(levels)))))
+    return Party(size=min(12, len(members)), level=max(1, min(20, round(sum(levels) / len(levels)))))
 
 
 def find_stat_block(world: World, name: str, entity_id: int | None = None) -> tuple[int | None, str, dict[str, Any] | None]:
