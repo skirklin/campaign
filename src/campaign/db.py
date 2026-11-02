@@ -3,12 +3,10 @@
 The world model (entities, facts, events) lives in world.py on the same
 database. Everything is in one file under the data directory (config.py).
 
-The schema is versioned with `PRAGMA user_version`. Small changes are
-migrations appended to MIGRATIONS. A database older than BASELINE is
-retired instead: it's moved to backups/ and a fresh one is started,
-carrying over what isn't world state and is costly to recreate (campaigns,
-character sheets, reference uploads re-read from their stored originals,
-and the digest cache).
+The schema is SCHEMA, versioned with `PRAGMA user_version`. There's no
+migration history: a new database is made from SCHEMA, and the deployed one
+is brought up to it by the step in UPGRADES for its version, if any (see
+SCHEMA_VERSION). A database at a version with no way forward is refused.
 """
 
 from __future__ import annotations
@@ -20,7 +18,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Iterable
 
 from .blobs import BlobStore
 from .ingest import CHUNKER_VERSION, ParsedDoc
@@ -47,6 +45,8 @@ CREATE TABLE sources (
     blob             TEXT,                 -- SHA-256 of the original upload
     filename         TEXT,
     chunker_version  INTEGER NOT NULL DEFAULT 1,
+    digest_model     TEXT,                 -- the model it should be digested with; NULL = leave it
+    digest_effort    TEXT,
     created_at       TEXT NOT NULL,
     UNIQUE (campaign_id, title)
 );
@@ -115,7 +115,9 @@ CREATE TABLE digest_nodes (
 CREATE INDEX digest_nodes_source ON digest_nodes(source_id, seq);
 
 -- Sessions are the world's clock: facts are true from one session number
--- to another. Session 0 is the state of the world before play begins.
+-- to another. Session 0 is the state of the world before play begins. A
+-- recap stands for a stretch of play written up afterwards (from memory, from
+-- notes) rather than one evening's transcript, on the same clock.
 CREATE TABLE sessions (
     id           INTEGER PRIMARY KEY,
     campaign_id  INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
@@ -124,6 +126,8 @@ CREATE TABLE sessions (
     title        TEXT NOT NULL DEFAULT '',
     summary      TEXT NOT NULL DEFAULT '',
     source_id    INTEGER REFERENCES sources(id) ON DELETE SET NULL,
+    kind         TEXT NOT NULL DEFAULT 'played' CHECK (kind IN ('played', 'recap')),
+    covers       INTEGER,                -- a recap: about how many sessions of play it stands for
     UNIQUE (campaign_id, number)
 );
 
@@ -255,18 +259,22 @@ CREATE TABLE invites (
     revoked      INTEGER NOT NULL DEFAULT 0
 );
 
--- A sheet belongs to the person who made it and, optionally, a campaign.
--- (v5 makes the campaign required and links the world entity; see V5_CHARACTERS.)
+-- A character belongs to one campaign and to the person who made it, is the
+-- same character as a player-character entity in that campaign's world, and
+-- remembers the sheet it was copied from. What it carries is in holdings.
 CREATE TABLE characters (
     id           INTEGER PRIMARY KEY,
-    campaign_id  INTEGER REFERENCES campaigns(id) ON DELETE SET NULL,
+    campaign_id  INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
     owner_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
     name         TEXT NOT NULL,
-    sheet        TEXT NOT NULL,
+    sheet        TEXT NOT NULL,              -- JSON: charsheet.CharacterSheet
+    entity_id    INTEGER REFERENCES entities(id) ON DELETE SET NULL,
+    copied_from  INTEGER REFERENCES characters(id) ON DELETE SET NULL,
     updated_at   TEXT NOT NULL,
     UNIQUE (campaign_id, name)
 );
 CREATE INDEX characters_owner ON characters(owner_id);
+CREATE INDEX characters_entity ON characters(entity_id);
 
 CREATE TABLE character_log (
     id            INTEGER PRIMARY KEY,
@@ -275,43 +283,10 @@ CREATE TABLE character_log (
     reason        TEXT NOT NULL DEFAULT '',
     created_at    TEXT NOT NULL
 );
-"""
 
-# Databases older than this are retired and replaced, not migrated. While
-# there's no data worth migrating, schema changes edit SCHEMA and bump this.
-BASELINE = 4
-
-
-# v5: a character belongs to exactly one campaign, is the same character as a
-# player-character entity in that campaign's world (entity_id; linked when
-# the sheet is next touched), and remembers the sheet it was copied from.
-# Sheets that weren't in any campaign are dropped.
-V5_CHARACTERS = """
-DELETE FROM characters WHERE campaign_id IS NULL;
-DELETE FROM character_log WHERE character_id NOT IN (SELECT id FROM characters);
-CREATE TABLE characters_v5 (
-    id           INTEGER PRIMARY KEY,
-    campaign_id  INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
-    owner_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
-    name         TEXT NOT NULL,
-    sheet        TEXT NOT NULL,
-    entity_id    INTEGER REFERENCES entities(id) ON DELETE SET NULL,
-    copied_from  INTEGER REFERENCES characters(id) ON DELETE SET NULL,
-    updated_at   TEXT NOT NULL,
-    UNIQUE (campaign_id, name)
-);
-INSERT INTO characters_v5 (id, campaign_id, owner_id, name, sheet, updated_at)
-    SELECT id, campaign_id, owner_id, name, sheet, updated_at FROM characters;
-DROP TABLE characters;
-ALTER TABLE characters_v5 RENAME TO characters;
-CREATE INDEX characters_owner ON characters(owner_id);
-CREATE INDEX characters_entity ON characters(entity_id);
-"""
-
-# v6: OAuth for the remote MCP endpoint (mcp_server.py, oauth.py). Clients
-# register themselves; codes and tokens are stored as hashes and belong to a
-# user, so removing the user revokes everything they granted.
-V6_OAUTH = """
+-- OAuth for the remote MCP endpoint (mcp_server.py, oauth.py). Clients register
+-- themselves; codes and tokens are stored as hashes and belong to a user, so
+-- removing the user revokes everything they granted.
 CREATE TABLE oauth_clients (
     client_id   TEXT PRIMARY KEY,
     info        TEXT NOT NULL,
@@ -329,72 +304,27 @@ CREATE TABLE oauth_grants (
     created_at  TEXT NOT NULL
 );
 CREATE INDEX oauth_grants_user ON oauth_grants(user_id);
-"""
 
-# v7: digesting is declarative. A source says which model it should be
-# digested with (digest_model; NULL = leave it); the digest cache is what has
-# actually been done; a reconciliation loop (digest.Reconciler) closes the gap.
-# digest_failures remembers sections that failed, by content key, so the loop
-# backs off instead of paying for the same failure over and over.
-V7_DIGEST_TARGET = """
-ALTER TABLE sources ADD COLUMN digest_model TEXT;
-ALTER TABLE sources ADD COLUMN digest_effort TEXT;
+-- Digest sections that failed, by content key, so the reconciler (digest.Reconciler)
+-- backs off instead of paying for the same failure over and over.
 CREATE TABLE digest_failures (
     key       TEXT PRIMARY KEY,
     attempts  INTEGER NOT NULL,
     error     TEXT NOT NULL,
     retry_at  INTEGER            -- epoch seconds; NULL = gave up until asked again
 );
-"""
 
-# v8: leases, so that when two copies of the server overlap (a rolling
-# deploy), only one runs a background loop at a time. See Store.take_lease.
-V8_LEASES = """
+-- Leases, so that when two copies of the server overlap (a rolling deploy), only
+-- one runs a background loop at a time. See Store.take_lease.
 CREATE TABLE leases (
     name        TEXT PRIMARY KEY,
     holder      TEXT NOT NULL,
     expires_at  INTEGER NOT NULL
 );
-"""
 
-# v9: session ingests are targets too: "session N should be what this
-# transcript says". A row is the request plus its observed status; the
-# ingest loop (ingests.py) works through them, so they survive restarts and
-# deploys. ingest_log holds each one's progress for whichever server asks.
-V9_INGESTS = """
-CREATE TABLE ingests (
-    id               INTEGER PRIMARY KEY,
-    campaign_id      INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
-    session          INTEGER NOT NULL,
-    input_blob       TEXT NOT NULL,          -- the upload (text or audio), in the blob store
-    input_name       TEXT NOT NULL,
-    transcript_blob  TEXT,                   -- once transcribed, so a retry doesn't redo it
-    played_on        TEXT,
-    role             TEXT NOT NULL CHECK (role IN ('dm', 'player')),  -- whose view it ingests as
-    requested_by     INTEGER REFERENCES users(id) ON DELETE SET NULL,
-    state            TEXT NOT NULL DEFAULT 'wanted'
-                     CHECK (state IN ('wanted', 'running', 'done', 'failed', 'cancelled')),
-    attempts         INTEGER NOT NULL DEFAULT 0,
-    retry_at         INTEGER,
-    error            TEXT,
-    result           TEXT,
-    created_at       TEXT NOT NULL,
-    updated_at       TEXT NOT NULL
-);
-CREATE INDEX ingests_campaign ON ingests(campaign_id, id);
-CREATE TABLE ingest_log (
-    ingest_id  INTEGER NOT NULL REFERENCES ingests(id) ON DELETE CASCADE,
-    seq        INTEGER NOT NULL,
-    kind       TEXT NOT NULL,
-    text       TEXT NOT NULL,
-    PRIMARY KEY (ingest_id, seq)
-);
-"""
-
-# v10: chat conversations, kept so any server can continue one. Messages
-# are stored exactly as the API returned them (thinking blocks included,
-# which must be passed back unchanged on later turns).
-V10_CONVERSATIONS = """
+-- Chat conversations, kept so any server can continue one. Messages are stored
+-- exactly as the API returned them (thinking blocks included, which must be
+-- passed back unchanged on later turns).
 CREATE TABLE conversations (
     id           INTEGER PRIMARY KEY,
     campaign_id  INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
@@ -409,17 +339,13 @@ CREATE TABLE conversation_messages (
     seq              INTEGER NOT NULL,
     role             TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
     content          TEXT NOT NULL,   -- JSON: a string or a list of content blocks
+    usage            TEXT,            -- JSON: what the turn cost, on its last message
     PRIMARY KEY (conversation_id, seq)
 );
-"""
 
-# v11: one table of jobs, so every background transformation (a session
-# ingest, reading a character sheet from a scan, whatever comes next) is
-# the same durable thing: a row saying what's wanted, with its input, its
-# state, retries and result, worked through by jobs.JobLoop. Ingests move
-# over keeping their ids. The v9 tables stay for the old server during the
-# rollout; a later release drops them.
-V11_JOBS = """
+-- Background work (a session ingest, reading a sheet from a scan) as durable rows:
+-- what's wanted, its input, state, retries and result, worked through by
+-- jobs.JobLoop. job_log holds each one's progress for whichever server asks.
 CREATE TABLE jobs (
     id            INTEGER PRIMARY KEY,
     campaign_id   INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
@@ -445,40 +371,8 @@ CREATE TABLE job_log (
     text    TEXT NOT NULL,
     PRIMARY KEY (job_id, seq)
 );
-INSERT INTO jobs (id, campaign_id, kind, input, role, requested_by, state, attempts, retry_at, error, result,
-                  created_at, updated_at)
-SELECT id, campaign_id, 'ingest',
-       json_object('session', session, 'blob', input_blob, 'name', input_name,
-                   'transcript_blob', transcript_blob, 'played_on', played_on),
-       role, requested_by, state, attempts, retry_at, error, result, created_at, updated_at
-FROM ingests;
-INSERT INTO job_log (job_id, seq, kind, text) SELECT ingest_id, seq, kind, text FROM ingest_log;
-"""
 
-# v12: the party stash, what the party holds in common (charsheet.PartyStash),
-# with a log of changes like a character's. One row per campaign, made on
-# first write; a campaign without one has an empty stash.
-V12_PARTY_STASH = """
-CREATE TABLE party_stash (
-    campaign_id  INTEGER PRIMARY KEY REFERENCES campaigns(id) ON DELETE CASCADE,
-    stash        TEXT NOT NULL,             -- JSON: charsheet.PartyStash
-    updated_at   TEXT NOT NULL
-);
-CREATE TABLE party_stash_log (
-    id           INTEGER PRIMARY KEY,
-    campaign_id  INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
-    change       TEXT NOT NULL,             -- the stash after this change
-    reason       TEXT NOT NULL DEFAULT '',
-    user_id      INTEGER REFERENCES users(id) ON DELETE SET NULL,
-    created_at   TEXT NOT NULL
-);
-CREATE INDEX party_stash_log_campaign ON party_stash_log(campaign_id, id);
-"""
-
-# v13: files kept with a character, such as the scan its sheet was read
-# from, so its owner can check the sheet against it. Scans already read
-# into characters are attached from their jobs.
-V13_CHARACTER_FILES = """
+-- Files kept with a character, such as the scan its sheet was read from.
 CREATE TABLE character_files (
     id            INTEGER PRIMARY KEY,
     character_id  INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
@@ -487,24 +381,13 @@ CREATE TABLE character_files (
     created_at    TEXT NOT NULL
 );
 CREATE INDEX character_files_character ON character_files(character_id, id);
-INSERT INTO character_files (character_id, blob, name, created_at)
-SELECT json_extract(result, '$.character'), json_extract(input, '$.blob'), json_extract(input, '$.name'), updated_at
-FROM jobs
-WHERE kind = 'scan' AND state = 'done' AND json_extract(result, '$.character') IN (SELECT id FROM characters);
-"""
 
-# v14: what each chat answer cost (tokens, calls, time), on the turn's last message.
-V14_CHAT_USAGE = """
-ALTER TABLE conversation_messages ADD COLUMN usage TEXT;  -- JSON, or NULL
-"""
-
-# v15: one party inventory (inventory.py). Everything the party owns is a
-# holding, held by the party (unclaimed: holder_id NULL), a character (their
-# world entity) or anyone else in the world (left with an NPC). A holding of
-# an item that does something points at the world item that defines it (a
-# "mechanics" fact), so its details are never copied. Coin is in purses, one
-# per holder. Characters' inventories and coin, and the party stash, move in.
-V15_INVENTORY = """
+-- One party inventory (inventory.py). Everything the party owns is a
+-- holding, held by the party (unclaimed: holder_id NULL), a character (their
+-- world entity) or anyone else in the world (left with an NPC). A holding of
+-- an item that does something points at the world item that defines it (a
+-- "mechanics" fact), so its details are never copied. Coin is in purses, one
+-- per holder.
 CREATE TABLE holdings (
     id          INTEGER PRIMARY KEY,
     campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
@@ -543,108 +426,19 @@ CREATE TABLE inventory_log (
 CREATE INDEX inventory_log_campaign ON inventory_log(campaign_id, id);
 """
 
+# The schema's version. A new database is made from SCHEMA at this version.
+# While this is a prototype there are no migrations: a schema change edits
+# SCHEMA and bumps the version, and if the data in the one deployment is worth
+# keeping, a step from the version before goes in UPGRADES until it has run.
+SCHEMA_VERSION = 17
 
-# v16: a session can be a recap: a stretch of play written up afterwards (from memory,
-# from notes) rather than one evening's transcript. It's on the same clock as
-# played sessions, so what it records is ordered and found like everything else.
-V16_RECAPS = """
-ALTER TABLE sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'played' CHECK (kind IN ('played', 'recap'));
-ALTER TABLE sessions ADD COLUMN covers INTEGER;  -- a recap: about how many sessions of play it stands for
-"""
-
-
-def _v15_inventory(conn: sqlite3.Connection) -> None:
-    from .charsheet import Item, no_coins  # charsheet imports nothing of ours
-
-    for statement in V15_INVENTORY.split(";"):
-        if statement.strip():
-            conn.execute(statement)
-    stamp = now()
-    runs: dict[int, int] = {}
-
-    def definition(campaign_id: int, item: Item) -> int | None:
-        """The world item an item with bonuses is, given those bonuses if it has none yet."""
-        mechanics = item.mechanics
-        if mechanics is None:
-            return None
-        row = conn.execute("SELECT id FROM entities WHERE campaign_id = ? AND kind = 'item' AND name = ? COLLATE NOCASE",
-                           (campaign_id, item.name.strip())).fetchone()
-        entity_id = row[0] if row else conn.execute(
-            "INSERT INTO entities (campaign_id, kind, name, created_at) VALUES (?, 'item', ?, ?)",
-            (campaign_id, item.name.strip(), stamp)).lastrowid
-        if not conn.execute("SELECT 1 FROM facts WHERE entity_id = ? AND attribute = 'mechanics' AND valid_to IS NULL",
-                            (entity_id,)).fetchone():
-            session = conn.execute("SELECT coalesce(max(number), 0) FROM sessions WHERE campaign_id = ?",
-                                   (campaign_id,)).fetchone()[0]
-            if campaign_id not in runs:
-                runs[campaign_id] = conn.execute(
-                    "INSERT INTO runs (campaign_id, kind, session, label, created_at) VALUES (?, 'manual', ?, ?, ?)",
-                    (campaign_id, session, "item definitions from character sheets", stamp)).lastrowid
-            conn.execute(
-                "INSERT INTO facts (campaign_id, entity_id, attribute, value, statement, valid_from, party_knows_from,"
-                " run_id, created_at) VALUES (?, ?, 'mechanics', ?, ?, ?, ?, ?, ?)",
-                (campaign_id, entity_id, mechanics.model_dump_json(), f"{item.name.strip()}: {mechanics.describe()}",
-                 session, session, runs[campaign_id], stamp))
-        return entity_id
-
-    def move_in(campaign_id: int, holder_id: int | None, items: list[Any], coins: dict[str, Any]) -> None:
-        for raw in items:
-            item = Item.model_validate({**raw, "qty": max(1, int(raw.get("qty", 1) or 1))})
-            item_id = definition(campaign_id, item)
-            conn.execute(
-                "INSERT INTO holdings (campaign_id, holder_id, item_id, name, qty, equipped, attuned, notes, value_gp,"
-                " created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (campaign_id, holder_id, item_id, item.name.strip(), item.qty, item.equipped, item.attuned, item.notes,
-                 0 if item_id else item.value_gp, stamp, stamp))
-        conn.execute("INSERT INTO purses (campaign_id, holder_id, coins) VALUES (?, ?, ?)",
-                     (campaign_id, holder_id, json.dumps(no_coins() | {k: int(v) for k, v in coins.items()})))
-
-    for ch in conn.execute("SELECT id, campaign_id, name, sheet, entity_id FROM characters").fetchall():
-        sheet = json.loads(ch[3])
-        entity_id = ch[4]
-        if entity_id is None:  # every character is a pc in its world; linked here if it wasn't yet
-            row = conn.execute(
-                "SELECT id FROM entities WHERE campaign_id = ? AND kind = 'pc' AND name = ? COLLATE NOCASE"
-                " AND id NOT IN (SELECT entity_id FROM characters WHERE entity_id IS NOT NULL)", (ch[1], ch[2])).fetchone()
-            taken = conn.execute("SELECT 1 FROM entities WHERE campaign_id = ? AND kind = 'pc' AND name = ? COLLATE NOCASE",
-                                 (ch[1], ch[2])).fetchone()
-            entity_id = row[0] if row else conn.execute(
-                "INSERT INTO entities (campaign_id, kind, name, created_at) VALUES (?, 'pc', ?, ?)",
-                (ch[1], f"{ch[2]} (#{ch[0]})" if taken else ch[2], stamp)).lastrowid
-            conn.execute("UPDATE characters SET entity_id = ? WHERE id = ?", (entity_id, ch[0]))
-        move_in(ch[1], entity_id, sheet.pop("inventory", []), sheet.pop("currency", {}))
-        conn.execute("UPDATE characters SET sheet = ? WHERE id = ?", (json.dumps(sheet), ch[0]))
-    for campaign_id, stash in conn.execute("SELECT campaign_id, stash FROM party_stash").fetchall():
-        stash = json.loads(stash)
-        move_in(campaign_id, None, stash.get("items", []), stash.get("currency", {}))
-    conn.execute("DROP TABLE party_stash_log")
-    conn.execute("DROP TABLE party_stash")
-
-# Append only, for changes small enough to migrate.
-#
-# Deploys are rolling: the new server starts, and runs these, while the old
-# one is still serving on the same database. So every step must leave the
-# old code working: add tables and nullable columns, backfill, start using
-# them; stop using something in one release and drop it in a later one
-# ("expand, then contract"). Rebuilding a table the old code reads, as v5
-# did, would break the old server for the seconds the two overlap. Each step runs in its
-# own transaction and then sets user_version to its number.
-MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
-    (BASELINE, SCHEMA),
-    (5, V5_CHARACTERS),
-    (6, V6_OAUTH),
-    (7, V7_DIGEST_TARGET),
-    (8, V8_LEASES),
-    (9, V9_INGESTS),
-    (10, V10_CONVERSATIONS),
-    (11, V11_JOBS),
-    (12, V12_PARTY_STASH),
-    (13, V13_CHARACTER_FILES),
-    (14, V14_CHAT_USAGE),
-    (15, _v15_inventory),
-    (16, V16_RECAPS),
-]
-SCHEMA_VERSION = MIGRATIONS[-1][0]
+# Steps that bring the deployed database up to SCHEMA_VERSION, keyed by the
+# version they start from. Delete each once the deployment has taken it.
+UPGRADES: dict[int, str] = {
+    # 16: the flattened schema, less what nothing reads any more: the session
+    # ingest tables that jobs replaced.
+    16: "DROP TABLE ingest_log; DROP TABLE ingests;",
+}
 
 
 def now() -> str:
@@ -705,7 +499,6 @@ class Store:
             else:
                 blob_dir = Path(self.path).parent / "blobs"
         self.blobs = BlobStore(Path(blob_dir))
-        self._carry_over: Path | None = None
         self._connect()
         self._migrate()
 
@@ -723,90 +516,27 @@ class Store:
         return self.conn.execute("PRAGMA user_version").fetchone()[0]
 
     def _migrate(self) -> None:
+        """Make a new database from SCHEMA, or bring the deployed one up to it (UPGRADES)."""
         current = self.schema_version
-        has_tables = self.conn.execute(
-            "SELECT count(*) FROM sqlite_master WHERE type = 'table'"
-        ).fetchone()[0]
-        if has_tables and current < BASELINE:
-            self._retire()
-            current = 0
-        pending = [(v, step) for v, step in MIGRATIONS if v > current]
-        if not pending:
+        if current == SCHEMA_VERSION:
             return
-        if current and self.path != ":memory:":
-            self.backup(f"pre-v{pending[-1][0]}")
-        # Steps may rebuild tables, which SQLite only allows safely with foreign
-        # keys off (and that can't change inside a transaction); check after.
-        self.conn.execute("PRAGMA foreign_keys = OFF")
-        for version, step in pending:
-            try:
-                if isinstance(step, str):
-                    # executescript would commit between statements; wrap it so a
-                    # failed step leaves the database exactly as it was.
-                    self.conn.executescript(f"BEGIN;\n{step}\nPRAGMA user_version = {version};\nCOMMIT;")
-                else:
-                    self.conn.execute("BEGIN")
-                    step(self.conn)
-                    self.conn.execute(f"PRAGMA user_version = {version}")
-                    self.conn.commit()
-            except Exception:
-                self.conn.rollback()
-                self.conn.execute("PRAGMA foreign_keys = ON")
-                raise
-        self.conn.execute("PRAGMA foreign_keys = ON")
+        has_tables = self.conn.execute("SELECT count(*) FROM sqlite_master WHERE type = 'table'").fetchone()[0]
+        if has_tables and current not in UPGRADES:
+            raise RuntimeError(
+                f"{self.path} is at schema version {current}, which this version of the app can't bring up to"
+                f" {SCHEMA_VERSION}: start a fresh database (or restore one from backups/ with a matching version)"
+            )
+        if has_tables and self.path != ":memory:":
+            self.backup(f"pre-v{SCHEMA_VERSION}")
+        step = UPGRADES[current] if has_tables else SCHEMA
+        # executescript would commit between statements; wrapped, a failed step leaves the database as it was.
+        try:
+            self.conn.executescript(f"BEGIN;\n{step}\nPRAGMA user_version = {SCHEMA_VERSION};\nCOMMIT;")
+        except Exception:
+            self.conn.rollback()
+            raise
         if broken := self.conn.execute("PRAGMA foreign_key_check").fetchall():
-            raise RuntimeError(f"migration left dangling references: {[tuple(r) for r in broken[:5]]}")
-        if self._carry_over:
-            self._restore_from(self._carry_over)
-
-    def _retire(self) -> None:
-        """Move a pre-baseline database to backups/ and start an empty one in its place."""
-        self._carry_over = self.backup("retired")
-        self.conn.close()
-        for suffix in ("", "-wal", "-shm"):
-            Path(self.path + suffix).unlink(missing_ok=True)
-        self._connect()
-
-    def _restore_from(self, old_db: Path) -> None:
-        """Bring back campaigns, character sheets, the digest cache and reference uploads.
-
-        World state, sessions and transcripts are not carried over. Reference
-        sources are re-read from their stored originals, which re-plans their
-        digests and re-applies the book's facts without any API calls.
-        """
-        self._carry_over = None
-        old = sqlite3.connect(old_db)
-        old.row_factory = sqlite3.Row
-        tables = {r[0] for r in old.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-        with self.conn:
-            for r in old.execute("SELECT id, slug, name, role, notes, created_at FROM campaigns"):
-                self.conn.execute("INSERT INTO campaigns VALUES (?, ?, ?, ?, ?, ?)", tuple(r))
-            for r in old.execute("SELECT id, campaign_id, name, sheet, updated_at FROM characters"
-                                 " WHERE campaign_id IS NOT NULL"):
-                self.conn.execute(
-                    "INSERT INTO characters (id, campaign_id, name, sheet, updated_at) VALUES (?, ?, ?, ?, ?)", tuple(r)
-                )
-            for r in old.execute("SELECT l.id, l.character_id, l.change, l.reason, l.created_at FROM character_log l"
-                                 " JOIN characters c ON c.id = l.character_id WHERE c.campaign_id IS NOT NULL"):
-                self.conn.execute("INSERT INTO character_log VALUES (?, ?, ?, ?, ?)", tuple(r))
-            if "digests" in tables:
-                for r in old.execute("SELECT * FROM digests"):
-                    self.conn.execute("INSERT INTO digests VALUES (?, ?, ?, ?, ?, ?, ?)", tuple(r))
-        sources = []
-        if "blob" in {r[1] for r in old.execute("PRAGMA table_info(sources)")}:
-            sources = old.execute(
-                "SELECT s.*, c.slug FROM sources s JOIN campaigns c ON c.id = s.campaign_id"
-                " WHERE s.kind != 'transcript' AND s.blob IS NOT NULL ORDER BY s.id"
-            ).fetchall()
-        old.close()
-        from .library import add_reference  # library -> digest -> db
-
-        for src in sources:
-            if self.blobs.exists(src["blob"]):
-                add_reference(
-                    self, self.campaign(src["slug"]), self.blobs.get(src["blob"]),
-                    src["filename"] or f"{src['title']}.pdf", src["title"], src["kind"], bool(src["dm_only"]),
-                )
+            raise RuntimeError(f"the schema upgrade left dangling references: {[tuple(r) for r in broken[:5]]}")
 
     def backup(self, label: str = "manual") -> Path:
         """Snapshot the database into backups/, keeping the 20 most recent."""

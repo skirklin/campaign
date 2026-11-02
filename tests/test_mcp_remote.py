@@ -108,7 +108,7 @@ def test_claude_app_connects_and_acts_as_the_user(site, api):
     assert "No campaign" in call(api, token, "lookup", campaign="avernus", name="x")[0]
 
     sheet = {"name": "Bram", "classes": [{"name": "Paladin", "level": 3}], "abilities": {
-        "str": 16, "dex": 10, "con": 14, "int": 8, "wis": 12, "cha": 15}, "hp": {"max": 28, "current": 28}}
+        "str": 16, "dex": 10, "con": 14, "int": 8, "wis": 12, "cha": 15}, "hp": {"base": 20, "current": 28}}
     text, _ = call(api, token, "create_character", campaign="strahd", sheet=sheet, reason="from a scan")
     assert json.loads(text)["derived"]["level"] == 3
     chars = dm.get("/api/campaigns/strahd/characters").json()

@@ -1,5 +1,7 @@
 """The temporal world model: facts over sessions, history, sources, spoilers, undo."""
 
+import pytest
+
 from fastapi.testclient import TestClient
 
 from campaign.db import Store
@@ -223,35 +225,9 @@ def test_tools_find_a_character_by_any_name_its_entity_has():
     w.add_alias(store.character(cid)["entity_id"], "the paladin", play(store, w, 1))
     tools = {t.__name__: t for t in build_tools(ToolContext(store, camp))}
     assert '"name": "Bram"' in tools["get_character"]("the paladin")
-    tools["update_character"]("the paladin", {"hp": {"current": 3, "max": 10}}, "took a hit")
+    tools["update_character"]("the paladin", {"hp": {"current": 3, "base": 10}}, "took a hit")
     assert store.character(cid)["sheet"]["hp"]["current"] == 3
     assert [c["id"] for c in store.characters(campaign_ids=[camp.id])] == [cid]  # no duplicate created
-
-
-def test_v4_database_migrates_characters_into_campaigns(tmp_path):
-    import sqlite3
-
-    from campaign.db import BASELINE, SCHEMA, SCHEMA_VERSION
-
-    path = tmp_path / "old.db"
-    old = sqlite3.connect(path)
-    old.executescript(SCHEMA + f"PRAGMA user_version = {BASELINE};")
-    old.execute("INSERT INTO campaigns VALUES (1, 'strahd', 'Strahd', 'dm', '', 'now')")
-    old.execute("INSERT INTO users (id, email, created_at) VALUES (1, 'me@example.com', 'now')")
-    old.execute("INSERT INTO characters (id, campaign_id, owner_id, name, sheet, updated_at)"
-                " VALUES (1, 1, 1, 'Bram', '{\"name\": \"Bram\"}', 'now'), (2, NULL, 1, 'Loose', '{\"name\": \"Loose\"}', 'now')")
-    old.execute("INSERT INTO character_log (character_id, change, created_at) VALUES (1, '{}', 'now'), (2, '{}', 'now')")
-    old.commit()
-    old.close()
-
-    store = Store(path)
-    assert store.schema_version == SCHEMA_VERSION
-    assert [c["name"] for c in store.characters()] == ["Bram"]  # the campaign-less sheet is gone
-    assert store.conn.execute("SELECT count(*) FROM character_log").fetchone()[0] == 1
-    assert store.conn.execute("SELECT email FROM users").fetchone()[0] == "me@example.com"  # accounts kept
-    eid = store.link_character(1)  # linked the first time it's touched
-    assert World(store, store.campaign("strahd")).entity(eid)["name"] == "Bram"
-    assert list((tmp_path / "backups").glob(f"campaign-*-pre-v{SCHEMA_VERSION}.db"))
 
 
 def _entry(name, kind="npc", aliases=(), facts=()):
@@ -398,3 +374,32 @@ def test_a_mistaken_write_from_chat_can_be_taken_back():
     # What came from the book or a session is changed by re-running those, not here.
     assert "can't be deleted" in tools["retract_fact"](lives["id"])
     assert "No journal entry" in tools["delete_journal_entry"](12345)
+
+
+def test_the_schema_is_made_whole_and_the_deployed_database_brought_up_to_it(tmp_path):
+    import sqlite3
+
+    from campaign.db import SCHEMA_VERSION, Store
+
+    db = tmp_path / "campaign.db"
+    s = Store(db)
+    assert s.schema_version == SCHEMA_VERSION
+    s.create_campaign("Odyssey", "dm")
+    # The deployment as it stands: version 16, with the tables jobs replaced still there.
+    s.conn.executescript("CREATE TABLE ingests (id INTEGER PRIMARY KEY); CREATE TABLE ingest_log (ingest_id INTEGER);"
+                         " PRAGMA user_version = 16;")
+    s.close()
+    s = Store(db)
+    assert s.schema_version == SCHEMA_VERSION and s.campaign("odyssey").name == "Odyssey"
+    assert not s.conn.execute("SELECT 1 FROM sqlite_master WHERE name IN ('ingests', 'ingest_log')").fetchone()
+    assert list((tmp_path / "backups").glob(f"campaign-*-pre-v{SCHEMA_VERSION}.db"))
+    s.close()
+    assert Store(db).schema_version == SCHEMA_VERSION  # reopening changes nothing
+
+    # A database from a version with no way forward is refused, not guessed at.
+    old = tmp_path / "old.db"
+    c = sqlite3.connect(old)
+    c.executescript("CREATE TABLE campaigns (id INTEGER PRIMARY KEY); PRAGMA user_version = 9;")
+    c.close()
+    with pytest.raises(RuntimeError, match="schema version 9"):
+        Store(old)

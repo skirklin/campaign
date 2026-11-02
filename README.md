@@ -31,20 +31,19 @@ pulling, switching branches, reinstalling or re-cloning never touches it:
 ~/.local/share/campaign/        (or $CAMPAIGN_HOME)
   campaign.db                   campaigns, sources, digests, state, characters
   blobs/ab/ab12…                every uploaded original, named by its SHA-256
-  backups/                      a database snapshot before every schema migration
+  backups/                      a database snapshot before every schema upgrade
 ```
 
 - **Originals are kept.** Each upload is stored once by content hash and can
   be downloaded again from the web UI. When the chunker improves,
   `campaign reindex` rebuilds chunks from the originals. The web server does
   this at startup too. Neither makes any API calls.
-- **Schema changes are migrations or a clean start.** The schema is
-  versioned (`PRAGMA user_version`). Small changes are migrations: opening
-  the database with a newer build snapshots it to `backups/`, then upgrades
-  it in place. Big changes start clean instead. The old database is moved to
-  `backups/`, and the new one keeps everything that isn't world state:
-  campaigns, character sheets, reference uploads (re-read from the stored
-  originals) and the digest cache. Sessions and world state start empty.
+- **One schema, no migration history.** The schema is `SCHEMA` in `db.py`,
+  versioned with `PRAGMA user_version`. A new database is made from it. While
+  this is a prototype, a schema change edits `SCHEMA` and bumps the version;
+  when the deployed data is worth keeping, a one-off step for the version
+  before goes in `UPGRADES` (it runs after a snapshot to `backups/`) and is
+  deleted once it has run. A database at any other version is refused.
 - `campaign info` and the Campaigns page show where the data is.
 
 ## Web UI

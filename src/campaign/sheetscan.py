@@ -16,11 +16,11 @@ import re
 from pathlib import Path
 from typing import Any, Callable
 
-from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from .charsheet import (
-    ABILITIES, RETIRED_SHEET_FIELDS, SKILLS, ArmorClass, Attack, AttackOption, Bonus, CharacterFile, ClassLevel,
-    HitPoints, Item, Resource, Spell, Status, without,
+    ABILITIES, SKILLS, ArmorClass, Attack, AttackOption, Bonus, CharacterFile, ClassLevel,
+    HitPoints, Item, Resource, Spell, Status,
 )
 from .tools import ToolContext
 
@@ -180,11 +180,6 @@ class ScannedSheet(Model):
     personality: str
     notes: str
     unreadable: list[str]
-
-    @model_validator(mode="before")
-    @classmethod
-    def _retired(cls, data: Any) -> Any:
-        return without(data, *RETIRED_SHEET_FIELDS)  # a scan stored while they existed still re-runs
 
 
 # The answer's shape, spelled out for Claude (it's checked against ScannedSheet when it arrives).

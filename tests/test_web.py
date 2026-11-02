@@ -53,7 +53,7 @@ def test_character_lifecycle(client):
     assert r.json()["sheet"]["hp"]["current"] == 27
     assert r.json()["sheet"]["resources"][0]["used"] == 0
 
-    sheet = r.json()["sheet"] | {"hp": {"max": 27, "current": "lots", "temp": 0}}
+    sheet = r.json()["sheet"] | {"hp": {"base": 21, "current": "lots", "temp": 0}}
     assert client.put(f"/api/characters/{cid}", json={"sheet": sheet}).status_code == 422
 
     # The sheet is a player character in the campaign's world.
