@@ -23,7 +23,10 @@ no readers for old formats.
 
 ## Checks
 
+What CI runs, before every push:
+
 ```bash
+uv run pyflakes src tests
 uv run pytest -q
 ```
 

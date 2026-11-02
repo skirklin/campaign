@@ -280,7 +280,7 @@ def test_characters_whose_sheets_are_kept_elsewhere(site):
     # A character nobody here plays is the table's: anyone in the campaign looks after what they carry.
     s = Store(site.db)
     camp = s.campaign("strahd")
-    lyra = s.create_character(None, camp.id, name="Lyra", reason="added")
+    s.create_character(None, camp.id, name="Lyra", reason="added")
     s.close()
     lyra_holder = next(h["id"] for h in bob.get(base).json()["holders"] if h["name"] == "Lyra")
     assert bob.post(f"{base}/items/{loot}/move", json={"to": lyra_holder}).status_code == 403  # not Bob's to give
