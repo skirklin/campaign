@@ -1058,15 +1058,86 @@ body:has(.chat-form) #toast { bottom: calc(6.5rem + env(safe-area-inset-bottom))
 .difficulty.deadly { background: color-mix(in srgb, var(--danger) 12%, transparent); }
 .thresholds { margin: .3rem 0 0; }
 .encounter-actions { margin: .7rem 0 .3rem; display: flex; gap: .5rem; }
-ol.initiative { margin: .2rem 0 .6rem; padding-left: 1.4rem; font-variant-numeric: tabular-nums; }
 .encounter-creature { border-top: 1px solid var(--border); padding: .5rem 0; }
 .encounter-creature > summary { cursor: pointer; display: flex; flex-wrap: wrap; align-items: baseline; gap: .2rem .6rem; }
 .encounter-creature.missing strong { color: var(--danger); }
 .encounter-note { color: var(--rule); font-style: italic; }
-.hp-trackers { display: flex; flex-wrap: wrap; gap: .4rem; margin: .5rem 0 0; }
-.hp-tracker { display: flex; align-items: center; gap: .3rem; }
-.hp-tracker input { width: 4.2rem; text-align: center; font-variant-numeric: tabular-nums; }
 .encounter-creature .statblock-card { margin: .6rem 0 .2rem; }
+a.button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+.spacer { flex: 1; }
+
+/* -- encounters: the list, and the tracker that runs one -------------------------------- */
+
+.encounter-list { display: flex; flex-direction: column; gap: .6rem; max-width: 52rem; }
+.encounter-row { display: flex; flex-direction: column; gap: .3rem; }
+.encounter-row-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: .5rem; }
+.encounter-row-head a { color: inherit; text-decoration: none; font-size: 1.05rem; }
+.encounter-row p { margin: 0; }
+.encounter-row-foot { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+
+.tracker { max-width: 46rem; margin: 0 auto; }
+.tracker-title { display: flex; align-items: center; flex-wrap: wrap; gap: .4rem .6rem; }
+.tracker-title h1 { margin: 0; }
+.tracker-setup { display: flex; flex-direction: column; gap: .35rem; margin: .6rem 0; }
+.setup-row { display: flex; align-items: center; gap: .5rem; padding: .35rem .6rem; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.setup-name { flex: 1; min-width: 0; display: flex; gap: .4rem; align-items: baseline; }
+.setup-row input { width: 5rem; text-align: center; font-variant-numeric: tabular-nums; }
+.tracker-setup-actions { display: flex; gap: .5rem; }
+.tracker-add { margin: .4rem 0 1rem; }
+.tracker-add input[type=number] { width: 5rem; }
+.tracker-start { width: 100%; padding: .7rem; font-size: 1.05rem; }
+
+.tracker-bar {
+  position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: .6rem;
+  padding: .6rem 0; margin-bottom: .4rem; background: linear-gradient(var(--bg) 80%, transparent);
+}
+.tracker-round, .tracker-now { display: flex; flex-direction: column; line-height: 1.15; }
+.tracker-round strong { font-size: 1.4rem; font-variant-numeric: tabular-nums; }
+.tracker-now { flex: 1; min-width: 0; }
+.tracker-now strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tracker-bar button.primary { padding: .6rem 1.1rem; font-size: 1rem; }
+.turn-order { display: flex; flex-direction: column; gap: .45rem; }
+.combatant {
+  padding: .55rem .7rem; background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); scroll-margin-top: 5rem; transition: border-color .15s, box-shadow .15s;
+}
+.combatant.current { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft), var(--shadow); }
+.combatant.down { opacity: .55; }
+.combatant.pc { background: var(--surface-2); }
+.combatant-head { display: flex; align-items: center; flex-wrap: wrap; gap: .3rem .55rem; }
+.combatant .init {
+  min-width: 2rem; text-align: center; font-weight: 700; font-variant-numeric: tabular-nums;
+  padding: .1rem .3rem; border-radius: 6px; background: var(--surface-2);
+}
+.combatant.current .init { background: var(--accent); color: var(--accent-text); }
+.combatant-name { font-size: 1.02rem; }
+.badge.down { color: var(--danger); border-color: currentColor; }
+.hp-control { display: flex; align-items: center; flex-wrap: wrap; gap: .4rem; margin-top: .45rem; }
+.hp-readout { min-width: 8rem; font-variant-numeric: tabular-nums; }
+.hp-bar { height: 4px; margin-top: .2rem; background: var(--surface-2); border-radius: 2px; overflow: hidden; }
+.hp-bar span { display: block; height: 100%; background: var(--ok); }
+.combatant.down .hp-bar span { background: var(--danger); }
+.hp-control input { width: 4.5rem; text-align: center; }
+.conditions { margin-top: .4rem; }
+.condition-chips { display: flex; flex-wrap: wrap; align-items: center; gap: .3rem; }
+.condition-chip {
+  padding: .1rem .55rem; border-radius: 999px; font-size: .82rem; text-transform: capitalize;
+  background: color-mix(in srgb, var(--warn) 14%, transparent); border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
+}
+.condition-chip.active { background: var(--warn); color: var(--accent-text); }
+.condition-chips select { width: auto; padding: .1rem .4rem; font-size: .82rem; }
+.condition-info { margin-top: .35rem; padding: .45rem .65rem; border-left: 3px solid var(--warn); background: var(--surface-2); border-radius: 0 6px 6px 0; font-size: .88rem; }
+.condition-info strong { text-transform: capitalize; }
+.condition-info ul { margin: .25rem 0 .3rem; padding-left: 1.1rem; }
+.tracker-legendary { display: flex; flex-wrap: wrap; gap: .3rem 1rem; margin-top: .4rem; }
+.tracker-ticks { display: inline-flex; align-items: center; gap: .2rem; }
+.tracker-ticks input { width: 1.05rem; height: 1.05rem; accent-color: var(--rule); }
+.lair-actions ul { margin: .3rem 0 0; padding-left: 1.1rem; }
+.combatant .statblock-card { margin: .6rem 0 .1rem; }
+.tracker-end { margin: 1.2rem 0; display: flex; justify-content: flex-end; }
+.chat-history-foot { display: flex; justify-content: space-between; align-items: baseline; }
+.chat-history button.clear-chats { text-decoration: none; }
+.chat-history button.clear-chats:hover { color: var(--danger); }
 
 /* Stat block entries you can roll. */
 .action-roll {

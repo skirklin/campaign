@@ -320,7 +320,7 @@ export function statBlockFromData(name, sb) {
 
 // How many legendary actions a creature takes a round: "can take 3 legendary actions",
 // "Legendary Action Uses: 3". Three when the block lists them without saying.
-function legendaryUses(intro) {
+export function legendaryUses(intro) {
   const m = String(intro || "").match(/(\d+)\s+legendary actions|Legendary Action Uses:?\s*(\d+)/i);
   return m ? Number(m[1] || m[2]) : 3;
 }

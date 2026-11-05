@@ -6,7 +6,7 @@ import { membersTab } from "./people.js";
 import { characterCard, newCharacterForm } from "./sheet.js";
 import { InventoryView } from "./inventory.js";
 import { renderMarkdown, inline, statBlockFromData } from "./markdown.js";
-import { encounterFence } from "./encounter.js";
+import { encounterFence, encountersTab } from "./encounter.js";
 
 export async function campaignList() {
   const [campaigns, info] = await Promise.all([api("GET", "/api/campaigns"), api("GET", "/api/info").catch(() => null)]);
@@ -40,6 +40,7 @@ export async function campaignList() {
 
 const TABS = [
   ["ask", "Ask"],
+  ["encounters", "Encounters"],
   ["ingest", "Sessions"],
   ["party", "Party"],
   ["reference", "Reference"],
@@ -54,7 +55,7 @@ export async function campaignView(slug, tab, arg) {
   if (!c) throw new Error(`No campaign "${slug}".`);
   const tabs = TABS.filter(([key]) => key !== "members" || !me.local);
   const body = h("div.tab-body", h("p.muted", "Loading…"));
-  const render = { ask: askTab, ingest: sessionsTab, party: partyTab, reference: referenceTab, state: stateTab, journal: journalTab, members: membersTab }[tab] || sessionsTab;
+  const render = { ask: askTab, encounters: encountersTab, ingest: sessionsTab, party: partyTab, reference: referenceTab, state: stateTab, journal: journalTab, members: membersTab }[tab] || sessionsTab;
   render(c, me, arg).then((el) => body.replaceChildren(el), (err) => body.replaceChildren(h("p.empty", err.message)));
   return h("section.page",
     h("div.page-head", h("h1", c.name), h(`span.badge.${c.role}`, c.role === "dm" ? "DM" : "Player"),
@@ -127,7 +128,20 @@ async function askTab(c, _me, convId) {
         more.remove();
       },
     }, `All ${chats.length} conversations`);
-    return h("div.chat-history", h("h3", "Recent conversations"), list, more);
+    const clear = h("button.link.clear-chats", {
+      type: "button",
+      onclick: async () => {
+        if (!confirm(`Delete all ${chats.length} of your conversations in ${c.name}? The encounters made in them are kept.`)) return;
+        try {
+          await api("DELETE", `${base}/chats`);
+          chats = [];
+          welcome();
+        } catch (err) {
+          toast(err.message, true);
+        }
+      },
+    }, "Delete all");
+    return h("div.chat-history", h("h3", "Recent conversations"), list, h("div.chat-history-foot", more, clear));
   };
   // Above an open conversation: its title, renaming and deleting it, and the way back to a new one.
   const fillHead = () => {

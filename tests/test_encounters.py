@@ -70,36 +70,58 @@ def test_the_party_defaults_to_the_campaigns_characters():
     assert r["party"] == {"size": 3, "level": 4} and r["difficulty"] == "trivial"
 
 
-def test_the_tool_answers_briefly_and_hands_back_the_card(tmp_path):
-    store, camp = setup()
-    tools = {f.__name__: f for f in build_tools(ToolContext(store, camp))}
-    got = json.loads(tools["encounter"](creatures=[{"name": "Skeleton", "count": 3}], party_size=4, party_level=4))
+def test_the_tool_saves_the_fight_and_hands_back_the_card(tmp_path):
+    db = tmp_path / "c.db"
+    store = Store(db)
+    camp = store.create_campaign("Chateau", "dm")
+    src = store.add_source(camp, "Bestiary", "module", [{"heading": "", "text": "x", "page": 1}])
+    World(store, camp).apply_book(src, [entry("Skeleton", block("13 (armor scraps)", "13 (2d8 + 4)", "1/4 (50 XP)"))],
+                                  key="k")
+    conv = store.create_conversation(camp, None, "Crypt prep")
+    tools = {f.__name__: f for f in build_tools(ToolContext(store, camp, conversation_id=conv))}
+    got = json.loads(tools["encounter"](title="Crypt skeletons", creatures=[{"name": "Skeleton", "count": 3}],
+                                        party_size=4, party_level=4))
     assert got["creatures"] == [{"name": "Skeleton", "count": 3, "found": True, "ac": "13 (armor scraps)",
                                  "hp": "13 (2d8 + 4)", "cr": "1/4", "xp_each": 50}]
-    assert got["difficulty"] == "trivial" and got["show"].startswith("```encounter\n{")
-    spec = json.loads(got["show"].split("\n")[1])
-    assert spec == {"creatures": [{"name": "Skeleton", "id": 1, "count": 3}], "party": {"size": 4, "level": 4}}
-    assert "stat_block" not in json.dumps(got)  # the card shows them; the answer needn't
+    assert got["difficulty"] == "trivial" and "stat_block" not in json.dumps(got)  # the card shows them
+    (saved,) = store.encounters(camp, None)
+    assert got["show"] == "```encounter\n" + json.dumps({"id": saved["id"]}) + "\n```"
+    assert saved["title"] == "Crypt skeletons" and saved["conversation_id"] == conv
+    assert saved["spec"] == {"creatures": [{"name": "Skeleton", "id": 1, "count": 3}], "party": {"size": 4, "level": 4}}
+    # The same fight shown again in that conversation is the same encounter, not another copy.
+    tools["encounter"](title="Crypt skeletons", creatures=[{"name": "Skeleton", "count": 3}], party_size=4, party_level=4)
+    assert len(store.encounters(camp, None)) == 1
+    store.close()
 
-    # The card's endpoint builds the same spec, stat blocks and all.
-    db = tmp_path / "c.db"
-    s = Store(db)
-    s.create_campaign("Chateau", "dm")
-    src = s.add_source(s.campaign("chateau"), "Bestiary", "module", [{"heading": "", "text": "x", "page": 1}])
-    World(s, s.campaign("chateau")).apply_book(src, [entry("Skeleton", block("13", "13 (2d8 + 4)", "1/4"))], key="k")
-    s.close()
     with TestClient(create_app(db)) as client:
-        r = client.post("/api/campaigns/chateau/encounter", json=spec).json()
-    assert r["creatures"][0]["stat_block"]["armor_class"] == "13" and r["adjusted_xp"] == 300
+        base = f"/api/campaigns/chateau/encounters/{saved['id']}"
+        e = client.get(base).json()
+        assert e["fight"]["creatures"][0]["stat_block"]["armor_class"] == "13 (armor scraps)"
+        assert e["fight"]["adjusted_xp"] == 300 and e["state"] is None and e["conversation_title"] == "Crypt prep"
+        (row,) = client.get("/api/campaigns/chateau/encounters").json()
+        assert row["difficulty"] == "trivial" and row["creatures"] == [{"name": "Skeleton", "count": 3}]
+        # Running it: the tracker keeps the fight's state on the server, for a reload or another device.
+        state = {"round": 2, "turn": 1, "combatants": [{"key": "m0-1", "name": "Skeleton 1", "hp": 7}]}
+        assert client.patch(base, json={"state": state}).json()["state"] == state
+        assert client.get(base).json()["state"] == state
+        assert client.patch(base, json={"title": "The crypt"}).json()["title"] == "The crypt"
+        # Clearing the conversations keeps the encounters made in them.
+        assert client.delete("/api/campaigns/chateau/chats").status_code == 204
+        assert client.get("/api/campaigns/chateau/chats").json() == []
+        e = client.get(base).json()
+        assert e["conversation_id"] is None and e["state"] == state
+        assert client.patch(base, json={"reset": True}).json()["state"] is None  # the fight ended
+        assert client.delete(base).status_code == 204
+        assert client.get(base).status_code == 404
 
 
 def test_no_difficulty_without_a_known_level():
     store, camp = setup()  # no characters
     tools = {f.__name__: f for f in build_tools(ToolContext(store, camp))}
-    got = json.loads(tools["encounter"](creatures=[{"name": "Skeleton", "count": 3}], party_size=4))
+    got = json.loads(tools["encounter"](title="t", creatures=[{"name": "Skeleton", "count": 3}], party_size=4))
     assert "difficulty" not in got and got.get("party") is None
     assert "level" in got["no_difficulty"] and '"party"' not in got["show"]
-    got = json.loads(tools["encounter"](creatures=[{"name": "Skeleton"}]))
+    got = json.loads(tools["encounter"](title="t", creatures=[{"name": "Skeleton"}]))
     assert "size and level" in got["no_difficulty"]
 
 
