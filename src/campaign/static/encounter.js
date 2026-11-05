@@ -55,11 +55,17 @@ export function encounterFence(slug) {
   };
 }
 
+// What the difficulty was worked out from, said in full: how far past deadly, the XP the DMG
+// counts, and whose party it's for.
 function difficultyLine(f) {
-  const party = f.party ? `${f.party.size} characters, level ${f.party.level}` : "no party on file";
+  const whose = f.party_source === "set" ? "as set for this fight" : "the campaign's party";
+  const party = f.party ? `for ${plural(f.party.size, "character")} of level ${f.party.level} (${whose})`
+    : "no party to measure it against: add the party's characters, or set one";
   return [
-    `${plural(f.monsters, "monster")} · ${f.xp.toLocaleString()} XP`,
-    f.adjusted_xp != null ? ` (${f.adjusted_xp.toLocaleString()} adjusted, ×${f.multiplier})` : "",
+    f.times_deadly ? `${f.times_deadly}× the deadly threshold · ` : "",
+    f.adjusted_xp != null
+      ? `${f.adjusted_xp.toLocaleString()} XP as the DMG counts it (${f.xp.toLocaleString()} for ${plural(f.monsters, "monster")}, ×${f.multiplier})`
+      : `${f.xp.toLocaleString()} XP for ${plural(f.monsters, "monster")}`,
     ` · ${party}`,
     f.xp_complete ? "" : " · some XP unknown",
   ].join("");
@@ -594,12 +600,29 @@ export async function encounterView(slug, id) {
       }
     },
   }, "✎");
+  // The party it's scored for: the campaign's own unless set, which a DM can change here.
+  const partyButton = h("button.link.small", {
+    title: "Score this fight for another party, or the campaign's own",
+    onclick: async () => {
+      const now = fight.party ? `${fight.party.size} ${fight.party.level}` : "";
+      const answer = prompt("How many characters, and their level (\"4 7\")? Leave it empty for the campaign's party.", now);
+      if (answer === null) return;
+      const [size, level] = answer.trim().split(/[\s,x×]+/).map(Number);
+      const body = answer.trim() ? { party: { size, level } } : { campaign_party: true };
+      try {
+        await api("PATCH", base, body);
+        location.reload();
+      } catch (err) {
+        toast(err.message.includes("422") || !size || !level ? "Give a number of characters and a level, like 4 7" : err.message, true);
+      }
+    },
+  }, "change");
   draw();
   return h("section.page.tracker",
     h("div.page-head", h("a", { href: `#/campaigns/${slug}/encounters` }, "← Encounters")),
     h("div.tracker-title", title, rename,
       fight.difficulty && h(`span.difficulty.${fight.difficulty}`, fight.difficulty)),
-    h("p.muted.small", difficultyLine(fight),
+    h("p.muted.small", difficultyLine(fight), " ", partyButton,
       e.conversation_id ? [" · ", h("a", { href: `#/campaigns/${slug}/ask/${e.conversation_id}` }, "the conversation it came from")] : ""),
     h("div.tracker-layout", h("div.tracker-main", body), panel));
 }

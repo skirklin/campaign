@@ -323,17 +323,20 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         Args:
             title: A short name for the fight, as a DM would file it: "Boar hunt at the cave", "Gaius and Argyn on Yonder".
             creatures: Each kind of creature: name (as the book gives it), count, and optionally hp and note.
-            party_size: How many characters, if not the campaign's party.
-            party_level: Their level, if not the campaign's party's average.
+            party_size: How many characters, only if the user gave a party other than the campaign's.
+            party_level: Their level, likewise; leave both out to use the campaign's party, which then
+                follows it as it grows and levels.
         """
         default = encounters.party_of(store, campaign)
         size = party_size or (default.size if default else None)
         level = party_level or (default.level if default else None)
         # Difficulty only for a party whose size and level are both known: a guessed level makes a
-        # confident "deadly" out of nothing.
+        # confident "deadly" out of nothing. The fight keeps a party only when one was given; with
+        # none it's scored against the campaign's party as it is whenever it's looked at.
         party = encounters.Party(size=size, level=level) if size and level else None
-        spec = encounters.Spec(creatures=creatures, party=party)
-        result = encounters.build(store, campaign, spec)
+        given = party if (party_size or party_level) else None
+        spec = encounters.Spec(creatures=creatures, party=given)
+        result = encounters.build(store, campaign, spec)  # as it's saved: with no party given, the campaign's
         for c, found in zip(spec.creatures, result["creatures"]):
             c.id = found["id"]  # the card shows what was matched here, whatever names change later
         encounter_id = store.create_encounter(

@@ -236,3 +236,36 @@ def test_the_party_comes_with_what_a_dm_wants_of_it_in_a_fight(tmp_path):
         cid, ione = client.get("/api/campaigns/odyssey/characters").json()
     assert cid["stats"] == {"ac": 12, "passive_perception": 14, "initiative": 2}  # 10 + Dex; 10 + Wis + proficiency
     assert ione["stats"] is None
+
+
+def test_a_fight_is_scored_for_the_party_as_it_is_unless_one_was_set(tmp_path):
+    db = tmp_path / "c.db"
+    store = Store(db)
+    camp = store.create_campaign("Chateau", "dm")
+    src = store.add_source(camp, "Bestiary", "module", [{"heading": "", "text": "x", "page": 1}])
+    World(store, camp).apply_book(src, [entry("Ogre", block("11", "59 (7d10 + 21)", "2 (450 XP)"))], key="k")
+    store.create_character({"name": "Ana", "classes": [{"name": "Fighter", "level": 1}]}, camp.id)
+    tools = {f.__name__: f for f in build_tools(ToolContext(store, camp))}
+    got = json.loads(tools["encounter"](title="Ogres", creatures=[{"name": "Ogre", "count": 2}]))
+    assert got["party"] == {"size": 1, "level": 1} and got["party_source"] == "campaign"
+    assert got["difficulty"] == "deadly" and got["times_deadly"] == 18.0  # 900 × 2 (a party of one) = 1800 vs 100
+    (saved,) = store.encounters(camp, None)
+    assert "party" not in saved["spec"]  # the campaign's party, whenever it's looked at
+    for name in ("Bo", "Cy", "Di"):  # the party grows
+        store.create_character({"name": name, "classes": [{"name": "Fighter", "level": 1}]}, camp.id)
+    store.close()
+    with TestClient(create_app(db)) as client:
+        base = f"/api/campaigns/chateau/encounters/{saved['id']}"
+        fight = client.get(base).json()["fight"]
+        assert fight["party"] == {"size": 4, "level": 1} and fight["adjusted_xp"] == 1350  # 900 × 1.5
+        # Set for another party, and back to the campaign's.
+        e = client.patch(base, json={"party": {"size": 5, "level": 3}}).json()
+        assert e["fight"]["party"] == {"size": 5, "level": 3} and e["fight"]["party_source"] == "set"
+        assert e["fight"]["difficulty"] == "hard" and e["fight"]["times_deadly"] is None  # 1350: hard 1125, deadly 2000
+        e = client.patch(base, json={"campaign_party": True}).json()
+        assert e["fight"]["party"] == {"size": 4, "level": 1} and e["fight"]["party_source"] == "campaign"
+    # Asked for a party of its own, the fight keeps it.
+    s = Store(db)
+    tools = {f.__name__: f for f in build_tools(ToolContext(s, s.campaign("chateau")))}
+    tools["encounter"](title="Ogres for a one-shot", creatures=[{"name": "Ogre"}], party_size=3, party_level=5)
+    assert s.encounters(s.campaign("chateau"), None)[0]["spec"]["party"] == {"size": 3, "level": 5}

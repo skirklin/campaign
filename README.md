@@ -372,8 +372,12 @@ of their own) and interleaves its columns with the text around it.
 For a fight, the `encounter` tool takes the creatures and how many of
 each (with the adventure's changes to any of them, like "45 HP, vulnerable
 to fire") and gives back their stat blocks, their XP and the encounter's
-difficulty for the party by the DMG's rules (the party defaults to the
-campaign's characters). It's saved as one of your encounters, under a
+difficulty for the party by the DMG's rules. The party is the campaign's
+own, as it is whenever the fight is looked at (how many characters, and the
+average level of those whose sheets are here), unless one was asked for ("a
+one-shot for four 3rd-level characters"); the tracker can change it. The
+card says what it was worked out from: how far past the deadly threshold,
+the XP as the DMG counts it, and whose party. It's saved as one of your encounters, under a
 title the assistant gives it, and the answer shows it as an encounter card:
 the difficulty, every stat block, and a button to run it (see
 **Encounters** above). Each creature can show the book text

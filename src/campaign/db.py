@@ -1033,9 +1033,11 @@ class Store:
         )]
         return [self.encounter(i) for i in ids]
 
-    def update_encounter(self, encounter_id: int, *, title: str | None = None,
+    def update_encounter(self, encounter_id: int, *, title: str | None = None, spec: dict[str, Any] | None = None,
                          state: dict[str, Any] | None = None, clear_state: bool = False) -> None:
         with self.conn:
+            if spec is not None:
+                self.conn.execute("UPDATE encounters SET spec = ? WHERE id = ?", (json.dumps(spec, sort_keys=True), encounter_id))
             if title is not None:
                 self.conn.execute("UPDATE encounters SET title = ? WHERE id = ?", (title.strip()[:120], encounter_id))
             if state is not None or clear_state:

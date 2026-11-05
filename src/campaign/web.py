@@ -94,8 +94,11 @@ class ChatTitle(BaseModel):
 
 
 class EncounterUpdate(BaseModel):
-    """A new title, or the fight as it stands now (the tracker's whole state), or `reset` to end it."""
+    """A new title; the party it's scored for (`party`, or `campaign_party` for the campaign's own);
+    the fight as it stands now (the tracker's whole state), or `reset` to end it."""
     title: str | None = Field(default=None, min_length=1)
+    party: encounters.Party | None = None
+    campaign_party: bool = False
     state: dict[str, Any] | None = None
     reset: bool = False
 
@@ -706,11 +709,16 @@ def create_app(
     @app.patch("/api/campaigns/{slug}/encounters/{encounter_id}")
     def update_encounter(encounter_id: int, body: EncounterUpdate, request: Request, c: Campaign = Depends(reader),
                          s: Store = Depends(store)) -> dict[str, Any]:
-        my_encounter(s, request, c, encounter_id)
+        e = my_encounter(s, request, c, encounter_id)
         if body.state is not None and len(json.dumps(body.state)) > 200_000:
             raise HTTPException(413, "that's more fight than a tracker holds")
-        s.update_encounter(encounter_id, title=body.title, state=body.state, clear_state=body.reset)
-        return encounter_view(s, c, s.encounter(encounter_id), built=False)
+        spec = None
+        if body.party is not None or body.campaign_party:
+            spec = {k: v for k, v in e["spec"].items() if k != "party"}
+            if body.party is not None:
+                spec["party"] = body.party.model_dump()
+        s.update_encounter(encounter_id, title=body.title, spec=spec, state=body.state, clear_state=body.reset)
+        return encounter_view(s, c, s.encounter(encounter_id), built=spec is not None)
 
     @app.delete("/api/campaigns/{slug}/encounters/{encounter_id}", status_code=204)
     def delete_encounter(encounter_id: int, request: Request, c: Campaign = Depends(reader),
