@@ -105,8 +105,8 @@ def test_the_tool_saves_the_fight_and_hands_back_the_card(tmp_path):
         assert client.patch(base, json={"state": state}).json()["state"] == state
         assert client.get(base).json()["state"] == state
         assert client.patch(base, json={"title": "The crypt"}).json()["title"] == "The crypt"
-        # Clearing the conversations keeps the encounters made in them.
-        assert client.delete("/api/campaigns/chateau/chats").status_code == 204
+        # Deleting the conversation it was made in keeps the encounter.
+        assert client.delete(f"/api/campaigns/chateau/chats/{conv}").status_code == 204
         assert client.get("/api/campaigns/chateau/chats").json() == []
         e = client.get(base).json()
         assert e["conversation_id"] is None and e["state"] == state
@@ -204,3 +204,68 @@ def test_a_name_finds_the_creature_with_the_stat_block_not_the_lore():
     (c,) = encounters.build(store, camp, encounters.Spec(creatures=[{"name": "Sydon"}]))["creatures"]
     assert c["name"] == "Sydon, Lord of Storms" and c["xp_each"] == 50000
     assert world.stat_block(world.resolve("Galimus")["id"])[1]["name"] == "Sydon, Lord of Storms"
+
+
+def test_an_entity_page_shows_the_stat_block_it_runs_on(tmp_path):
+    db = tmp_path / "c.db"
+    store = Store(db)
+    camp = store.create_campaign("Odyssey", "dm")
+    src = store.add_source(camp, "Odyssey", "module", [{"heading": "", "text": "x", "page": 1}])
+    World(store, camp).apply_book(src, [
+        entry("Sea Hag", block("14 (natural armor)", "52 (7d8 + 21)", "2 (450 XP)")),
+        {**entry("Heleka", None), "stat_block_of": "sea hag"},
+    ], key="k")
+    heleka, hag = (World(store, camp).resolve(n)["id"] for n in ("Heleka", "Sea Hag"))
+    store.close()
+    with TestClient(create_app(db)) as client:
+        page = client.get(f"/api/campaigns/odyssey/entities/{heleka}").json()
+        assert page["borrowed_stat_block"]["from"] == {"id": hag, "name": "Sea Hag"}
+        assert page["borrowed_stat_block"]["stat_block"]["hit_points"] == "52 (7d8 + 21)"
+        assert client.get(f"/api/campaigns/odyssey/entities/{hag}").json()["borrowed_stat_block"] is None  # its own
+
+
+def test_the_party_comes_with_what_a_dm_wants_of_it_in_a_fight(tmp_path):
+    db = tmp_path / "c.db"
+    store = Store(db)
+    camp = store.create_campaign("Odyssey", "dm")
+    store.create_character({"name": "Cid", "abilities": {"dex": 14, "wis": 12}, "skill_proficiencies": ["perception"],
+                            "classes": [{"name": "Barbarian", "level": 5}]}, camp.id)
+    store.create_character(None, camp.id, name="Ione")  # her sheet is kept elsewhere: nothing to show
+    store.close()
+    with TestClient(create_app(db)) as client:
+        cid, ione = client.get("/api/campaigns/odyssey/characters").json()
+    assert cid["stats"] == {"ac": 12, "passive_perception": 14, "initiative": 2}  # 10 + Dex; 10 + Wis + proficiency
+    assert ione["stats"] is None
+
+
+def test_a_fight_is_scored_for_the_party_as_it_is_unless_one_was_set(tmp_path):
+    db = tmp_path / "c.db"
+    store = Store(db)
+    camp = store.create_campaign("Chateau", "dm")
+    src = store.add_source(camp, "Bestiary", "module", [{"heading": "", "text": "x", "page": 1}])
+    World(store, camp).apply_book(src, [entry("Ogre", block("11", "59 (7d10 + 21)", "2 (450 XP)"))], key="k")
+    store.create_character({"name": "Ana", "classes": [{"name": "Fighter", "level": 1}]}, camp.id)
+    tools = {f.__name__: f for f in build_tools(ToolContext(store, camp))}
+    got = json.loads(tools["encounter"](title="Ogres", creatures=[{"name": "Ogre", "count": 2}]))
+    assert got["party"] == {"size": 1, "level": 1} and got["party_source"] == "campaign"
+    assert got["difficulty"] == "deadly" and got["times_deadly"] == 18.0  # 900 × 2 (a party of one) = 1800 vs 100
+    (saved,) = store.encounters(camp, None)
+    assert "party" not in saved["spec"]  # the campaign's party, whenever it's looked at
+    for name in ("Bo", "Cy", "Di"):  # the party grows
+        store.create_character({"name": name, "classes": [{"name": "Fighter", "level": 1}]}, camp.id)
+    store.close()
+    with TestClient(create_app(db)) as client:
+        base = f"/api/campaigns/chateau/encounters/{saved['id']}"
+        fight = client.get(base).json()["fight"]
+        assert fight["party"] == {"size": 4, "level": 1} and fight["adjusted_xp"] == 1350  # 900 × 1.5
+        # Set for another party, and back to the campaign's.
+        e = client.patch(base, json={"party": {"size": 5, "level": 3}}).json()
+        assert e["fight"]["party"] == {"size": 5, "level": 3} and e["fight"]["party_source"] == "set"
+        assert e["fight"]["difficulty"] == "hard" and e["fight"]["times_deadly"] is None  # 1350: hard 1125, deadly 2000
+        e = client.patch(base, json={"campaign_party": True}).json()
+        assert e["fight"]["party"] == {"size": 4, "level": 1} and e["fight"]["party_source"] == "campaign"
+    # Asked for a party of its own, the fight keeps it.
+    s = Store(db)
+    tools = {f.__name__: f for f in build_tools(ToolContext(s, s.campaign("chateau")))}
+    tools["encounter"](title="Ogres for a one-shot", creatures=[{"name": "Ogre"}], party_size=3, party_level=5)
+    assert s.encounters(s.campaign("chateau"), None)[0]["spec"]["party"] == {"size": 3, "level": 5}

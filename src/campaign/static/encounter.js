@@ -55,11 +55,17 @@ export function encounterFence(slug) {
   };
 }
 
+// What the difficulty was worked out from, said in full: how far past deadly, the XP the DMG
+// counts, and whose party it's for.
 function difficultyLine(f) {
-  const party = f.party ? `${f.party.size} characters, level ${f.party.level}` : "no party on file";
+  const whose = f.party_source === "set" ? "as set for this fight" : "the campaign's party";
+  const party = f.party ? `for ${plural(f.party.size, "character")} of level ${f.party.level} (${whose})`
+    : "no party to measure it against: add the party's characters, or set one";
   return [
-    `${plural(f.monsters, "monster")} · ${f.xp.toLocaleString()} XP`,
-    f.adjusted_xp != null ? ` (${f.adjusted_xp.toLocaleString()} adjusted, ×${f.multiplier})` : "",
+    f.times_deadly ? `${f.times_deadly}× the deadly threshold · ` : "",
+    f.adjusted_xp != null
+      ? `${f.adjusted_xp.toLocaleString()} XP as the DMG counts it (${f.xp.toLocaleString()} for ${plural(f.monsters, "monster")}, ×${f.multiplier})`
+      : `${f.xp.toLocaleString()} XP for ${plural(f.monsters, "monster")}`,
     ` · ${party}`,
     f.xp_complete ? "" : " · some XP unknown",
   ].join("");
@@ -208,19 +214,54 @@ export async function encounterView(slug, id) {
   const body = h("div.tracker-body");
   const title = h("h1", e.title);
 
-  // Saved shortly after each change, so a quick run of taps is one request.
+  // Saved shortly after each change, so a quick run of taps is one request, but at least once a
+  // second while changes keep coming, and at once if the page is hidden or closed (a laptop lid).
   let timer = 0;
+  let waitingSince = 0;
+  const flush = async () => {
+    clearTimeout(timer);
+    timer = 0;
+    waitingSince = 0;
+    try {
+      await api("PATCH", base, { state });
+    } catch (err) {
+      toast(`Not saved: ${err.message}`, true);
+    }
+  };
   const save = () => {
     clearTimeout(timer);
-    timer = setTimeout(async () => {
-      try {
-        await api("PATCH", base, { state });
-      } catch (err) {
-        toast(`Not saved: ${err.message}`, true);
-      }
-    }, 300);
+    waitingSince ||= Date.now();
+    timer = setTimeout(flush, Date.now() - waitingSince > 1000 ? 0 : 300);
   };
-  const change = (fn) => { fn(); save(); draw(); };
+  const leaving = () => {
+    if (!timer) return;
+    clearTimeout(timer);
+    timer = 0;
+    fetch(base, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ state }), keepalive: true });
+  };
+  addEventListener("pagehide", leaving);
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") leaving(); });
+  // Every change can be undone (this page remembers the states before it) and says what it was
+  // in the log, which is kept with the fight so another device shows it too.
+  const undo = [];
+  const change = (fn, what) => {
+    const before = JSON.stringify(state);
+    const said = fn() || what;
+    undo.push(before);
+    if (undo.length > 60) undo.shift();
+    if (said) {
+      state.log = [...(state.log || []), { round: state.round, text: said }].slice(-60);
+    }
+    save();
+    draw();
+  };
+  const undoLast = () => {
+    const before = undo.pop();
+    if (!before) return;
+    state = JSON.parse(before);
+    save();
+    draw();
+  };
 
   const creatureOf = (x) => (x.ref != null ? fight.creatures[x.ref] : null);
   const isDown = (x) => x.ref != null && x.hp != null && x.hp <= 0;
@@ -247,6 +288,8 @@ export async function encounterView(slug, id) {
         state.started = true;
         state.round = 1;
         state.turn = 0;
+        state.log = [];
+        return "The fight began";
       });
       window.scrollTo({ top: 0 });
     };
@@ -279,20 +322,38 @@ export async function encounterView(slug, id) {
   };
 
   // -- during the fight ---------------------------------------------------------------
+  // Monsters of one kind on the same count act together (group initiative): one turn, one block.
+  const units = () => {
+    const out = [];
+    state.combatants.forEach((x, i) => {
+      const last = out[out.length - 1];
+      const prev = last && state.combatants[last[last.length - 1]];
+      if (prev && x.ref != null && prev.ref === x.ref && prev.init === x.init) last.push(i);
+      else out.push([i]);
+    });
+    return out;
+  };
+  const unitOf = (i) => units().find((u) => u.includes(i)) || [i];
   const advance = (step) => change(() => {
-    const n = state.combatants.length;
-    if (!n) return;
-    let i = state.turn;
-    for (let k = 0; k < n; k++) {
-      i += step;
-      if (i >= n) { i = 0; state.round += 1; }
-      if (i < 0) { i = n - 1; state.round = Math.max(1, state.round - 1); }
-      if (!isDown(state.combatants[i])) break;  // the fallen don't take turns
+    const us = units();
+    if (!us.length) return;
+    let k = us.findIndex((u) => u.includes(state.turn));
+    for (let n = 0; n < us.length; n++) {
+      k += step;
+      if (k >= us.length) { k = 0; state.round += 1; }
+      if (k < 0) { k = us.length - 1; state.round = Math.max(1, state.round - 1); }
+      if (!us[k].every((i) => isDown(state.combatants[i]))) break;  // the fallen don't take turns
     }
-    state.turn = i;
-    const now = state.combatants[i];
-    if (step > 0 && now.legendary_used) now.legendary_used = 0;  // they come back at the start of its turn
+    state.turn = us[k][0];
+    // Legendary actions come back at the start of the creature's own turn.
+    if (step > 0) for (const i of us[k]) state.combatants[i].legendary_used = 0;
+    return step > 0 ? `Turn: ${unitName(us[k])}` : `Back to ${unitName(us[k])}`;
   });
+  const unitName = (u) => {
+    const first = state.combatants[u[0]];
+    const c = creatureOf(first);
+    return u.length > 1 && c ? `${c.name} ×${u.length}` : first.name;
+  };
 
   // Every kind of creature in the fight, its stat block on screen beside the turn order (on a
   // laptop; under it on a phone), each foldable. Built once: the blocks don't change in a fight.
@@ -327,100 +388,190 @@ export async function encounterView(slug, id) {
     if (scroll) el.scrollIntoView({ block: "nearest", behavior: "smooth" });
   };
   const conditionInfo = new Map();  // combatant key -> the condition whose rules are showing
+  const opened = new Set();  // rows opened by a tap, beside the current turn's
+  const selected = new Set();  // monsters ticked for one amount of damage or healing at once
+
+  const hurt = (x, delta) => {
+    const was = x.hp ?? 0;
+    x.hp = Math.max(0, Math.min(x.max ?? Infinity, was + delta));
+    return `${x.name} ${delta < 0 ? `took ${-delta}` : `healed ${delta}`} (${was} → ${x.hp})`;
+  };
+
+  const hpReadout = (x) => {
+    const pct = x.max ? Math.max(0, Math.min(100, (100 * (x.hp ?? 0)) / x.max)) : 0;
+    return h("div.hp-readout",
+      h("strong", `${x.hp ?? "?"}`), h("span.muted", ` / ${x.max ?? "?"}`),
+      h("div.hp-bar", h("span", { style: `width:${pct}%` })));
+  };
 
   const hpControl = (x) => {
-    const amount = h("input", { type: "number", min: 0, placeholder: "0", inputmode: "numeric", "aria-label": `${x.name} damage or healing` });
+    const amount = h("input", { type: "number", min: 0, placeholder: "HP", inputmode: "numeric", title: "How much damage or healing",
+      "aria-label": `${x.name} damage or healing` });
     const apply = (sign) => {
       const n = Number(amount.value);
       if (!n) return amount.focus();
-      change(() => { x.hp = Math.max(0, Math.min(x.max ?? Infinity, (x.hp ?? 0) + sign * n)); });
+      change(() => hurt(x, sign * n));
     };
-    const pct = x.max ? Math.max(0, Math.min(100, (100 * (x.hp ?? 0)) / x.max)) : 0;
-    return h("div.hp-control",
-      h("div.hp-readout",
-        h("strong", `${x.hp ?? "?"}`), h("span.muted", ` / ${x.max ?? "?"} HP`),
-        h("div.hp-bar", h("span", { style: `width:${pct}%` }))),
-      amount,
+    return h("div.hp-control", amount,
       h("button.danger", { onclick: () => apply(-1), title: "Take that much damage" }, "Hit"),
       h("button", { onclick: () => apply(1), title: "Heal that much" }, "Heal"));
   };
 
-  const conditions = (x) => {
+  const chips = (x) => {
     const shown = conditionInfo.get(x.key);
-    const pick = h("select", {
-      "aria-label": `Add a condition to ${x.name}`,
-      onchange: (ev) => {
-        let name = ev.target.value;
-        if (name === "other") name = prompt("Condition or effect (Concentrating, Blessed, Hexed…)")?.trim() || "";
-        ev.target.value = "";
-        if (name && !x.conditions.includes(name)) change(() => x.conditions.push(name));
-      },
-    }, h("option", { value: "" }, "+ condition"),
-      ...CONDITION_NAMES.filter((n) => !x.conditions.includes(n)).map((n) => h("option", { value: n }, n)),
-      h("option", { value: "other" }, "other…"));
-    const info = shown && h("div.condition-info",
+    return x.conditions.map((n) => h(`button.condition-chip${shown === n ? ".active" : ""}`, {
+      title: CONDITIONS[n] ? CONDITIONS[n][0] : n,
+      onclick: (ev) => { ev.stopPropagation(); if (shown === n) conditionInfo.delete(x.key); else conditionInfo.set(x.key, n); draw(); },
+    }, n));
+  };
+  const conditionPicker = (x) => h("select", {
+    "aria-label": `Add a condition to ${x.name}`,
+    onchange: (ev) => {
+      let name = ev.target.value;
+      if (name === "other") name = prompt("Condition or effect (Concentrating, Blessed, Hexed…)")?.trim() || "";
+      ev.target.value = "";
+      if (name && !x.conditions.includes(name)) change(() => { x.conditions.push(name); return `${x.name}: ${name}`; });
+    },
+  }, h("option", { value: "" }, "+ condition"),
+    ...CONDITION_NAMES.filter((n) => !x.conditions.includes(n)).map((n) => h("option", { value: n }, n)),
+    h("option", { value: "other" }, "other…"));
+  const conditionRule = (x) => {
+    const shown = conditionInfo.get(x.key);
+    return shown && h("div.condition-info",
       h("strong", shown),
       CONDITIONS[shown] ? h("ul", CONDITIONS[shown].map((line) => h("li", line))) : h("p.muted.small", "Not one of the rules' conditions: whatever the effect says."),
-      h("button.link", { onclick: () => change(() => { x.conditions = x.conditions.filter((n) => n !== shown); conditionInfo.delete(x.key); }) }, `End ${shown}`));
-    return h("div.conditions",
-      h("div.condition-chips",
-        x.conditions.map((n) => h(`button.condition-chip${shown === n ? ".active" : ""}`, {
-          title: CONDITIONS[n] ? CONDITIONS[n][0] : n,
-          onclick: () => { if (shown === n) conditionInfo.delete(x.key); else conditionInfo.set(x.key, n); draw(); },
-        }, n)),
-        pick),
-      info);
+      h("button.link", {
+        onclick: () => change(() => {
+          x.conditions = x.conditions.filter((n) => n !== shown);
+          conditionInfo.delete(x.key);
+          return `${x.name}: no longer ${shown}`;
+        }),
+      }, `End ${shown}`));
   };
 
-  const ticks = (label, total, used, set) => h("span.tracker-ticks", { title: label },
+  const ticks = (label, total, used, set, x) => h("span.tracker-ticks", { title: label },
     h("span.small.muted", `${label} `),
     Array.from({ length: Math.min(total, 9) }, (_, i) => h("input", {
       type: "checkbox", checked: i < used, "aria-label": `${label} ${i + 1}`,
-      onchange: (ev) => change(() => set(ev.target.checked ? Math.max(used, i + 1) : i)),
+      onclick: (ev) => ev.stopPropagation(),
+      onchange: (ev) => change(() => { set(ev.target.checked ? Math.max(used, i + 1) : i); return ev.target.checked ? `${x.name}: ${label.toLowerCase()} used` : null; }),
     })));
 
-  const row = (x, i) => {
+  const selectBox = (keys, label) => h("input.select-box", {
+    type: "checkbox", checked: keys.length > 0 && keys.every((k) => selected.has(k)), disabled: !keys.length,
+    "aria-label": label, title: "Tick to damage or heal several at once",
+    onclick: (ev) => ev.stopPropagation(),
+    onchange: (ev) => { for (const k of keys) (ev.target.checked ? selected.add(k) : selected.delete(k)); draw(); },
+  });
+
+  // One combatant: a line of what matters at a glance, opening to its controls on its turn or a tap.
+  const row = (x, i, current, inGroup) => {
     const c = creatureOf(x);
     const facts = c ? creatureFacts(c) : null;
-    const current = i === state.turn;
-    const expand = c && h("button.link.small.sheet-link", { onclick: () => showSheet(x.ref, true) }, "Stat block");
+    const down = isDown(x);
+    const open = (current && !down) || opened.has(x.key);
     const lair = x.lair && fight.creatures.find((cr) => (cr.stat_block?.lair_actions || []).length)?.stat_block;
-    return h(`div.combatant${current ? ".current" : ""}${isDown(x) ? ".down" : ""}${x.pc ? ".pc" : ""}`, { id: `c-${x.key}` },
-      h("div.combatant-head",
-        h("span.init", x.init ?? "–"),
+    const stats = x.pc && party.find((p) => p.id === x.pc)?.stats;
+    const toggle = () => { if (opened.has(x.key)) opened.delete(x.key); else opened.add(x.key); draw(); };
+    const legendary = facts && (facts.legendary || facts.resistance) ? h("span.tracker-legendary",
+      facts.legendary ? ticks("Legendary", facts.legendary, x.legendary_used || 0, (n) => { x.legendary_used = n; }, x) : "",
+      facts.resistance ? ticks("Resistance", facts.resistance, x.resistance_used || 0, (n) => { x.resistance_used = n; }, x) : "") : "";
+    return h(`div.combatant${current ? ".current" : ""}${down ? ".down" : ""}${x.pc ? ".pc" : ""}${open ? ".open" : ""}${inGroup ? ".member" : ""}`,
+      { id: `c-${x.key}` },
+      h("div.combatant-line", { onclick: x.lair ? null : toggle, title: x.lair ? "" : "Tap to open or close" },
+        c ? selectBox([x.key], `Select ${x.name}`) : h("span.select-gap"),
+        inGroup ? h("span.init.quiet", "") : h("span.init", x.init ?? "–"),
         h("strong.combatant-name", x.name),
         x.pc && h("span.badge", "party"),
-        facts?.ac && h("span.small.muted", `AC ${facts.ac}`),
-        isDown(x) && h("span.badge.down", "down"),
+        stats && h("span.small.muted", `AC ${stats.ac} · PP ${stats.passive_perception}`),
+        facts?.ac && !inGroup && h("span.small.muted", `AC ${facts.ac}`),
+        down && h("span.badge.down", "down"),
+        h("span.line-chips", chips(x)),
         h("span.spacer"),
-        expand),
-      c && hpControl(x),
-      !x.lair && conditions(x),
-      (facts?.legendary || facts?.resistance) ? h("div.tracker-legendary",
-        facts.legendary ? ticks("Legendary actions", facts.legendary, x.legendary_used || 0, (n) => { x.legendary_used = n; }) : "",
-        facts.resistance ? ticks("Legendary Resistance", facts.resistance, x.resistance_used || 0, (n) => { x.resistance_used = n; }) : "") : "",
+        legendary,
+        c && hpReadout(x)),
+      open && h("div.combatant-controls",
+        c && hpControl(x),
+        !x.lair && conditionPicker(x),
+        // The stat block comes with the current turn on a phone (below), so a link to it is only for the rest.
+        c && !(current && !wide.matches) && h("button.link.small.sheet-link", { onclick: () => showSheet(x.ref, true) }, "Stat block")),
+      conditionRule(x),
       // The lair's options in full on its turn; otherwise just how many, to keep the order short.
       lair && (current
         ? h("div.lair-actions", lair.lair_intro && h("p.small.muted", lair.lair_intro),
           h("ul", (lair.lair_actions || []).map((a) => h("li.small", a))))
-        : h("p.small.muted.lair-actions", `${plural((lair.lair_actions || []).length, "option")}, on this count`))
-    );
+        : h("p.small.muted.lair-actions", `${plural((lair.lair_actions || []).length, "option")}, on this count`)),
+      // On a phone the current monster's stat block comes with its turn, rather than at the page's end.
+      current && !wide.matches && c?.stat_block && !inGroup &&
+        h("details.inline-sheet", { open: true }, h("summary.small", `${c.name} stat block`),
+          statBlockFromData(c.block_from ? c.block_from.name : c.name, { ...c.stat_block, hit_points: c.hp })));
+  };
+
+  // Several of one kind on one count: a block with its own header (select them all, how many stand).
+  const group = (u, current) => {
+    const members = u.map((i) => state.combatants[i]);
+    const c = creatureOf(members[0]);
+    const standing = members.filter((x) => !isDown(x)).length;
+    return h(`div.combatant-group${current ? ".current" : ""}`,
+      h("div.group-head",
+        selectBox(members.filter((x) => !isDown(x)).map((x) => x.key), `Select every ${c.name}`),
+        h("span.init", members[0].init ?? "–"),
+        h("strong", `${c.name} ×${members.length}`),
+        h("span.small.muted", `AC ${creatureFacts(c).ac ?? "?"} · ${standing} standing`),
+        h("span.spacer"),
+        h("button.link.small.sheet-link", { onclick: () => showSheet(members[0].ref, true) }, "Stat block")),
+      members.map((x) => row(x, state.combatants.indexOf(x), false, true)),
+      current && !wide.matches && c?.stat_block &&
+        h("details.inline-sheet", { open: true }, h("summary.small", `${c.name} stat block`),
+          statBlockFromData(c.block_from ? c.block_from.name : c.name, { ...c.stat_block, hit_points: c.hp })));
+  };
+
+  // Ticked monsters take one amount at once: a fireball, with Half for those who saved.
+  const bulkBar = () => {
+    const picked = state.combatants.filter((x) => selected.has(x.key));
+    if (!picked.length) return "";
+    const amount = h("input", { type: "number", min: 0, placeholder: "HP", inputmode: "numeric", "aria-label": "Damage or healing for the ticked" });
+    const apply = (factor) => {
+      const n = Number(amount.value);
+      if (!n) return amount.focus();
+      const each = Math.sign(factor) * Math.floor(n * Math.abs(factor));  // half rounds down, as the rules say
+      change(() => picked.map((x) => hurt(x, each)).join("; "));
+      selected.clear();
+      draw();
+    };
+    return h("div.bulk-bar",
+      h("strong", `${picked.length} ticked`), amount,
+      h("button.danger", { onclick: () => apply(-1) }, "Hit"),
+      h("button.danger", { onclick: () => apply(-0.5), title: "Half the damage, rounded down: for those who saved" }, "Half"),
+      h("button", { onclick: () => apply(1) }, "Heal"),
+      h("button.link", { onclick: () => { selected.clear(); draw(); } }, "Clear"));
   };
 
   const running = () => {
-    const current = state.combatants[state.turn];
+    const us = units();
+    const turnUnit = unitOf(state.turn);
+    const last = undo.length ? (state.log || []).slice(-1)[0] : null;
     return [
       h("div.tracker-bar",
         h("div.tracker-round", h("span.small.muted", "Round"), h("strong", state.round)),
-        h("div.tracker-now", h("span.small.muted", "Turn"), h("strong", current ? current.name : "–")),
-        h("button", { onclick: () => advance(-1), title: "Back a turn" }, "‹"),
+        h("div.tracker-now", h("span.small.muted", "Turn"), h("strong", unitName(turnUnit))),
+        h("button", { onclick: undoLast, disabled: !undo.length, title: last ? `Undo: ${last.text}` : "Nothing to undo" }, "Undo"),
+        h("button", { onclick: () => advance(-1), title: "Back a turn" }, "‹ Back"),
         h("button.primary", { onclick: () => advance(1) }, "Next turn")),
-      h("div.turn-order", state.combatants.map(row)),
+      bulkBar(),
+      h("div.turn-order", us.map((u) => {
+        const current = u.includes(state.turn);
+        return u.length > 1 ? group(u, current) : row(state.combatants[u[0]], u[0], current, false);
+      })),
+      (state.log || []).length > 0 && h("details.tracker-log", { open: wide.matches },
+        h("summary", "Log"),
+        h("ol", [...state.log].reverse().slice(0, 30).map((l) => h("li", h("span.muted.small", `R${l.round} `), l.text)))),
       h("div.tracker-end",
         h("button.danger", {
           onclick: () => {
             if (!confirm("End the fight? The turn order, hit points and conditions are cleared.")) return;
             state = freshState(fight, party);
+            undo.length = 0;
             api("PATCH", base, { reset: true }).catch((err) => toast(err.message, true));
             draw();
           },
@@ -449,12 +600,29 @@ export async function encounterView(slug, id) {
       }
     },
   }, "✎");
+  // The party it's scored for: the campaign's own unless set, which a DM can change here.
+  const partyButton = h("button.link.small", {
+    title: "Score this fight for another party, or the campaign's own",
+    onclick: async () => {
+      const now = fight.party ? `${fight.party.size} ${fight.party.level}` : "";
+      const answer = prompt("How many characters, and their level (\"4 7\")? Leave it empty for the campaign's party.", now);
+      if (answer === null) return;
+      const [size, level] = answer.trim().split(/[\s,x×]+/).map(Number);
+      const body = answer.trim() ? { party: { size, level } } : { campaign_party: true };
+      try {
+        await api("PATCH", base, body);
+        location.reload();
+      } catch (err) {
+        toast(err.message.includes("422") || !size || !level ? "Give a number of characters and a level, like 4 7" : err.message, true);
+      }
+    },
+  }, "change");
   draw();
   return h("section.page.tracker",
     h("div.page-head", h("a", { href: `#/campaigns/${slug}/encounters` }, "← Encounters")),
     h("div.tracker-title", title, rename,
       fight.difficulty && h(`span.difficulty.${fight.difficulty}`, fight.difficulty)),
-    h("p.muted.small", difficultyLine(fight),
+    h("p.muted.small", difficultyLine(fight), " ", partyButton,
       e.conversation_id ? [" · ", h("a", { href: `#/campaigns/${slug}/ask/${e.conversation_id}` }, "the conversation it came from")] : ""),
     h("div.tracker-layout", h("div.tracker-main", body), panel));
 }

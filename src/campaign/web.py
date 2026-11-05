@@ -93,9 +93,20 @@ class ChatTitle(BaseModel):
     title: str = Field(min_length=1)
 
 
+class IngestReview(BaseModel):
+    """What the DM accepted of an ingest: the proposals by number, with edits to their arguments, and the recap."""
+    accepted: list[int] = Field(default_factory=list)
+    edits: dict[int, dict[str, Any]] = Field(default_factory=dict)
+    title: str | None = None
+    summary: str | None = None
+
+
 class EncounterUpdate(BaseModel):
-    """A new title, or the fight as it stands now (the tracker's whole state), or `reset` to end it."""
+    """A new title; the party it's scored for (`party`, or `campaign_party` for the campaign's own);
+    the fight as it stands now (the tracker's whole state), or `reset` to end it."""
     title: str | None = Field(default=None, min_length=1)
+    party: encounters.Party | None = None
+    campaign_party: bool = False
     state: dict[str, Any] | None = None
     reset: bool = False
 
@@ -593,9 +604,34 @@ def create_app(
 
     @app.get("/api/campaigns/{slug}/sessions")
     def sessions(c: Campaign = Depends(reader), s: Store = Depends(store)) -> dict[str, Any]:
-        # Recent ingests that are waiting, running or need attention (finished ones show as sessions).
-        active = [job_view(j) for j in s.jobs(c, "ingest") if j["state"] in ("wanted", "running", "failed")]
-        return {"sessions": s.sessions(c), "next": s.next_ingest_session(c), "ingests": active}
+        # Recent ingests that are waiting, running, need attention or wait for the DM's review (the ones
+        # applied show as sessions).
+        jobs = s.jobs(c, "ingest")
+        active = [job_view(j) for j in jobs if j["state"] in ("wanted", "running", "failed")]
+        reviews = [job_view(j) for j in jobs if j["state"] == "done" and (j["result"] or {}).get("review") == "pending"]
+        return {"sessions": s.sessions(c), "next": s.next_ingest_session(c), "ingests": active, "reviews": reviews}
+
+    def ingest_to_review(s: Store, c: Campaign, job_id: int) -> dict[str, Any]:
+        job = campaign_job(s, c, job_id)
+        if job["kind"] != "ingest" or job["state"] != "done" or (job["result"] or {}).get("review") != "pending":
+            raise HTTPException(409, "this session's notes aren't waiting for a review")
+        return job
+
+    @app.post("/api/campaigns/{slug}/ingests/{job_id}/apply")
+    def apply_ingest(job_id: int, body: IngestReview, c: Campaign = Depends(editor), s: Store = Depends(store)) -> dict:
+        """Make the changes the DM accepted from a session's notes (and the recap as they left it)."""
+        from .agent import apply_ingest as apply
+
+        job = ingest_to_review(s, c, job_id)
+        made = apply(s, c, job["result"], body.accepted, body.edits, body.title, body.summary)
+        s.update_job(job_id, result=job["result"] | {"review": "applied"} | made)
+        return made
+
+    @app.post("/api/campaigns/{slug}/ingests/{job_id}/discard", status_code=204)
+    def discard_ingest(job_id: int, c: Campaign = Depends(editor), s: Store = Depends(store)) -> None:
+        """None of it: the campaign stays as it was (the notes stay among the sources)."""
+        job = ingest_to_review(s, c, job_id)
+        s.update_job(job_id, result=job["result"] | {"review": "discarded"})
 
     @app.post("/api/campaigns/{slug}/sessions/{number}/revert")
     def revert(number: int, c: Campaign = Depends(editor), s: Store = Depends(store)) -> dict[str, int]:
@@ -627,6 +663,10 @@ def create_app(
         view["timeline"] = w.timeline(entity_id)
         view["all_events"] = w.events(entity_id=entity_id)
         view["character"] = s.character_for_entity(entity_id)
+        # The stat block it runs on when it has none of its own ("Heleka, a sea hag"), to show here too.
+        found = None if w.attribute_values(entity_id, "stat_block") else w.stat_block(entity_id)
+        view["borrowed_stat_block"] = found and {"from": {"id": found[1]["id"], "name": found[1]["name"]},
+                                                 "stat_block": found[0]}
         return view
 
     @app.post("/api/campaigns/{slug}/entities/{entity_id}/facts", status_code=201)
@@ -702,11 +742,16 @@ def create_app(
     @app.patch("/api/campaigns/{slug}/encounters/{encounter_id}")
     def update_encounter(encounter_id: int, body: EncounterUpdate, request: Request, c: Campaign = Depends(reader),
                          s: Store = Depends(store)) -> dict[str, Any]:
-        my_encounter(s, request, c, encounter_id)
+        e = my_encounter(s, request, c, encounter_id)
         if body.state is not None and len(json.dumps(body.state)) > 200_000:
             raise HTTPException(413, "that's more fight than a tracker holds")
-        s.update_encounter(encounter_id, title=body.title, state=body.state, clear_state=body.reset)
-        return encounter_view(s, c, s.encounter(encounter_id), built=False)
+        spec = None
+        if body.party is not None or body.campaign_party:
+            spec = {k: v for k, v in e["spec"].items() if k != "party"}
+            if body.party is not None:
+                spec["party"] = body.party.model_dump()
+        s.update_encounter(encounter_id, title=body.title, spec=spec, state=body.state, clear_state=body.reset)
+        return encounter_view(s, c, s.encounter(encounter_id), built=spec is not None)
 
     @app.delete("/api/campaigns/{slug}/encounters/{encounter_id}", status_code=204)
     def delete_encounter(encounter_id: int, request: Request, c: Campaign = Depends(reader),
@@ -910,11 +955,6 @@ def create_app(
         s.set_conversation_title(conversation_id, body.title.strip()[:120])
         return s.conversation(conversation_id)
 
-    @app.delete("/api/campaigns/{slug}/chats", status_code=204)
-    def delete_chats(request: Request, c: Campaign = Depends(reader), s: Store = Depends(store)) -> None:
-        """Every conversation of mine in this campaign. The encounters made in them stay."""
-        s.delete_conversations(c, None if local else user_of(request)["id"])
-
     @app.delete("/api/campaigns/{slug}/chats/{conversation_id}", status_code=204)
     def delete_chat(conversation_id: int, request: Request, c: Campaign = Depends(reader), s: Store = Depends(store)) -> None:
         my_conversation(s, request, c, conversation_id)
@@ -1057,11 +1097,15 @@ def create_app(
             "sheet_url": ch["sheet_url"],
         }
         if sheet is None:
-            return card | {"summary": "", "species": "", "hp": None}
+            return card | {"summary": "", "species": "", "hp": None, "stats": None}
+        d = sheet.derived()
         return card | {
             "summary": " / ".join(f"{c.name} {c.level}" for c in sheet.classes),
             "species": sheet.species,
             "hp": sheet.hp.model_dump() | {"max": sheet.hp_max},
+            # What the DM wants of each of them in a fight, at a glance.
+            "stats": {"ac": d["ac"]["total"], "passive_perception": d["passive_perception"]["total"],
+                      "initiative": d["initiative"]["total"]},
         }
 
     @app.get("/api/characters")

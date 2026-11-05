@@ -141,20 +141,60 @@ def test_ingest_job_runs_in_background(client, monkeypatch):
     assert r.json()["session"] == 1
     job = wait_for(client, r.json()["job"])
     assert job["state"] == "done" and job["kind"] == "ingest" and job["name"] == "s1.txt", job
-    assert job["result"]["title"] == "Blood on the Vine"
+    assert job["result"]["title"] == "Blood on the Vine" and job["result"]["review"] == "pending"
+    assert [p["summary"] for p in job["result"]["proposals"]] == ["Recorded: Ismark is alive", "Journal: Met Ismark at the tavern."]
     assert any(e["kind"] == "tool" and "Recorded:" in e["text"] for e in job["log"])
-    assert client.get("/api/campaigns/strahd/sessions").json()["ingests"] == []  # finished: it's a session now
 
+    # Nothing has changed yet: the DM reviews it first.
     sessions = client.get("/api/campaigns/strahd/sessions").json()
+    assert sessions["ingests"] == [] and [x["id"] for x in sessions["reviews"]] == [job["id"]]
+    assert sessions["sessions"] == [] and sessions["next"] == 2  # the number stays taken while it waits
+    assert client.get("/api/campaigns/strahd/entities").json()["entities"] == []
+
+    # The DM keeps both, rewords the journal line and the title.
+    made = client.post(f"/api/campaigns/strahd/ingests/{job['id']}/apply", json={
+        "accepted": [0, 1], "edits": {"1": {"text": "Met Ismark at the Blood on the Vine."}},
+        "title": "A man in a cloak"}).json()
+    assert made["made"] == 2 and made["problems"] == [] and made["facts"] >= 1
+    assert client.post(f"/api/campaigns/strahd/ingests/{job['id']}/apply", json={}).status_code == 409  # once
+    sessions = client.get("/api/campaigns/strahd/sessions").json()
+    assert sessions["reviews"] == [] and sessions["sessions"][0]["title"] == "A man in a cloak"
     assert sessions["sessions"][0]["played_on"] == "2026-10-25" and sessions["next"] == 2
     ismark = client.get("/api/campaigns/strahd/entities").json()["entities"][0]
     assert ismark["name"] == "Ismark" and ismark["current"] == {"status": "alive"}
     detail = client.get(f"/api/campaigns/strahd/entities/{ismark['id']}").json()
-    assert detail["events"] == [{"session": 1, "text": "Met Ismark at the tavern."}]
+    assert detail["events"] == [{"session": 1, "text": "Met Ismark at the Blood on the Vine."}]
 
     assert client.get("/api/campaigns/strahd/journal").json()[0]["session"] == 1
     assert client.post("/api/campaigns/strahd/sessions/1/revert").json()["entities_removed"] == 1
     assert client.get("/api/campaigns/strahd/entities").json()["entities"] == []
+
+
+def test_a_dm_can_leave_out_what_the_notes_got_wrong_or_all_of_it(client, monkeypatch):
+    def script():
+        return FakeClient([
+            ([tool_use("t1", "record_fact", entity="Ismark", kind="npc", statement="Ismark is alive",
+                       attribute="status", value="alive")], "tool_use"),
+            ([tool_use("t2", "record_fact", entity="Ireena", kind="npc", statement="Ireena is dead",
+                       attribute="status", value="dead")], "tool_use"),  # misheard
+            ([tool_use("t3", "finish_session", title="Night", summary="They met Ismark.")], "tool_use"),
+            ([text("All recorded.")], "end_turn"),
+        ])
+    clients = [script(), script()]
+    monkeypatch.setattr(agent_mod.anthropic, "Anthropic", lambda: clients.pop(0))
+    client.post("/api/campaigns", json={"name": "Strahd", "role": "dm"})
+    first = wait_for(client, client.post("/api/campaigns/strahd/ingest", data={"text": "notes"}).json()["job"])
+    # Only Ismark: Ireena never died.
+    assert client.post(f"/api/campaigns/strahd/ingests/{first['id']}/apply", json={"accepted": [0]}).json()["made"] == 1
+    names = [e["name"] for e in client.get("/api/campaigns/strahd/entities").json()["entities"]]
+    assert names == ["Ismark"]
+    # The same notes again, as session 2, and none of it wanted.
+    second = wait_for(client, client.post("/api/campaigns/strahd/ingest", data={"text": "notes"}).json()["job"])
+    assert second["session"] == 2
+    assert client.post(f"/api/campaigns/strahd/ingests/{second['id']}/discard").status_code == 204
+    sessions = client.get("/api/campaigns/strahd/sessions").json()
+    assert sessions["reviews"] == [] and [x["number"] for x in sessions["sessions"]] == [1] and sessions["next"] == 2
+    assert [e["name"] for e in client.get("/api/campaigns/strahd/entities").json()["entities"]] == ["Ismark"]
 
 
 def test_digest_endpoints_and_original_kept(client, monkeypatch):

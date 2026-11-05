@@ -97,20 +97,24 @@ uv run campaign web            # http://127.0.0.1:8765
   button when it can). Installed, it opens without the browser's bars; in
   a browser tab, the sheet's full-screen button hides them. Either way the
   site's top bar gives way to a ‹ back to the list.
-- **Campaigns**: create DM or player campaigns, then use the tabs:
+- **Campaigns**: create DM or player campaigns. A campaign's header has a
+  search box that finds any person, monster, place or thing by name as you
+  type (**/** or **Ctrl-K** from anywhere). Then the tabs:
   - **Ask**: chat with the campaign assistant. Answers stream in as
     they're written, with the lookups it makes folded into one line
     above them. Answers are Markdown, rendered as it arrives (headings,
     lists, tables; the book's read-aloud text as a boxed quote); a stat
     block comes as a card laid out like the books', and dice in any answer
-    or stat block ("3d8+5", "+8 to hit") are buttons that roll. Under each
-    answer is what it cost: tokens, lookups, seconds and dollars (hover
-    for the breakdown into cached and uncached input).
-    The tab opens ready for a new question. Conversations are kept (per
+    or stat block ("3d8+5", "+8 to hit") are buttons that roll. What each
+    answer cost is folded away under it (ⓘ): tokens, lookups, seconds and
+    dollars, with the breakdown into cached and uncached input on hover.
+    The tab opens ready for a new question, under where things stand:
+    the last session, the quests still open, the party with their HP, and
+    the fights ready to run. Conversations are kept (per
     person): the latest few are listed under the suggestions, the rest
-    behind "All N conversations" (and "Delete all", for a clean start;
-    encounters made in them are kept), and each has its own link, so a
-    reload or going back keeps your place. In a player campaign it only knows
+    behind "All N conversations" (an encounter made in one is kept if
+    it's deleted), and each has its own link, so a reload or going back
+    keeps your place. In a player campaign it only knows
     what the party knows. With editor
     access it can also record what you tell it happened.
   - **Encounters**: every fight the assistant has put together for you,
@@ -118,8 +122,16 @@ uv run campaign web            # http://127.0.0.1:8765
     and how it stands. **Run this fight** opens the tracker:
     - initiative: the monsters' rolled, one roll per kind of creature,
       and the party's typed in; anyone else can be added;
-    - the turn order, with **Next turn** and the round;
-    - each monster's hit points, with **Hit** and **Heal**;
+    - the turn order, with **Next turn**, **Back** and the round. Each
+      combatant is one line (initiative, name, AC, HP, conditions,
+      legendary ticks) that opens to its controls on its turn or when
+      tapped; monsters of one kind on one count are one block and one
+      turn, as group initiative goes; the fallen shrink to a thin line and
+      are passed over; the party show their AC and passive Perception;
+    - each monster's hit points, with **Hit** and **Heal**, and ticked
+      monsters (one at a time, or a whole block) taking one amount at once:
+      **Hit**, **Half** (rounded down, for those who saved) or **Heal**;
+    - a log of what changed, with **Undo**;
     - conditions as chips, each opening its rule as the SRD words it;
     - legendary actions, which come back at the start of the creature's
       turn, and legendary resistance;
@@ -132,12 +144,22 @@ uv run campaign web            # http://127.0.0.1:8765
     The fight is saved on the server as it goes, so a reload or another
     device carries on, until **End the fight**. Encounters are private to
     whoever they were made for, like conversations.
-  - **Sessions**: paste a transcript, or upload a text file or a recording,
-    to run an ingest. A live log shows what Claude is reading and
-    recording. Each past session has its recap and a **Revert** button.
+  - **Sessions**: the campaign's timeline, newest first: each session
+    (recaps of past play numbered among them) opens to its recap and what
+    happened in it (the journal, linked to the people, places and things
+    involved). Then **Add session notes**: paste
+    notes or a transcript, or upload a text file or a recording, to run an
+    ingest. A live log shows what the assistant is reading. **Nothing in the
+    campaign changes until the DM says so:** the ingest comes back as the
+    changes it would make (each fact with whose it is and what it sets, each
+    journal line, each item) and a draft recap, to untick, reword and
+    **Apply**, or **Discard**. Applied, session N is what was accepted,
+    replacing an earlier recording of it. Each past session has its recap and a **Revert** button.
     An ingest is a [job](#background-jobs): it continues with the page
     closed and survives restarts and deploys.
-  - **Reference**: upload module PDFs and notes, mark them DM-only (or
+  - **Reference**: the books and notes, then **Add a book or notes** to
+    upload module PDFs and notes. Each is **read** once (the digest,
+    below), with what reading it costs asked first. Mark them DM-only (or
     switch one to Everyone later: players then see its text and what the
     world took from it), and search the text directly.
   - **World state**: every person, place, item and quest, from the book and
@@ -149,7 +171,6 @@ uv run campaign web            # http://127.0.0.1:8765
     - its events;
     - a synthesized summary;
     - forms to add or end facts by hand, and to merge duplicates.
-  - **Journal**: events by session, linked to the entities involved.
 
 Locally there's no sign-in, the server listens only on this machine, and
 you own everything. To put it on the internet, turn on Google sign-in
@@ -362,8 +383,12 @@ of their own) and interleaves its columns with the text around it.
 For a fight, the `encounter` tool takes the creatures and how many of
 each (with the adventure's changes to any of them, like "45 HP, vulnerable
 to fire") and gives back their stat blocks, their XP and the encounter's
-difficulty for the party by the DMG's rules (the party defaults to the
-campaign's characters). It's saved as one of your encounters, under a
+difficulty for the party by the DMG's rules. The party is the campaign's
+own, as it is whenever the fight is looked at (how many characters, and the
+average level of those whose sheets are here), unless one was asked for ("a
+one-shot for four 3rd-level characters"); the tracker can change it. The
+card says what it was worked out from: how far past the deadly threshold,
+the XP as the DMG counts it, and whose party. It's saved as one of your encounters, under a
 title the assistant gives it, and the answer shows it as an encounter card:
 the difficulty, every stat block, and a button to run it (see
 **Encounters** above). Each creature can show the book text
@@ -398,7 +423,8 @@ that isn't a sheet, a character name already taken) fails at once.
 **Cancel** stops a job at its next step and undoes what it wrote. A new
 kind is a function in `jobs.KINDS` plus an endpoint that adds the row.
 
-**Digesting is a target, not a job.** Clicking **Digest** records on the
+**Digesting is a target, not a job.** The page calls it reading.
+Clicking **Read the book** records on the
 source which model it should be digested with; a loop in the server
 (`digest.Reconciler`) compares that with the digest cache and runs
 whatever's missing. It keeps no state of its own, so it doesn't matter
@@ -406,12 +432,12 @@ whether the page is open, the server restarts or a deploy replaces it: the
 next pass picks up from the database, and nothing finished is paid for
 twice. **Stop** clears the target (calls already in flight finish and are
 kept). A section that fails is retried after 1 and then 4 minutes, then
-waits until someone clicks **Retry failed**, so a broken section can't run
+waits until someone clicks **Retry the failed parts**, so a broken section can't run
 up a bill.
 
 **In the web UI**, uploading doesn't digest unless you tick the box. The
-source's line shows how many calls are left and a rough dollar estimate,
-and **Digest** asks before spending it. The first estimate is a guess; once
+source's line shows a rough dollar estimate (the calls, tokens and model on
+hover), and **Read the book** asks before spending it. The first estimate is a guess; once
 a few sections have been digested with the same model, it uses their
 measured token counts. While a digest runs, the source's page refreshes on
 its own: sections fill in as they finish, each one's entities can be opened

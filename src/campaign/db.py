@@ -899,10 +899,11 @@ class Store:
             self.conn.execute(f"UPDATE jobs SET {cols}, updated_at = ? WHERE id = ?", (*fields.values(), now(), job_id))
 
     def next_ingest_session(self, campaign: Campaign) -> int:
-        """The next session number, counting ingests still waiting to happen."""
+        """The next session number, counting ingests still waiting to happen or to be reviewed."""
         row = self.conn.execute(
             "SELECT max(json_extract(input, '$.session')) AS n FROM jobs"
-            " WHERE campaign_id = ? AND kind = 'ingest' AND state IN ('wanted', 'running')",
+            " WHERE campaign_id = ? AND kind = 'ingest' AND (state IN ('wanted', 'running')"
+            " OR (state = 'done' AND json_extract(result, '$.review') = 'pending'))",
             (campaign.id,),
         ).fetchone()
         return max(self.next_session_number(campaign), (row["n"] or 0) + 1)
@@ -995,13 +996,6 @@ class Store:
         with self.conn:
             self.conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
 
-    def delete_conversations(self, campaign: Campaign, user_id: int | None) -> int:
-        """Every conversation one person has had in a campaign. Their encounters stay."""
-        with self.conn:
-            return self.conn.execute(
-                "DELETE FROM conversations WHERE campaign_id = ? AND user_id IS ?", (campaign.id, user_id)
-            ).rowcount
-
     # -- encounters ------------------------------------------------------------------
 
     def create_encounter(self, campaign: Campaign, user_id: int | None, conversation_id: int | None,
@@ -1040,9 +1034,11 @@ class Store:
         )]
         return [self.encounter(i) for i in ids]
 
-    def update_encounter(self, encounter_id: int, *, title: str | None = None,
+    def update_encounter(self, encounter_id: int, *, title: str | None = None, spec: dict[str, Any] | None = None,
                          state: dict[str, Any] | None = None, clear_state: bool = False) -> None:
         with self.conn:
+            if spec is not None:
+                self.conn.execute("UPDATE encounters SET spec = ? WHERE id = ?", (json.dumps(spec, sort_keys=True), encounter_id))
             if title is not None:
                 self.conn.execute("UPDATE encounters SET title = ? WHERE id = ?", (title.strip()[:120], encounter_id))
             if state is not None or clear_state:

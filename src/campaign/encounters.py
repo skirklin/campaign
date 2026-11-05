@@ -152,6 +152,8 @@ def book_passage(store: Store, campaign: Any, entity_id: int) -> list[dict[str, 
 
 def build(store: Store, campaign: Any, spec: Spec) -> dict[str, Any]:
     world = World(store, campaign)
+    # A party the encounter was made for ("for four 3rd-level characters"), else the campaign's own as
+    # it is now, so the difficulty follows the party as it grows.
     party = spec.party or party_of(store, campaign)
     creatures = []
     for c in spec.creatures:
@@ -170,6 +172,7 @@ def build(store: Store, campaign: Any, spec: Spec) -> dict[str, Any]:
     out: dict[str, Any] = {
         "creatures": creatures, "monsters": monsters, "xp": xp,
         "xp_complete": len(known) == len(creatures), "party": party.model_dump() if party else None,
+        "party_source": "set" if spec.party else "campaign" if party else None,
     }
     if party:
         m = multiplier(monsters, party.size)
@@ -179,7 +182,9 @@ def build(store: Store, campaign: Any, spec: Spec) -> dict[str, Any]:
                       "medium" if adjusted >= medium else "easy" if adjusted >= easy else "trivial")
         out |= {"multiplier": m, "adjusted_xp": adjusted, "difficulty": difficulty,
                 "thresholds": {"easy": easy, "medium": medium, "hard": hard, "deadly": deadly},
-                "xp_per_character": xp // party.size}
+                "xp_per_character": xp // party.size,
+                # How far past deadly, when it is: "deadly" alone says nothing of 1.1× against 5×.
+                "times_deadly": round(adjusted / deadly, 1) if difficulty == "deadly" else None}
     return out
 
 
@@ -195,6 +200,6 @@ def summary(result: dict[str, Any]) -> dict[str, Any]:
             "ac": sb.get("armor_class"), "hp": c["hp"], "cr": c["cr"], "xp_each": c["xp_each"],
             "note": c["note"] or None,
         }.items() if v is not None})
-    keep = ("monsters", "xp", "xp_complete", "party", "multiplier", "adjusted_xp", "difficulty", "thresholds",
-            "xp_per_character")
+    keep = ("monsters", "xp", "xp_complete", "party", "party_source", "multiplier", "adjusted_xp", "difficulty",
+            "thresholds", "xp_per_character", "times_deadly")
     return {"creatures": rows} | {k: result[k] for k in keep if k in result}

@@ -84,14 +84,16 @@ def test_an_interrupted_ingest_is_picked_up_and_redone_cleanly(env, monkeypatch)
     assert loop.pass_once()
     ing = s.job(ingest_id)
     assert ing["state"] == "wanted" and ing["attempts"] == 0  # not its fault: it'll be redone
-    assert facts(s, camp) == 1  # the first attempt got one fact in
+    assert facts(s, camp) == 0  # an ingest only proposes: nothing's written until the DM accepts
 
     # The next server (or the next pass) starts over from the transcript.
     restore()
     assert loop.pass_once()
     ing = s.job(ingest_id)
     assert ing["state"] == "done" and ing["result"]["title"] == "Blood on the Vine"
-    assert facts(s, camp) == 1 and len(World(s, camp).events()) == 1  # redone, not doubled
+    assert ing["result"]["review"] == "pending"
+    assert [p["tool"] for p in ing["result"]["proposals"]] == ["record_fact", "add_journal_entry"]  # redone, not doubled
+    assert facts(s, camp) == 0 and World(s, camp).events() == []
     assert loop.pass_once() is False  # nothing left
 
 
@@ -113,14 +115,14 @@ def test_failures_back_off_then_wait_for_a_retry(env, monkeypatch):
     assert loop.pass_once() and s.job(ingest_id)["state"] == "done"
 
 
-def test_cancelling_midway_undoes_what_it_wrote(env, monkeypatch):
+def test_cancelling_midway_leaves_the_campaign_as_it_was(env, monkeypatch):
     s, camp, db, ingest_id = env
     loop = JobLoop(db)
     interrupt(loop, 2, lambda i: s.update_job(i, state="cancelled"))  # someone clicked Cancel
     scripted(monkeypatch, SCRIPT)
     loop.pass_once()
     assert s.job(ingest_id)["state"] == "cancelled"
-    assert facts(s, camp) == 0  # the fact the first step wrote is gone
+    assert facts(s, camp) == 0  # nothing was written: an ingest proposes, and the DM accepts
     assert any(e["text"] == "Cancelled." for e in s.job_log(ingest_id))
     assert loop.pass_once() is False
 
