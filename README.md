@@ -124,7 +124,10 @@ uv run campaign web            # http://127.0.0.1:8765
     - legendary actions, which come back at the start of the creature's
       turn, and legendary resistance;
     - the lair's turn on initiative 20 when a creature has lair actions;
-    - every monster's stat block a tap away.
+    - every kind of creature's stat block on screen at once: on a laptop
+      beside the turn order, in as many columns as fit and scrolling on
+      their own, the one whose turn it is lit up and brought into view;
+      on a phone under it. Each folds away, and all of them at once.
 
     The fight is saved on the server as it goes, so a reload or another
     device carries on, until **End the fight**. Encounters are private to

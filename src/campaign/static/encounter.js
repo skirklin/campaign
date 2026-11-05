@@ -294,7 +294,38 @@ export async function encounterView(slug, id) {
     if (step > 0 && now.legendary_used) now.legendary_used = 0;  // they come back at the start of its turn
   });
 
-  const open = new Set();  // whose stat block is showing
+  // Every kind of creature in the fight, its stat block on screen beside the turn order (on a
+  // laptop; under it on a phone), each foldable. Built once: the blocks don't change in a fight.
+  const wide = matchMedia("(min-width: 1100px)");
+  const sheets = fight.creatures.map((c, i) => {
+    const facts = creatureFacts(c);
+    const el = h("details.creature-sheet", { open: wide.matches },
+      h("summary",
+        h("strong", c.count > 1 ? `${c.name} ×${c.count}` : c.name),
+        h("span.small.muted", [facts.ac && `AC ${facts.ac}`, c.hp && `HP ${c.hp}`, c.cr && `CR ${c.cr}`].filter(Boolean).join(" · ")),
+        c.note && h("span.small.encounter-note", c.note)),
+      c.stat_block
+        ? statBlockFromData(c.block_from ? c.block_from.name : c.name, { ...c.stat_block, hit_points: c.hp })
+        : h("p.small.muted", "No stat block for this in your material. Look it up in its own book."));
+    el.dataset.ref = i;
+    return el;
+  });
+  const fold = (open) => sheets.forEach((el) => { el.open = open; });
+  const panel = h("aside.tracker-panel",
+    h("div.tracker-panel-head",
+      h("h3", "In this fight"),
+      h("span.spacer"),
+      h("button.link.small", { onclick: () => fold(true) }, "Unfold all"),
+      h("button.link.small", { onclick: () => fold(false) }, "Fold all")),
+    h("div.creature-sheets", sheets));
+  // Whose turn it is: their stat block lit up, opened and brought into view.
+  const showSheet = (ref, scroll) => {
+    sheets.forEach((el) => el.classList.toggle("current", Number(el.dataset.ref) === ref));
+    const el = sheets[ref];
+    if (!el) return;
+    el.open = true;
+    if (scroll) el.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  };
   const conditionInfo = new Map();  // combatant key -> the condition whose rules are showing
 
   const hpControl = (x) => {
@@ -352,9 +383,7 @@ export async function encounterView(slug, id) {
     const c = creatureOf(x);
     const facts = c ? creatureFacts(c) : null;
     const current = i === state.turn;
-    const expand = c?.stat_block && h("button.link.small", {
-      onclick: () => { if (open.has(x.key)) open.delete(x.key); else open.add(x.key); draw(); },
-    }, open.has(x.key) ? "Hide stat block" : "Stat block");
+    const expand = c && h("button.link.small.sheet-link", { onclick: () => showSheet(x.ref, true) }, "Stat block");
     const lair = x.lair && fight.creatures.find((cr) => (cr.stat_block?.lair_actions || []).length)?.stat_block;
     return h(`div.combatant${current ? ".current" : ""}${isDown(x) ? ".down" : ""}${x.pc ? ".pc" : ""}`, { id: `c-${x.key}` },
       h("div.combatant-head",
@@ -374,8 +403,8 @@ export async function encounterView(slug, id) {
       lair && (current
         ? h("div.lair-actions", lair.lair_intro && h("p.small.muted", lair.lair_intro),
           h("ul", (lair.lair_actions || []).map((a) => h("li.small", a))))
-        : h("p.small.muted.lair-actions", `${plural((lair.lair_actions || []).length, "option")}, on this count`)),
-      open.has(x.key) && statBlockFromData(c.block_from ? c.block_from.name : c.name, { ...c.stat_block, hit_points: c.hp }));
+        : h("p.small.muted.lair-actions", `${plural((lair.lair_actions || []).length, "option")}, on this count`))
+    );
   };
 
   const running = () => {
@@ -401,7 +430,10 @@ export async function encounterView(slug, id) {
 
   const draw = () => {
     body.replaceChildren(...(state.started ? running() : setup()));
-    if (state.started) body.querySelector(".combatant.current")?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    if (!state.started) return showSheet(-1, false);
+    body.querySelector(".combatant.current")?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    const now = state.combatants[state.turn];
+    showSheet(now?.ref ?? -1, wide.matches && now?.ref != null);
   };
 
   const rename = h("button.icon", {
@@ -424,5 +456,5 @@ export async function encounterView(slug, id) {
       fight.difficulty && h(`span.difficulty.${fight.difficulty}`, fight.difficulty)),
     h("p.muted.small", difficultyLine(fight),
       e.conversation_id ? [" · ", h("a", { href: `#/campaigns/${slug}/ask/${e.conversation_id}` }, "the conversation it came from")] : ""),
-    body);
+    h("div.tracker-layout", h("div.tracker-main", body), panel));
 }

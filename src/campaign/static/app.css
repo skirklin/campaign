@@ -1076,6 +1076,30 @@ a.button.primary { background: var(--accent); border-color: var(--accent); color
 .encounter-row-foot { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
 
 .tracker { max-width: 46rem; margin: 0 auto; }
+.tracker-panel { margin-top: 1.4rem; }
+.tracker-panel-head { display: flex; align-items: baseline; gap: .8rem; margin-bottom: .4rem; }
+.tracker-panel-head h3 { margin: 0; font: 600 1.05rem var(--serif); }
+.creature-sheets { display: flex; flex-direction: column; gap: .5rem; }
+.creature-sheet { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: .4rem .6rem; }
+.creature-sheet > summary { cursor: pointer; display: flex; flex-wrap: wrap; align-items: baseline; gap: .2rem .6rem; }
+.creature-sheet.current { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.creature-sheet .statblock-card { margin: .5rem 0 .1rem; max-width: none; font-size: .86rem; padding: .6rem .75rem .7rem; }
+.creature-sheet .statblock-card h4 { font-size: 1.15rem; }
+/* On a laptop, the whole fight on one screen: the turn order on the left, and beside it every
+   kind of creature's stat block at once, in as many columns as fit, scrolling on their own. */
+@media (min-width: 1100px) {
+  main:has(.tracker) { max-width: none; }
+  .tracker { max-width: none; }
+  .tracker-layout { display: grid; grid-template-columns: minmax(26rem, 34rem) minmax(0, 1fr); gap: 1.4rem; align-items: start; }
+  .tracker-panel {
+    margin-top: 0; position: sticky; top: calc(var(--below-topbar) + .5rem);
+    max-height: calc(100vh - var(--below-topbar) - 1rem); overflow: auto; padding-right: .3rem;
+  }
+  .creature-sheets { display: block; columns: 21rem; column-gap: .8rem; }
+  .creature-sheet { break-inside: avoid; margin-bottom: .6rem; }
+  .creature-sheet .sb-abilities .dice-chip { font-size: .75rem; }
+  .combatant .sheet-link { display: none; }  /* every stat block is already on screen */
+}
 .tracker-title { display: flex; align-items: center; flex-wrap: wrap; gap: .4rem .6rem; }
 .tracker-title h1 { margin: 0; }
 .tracker-setup { display: flex; flex-direction: column; gap: .35rem; margin: .6rem 0; }
@@ -1087,9 +1111,11 @@ a.button.primary { background: var(--accent); border-color: var(--accent); color
 .tracker-add input[type=number] { width: 5rem; }
 .tracker-start { width: 100%; padding: .7rem; font-size: 1.05rem; }
 
+.tracker { --below-topbar: 3.3rem; }  /* the site's top bar stays on screen above */
 .tracker-bar {
-  position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: .6rem;
-  padding: .6rem 0; margin-bottom: .4rem; background: linear-gradient(var(--bg) 80%, transparent);
+  position: sticky; top: var(--below-topbar); z-index: 5; display: flex; align-items: center; gap: .6rem;
+  padding: .6rem 0; margin-bottom: .4rem; background: var(--bg);
+  box-shadow: 0 6px 8px -6px rgb(0 0 0 / 18%);
 }
 .tracker-round, .tracker-now { display: flex; flex-direction: column; line-height: 1.15; }
 .tracker-round strong { font-size: 1.4rem; font-variant-numeric: tabular-nums; }
@@ -1097,14 +1123,17 @@ a.button.primary { background: var(--accent); border-color: var(--accent); color
 .tracker-now strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tracker-bar button.primary { padding: .6rem 1.1rem; font-size: 1rem; }
 .turn-order { display: flex; flex-direction: column; gap: .45rem; }
+/* A row: the name and the hit points on one line where they fit, conditions and the rest below. */
 .combatant {
-  padding: .55rem .7rem; background: var(--surface); border: 1px solid var(--border);
+  display: flex; flex-wrap: wrap; align-items: center; column-gap: .8rem;
+  padding: .5rem .7rem; background: var(--surface); border: 1px solid var(--border);
   border-radius: var(--radius-sm); scroll-margin-top: 5rem; transition: border-color .15s, box-shadow .15s;
 }
 .combatant.current { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft), var(--shadow); }
 .combatant.down { opacity: .55; }
 .combatant.pc { background: var(--surface-2); }
-.combatant-head { display: flex; align-items: center; flex-wrap: wrap; gap: .3rem .55rem; }
+.combatant-head { flex: 1 1 10rem; display: flex; align-items: center; flex-wrap: wrap; gap: .3rem .55rem; }
+.combatant > .conditions, .combatant > .tracker-legendary, .combatant > .lair-actions { flex-basis: 100%; }
 .combatant .init {
   min-width: 2rem; text-align: center; font-weight: 700; font-variant-numeric: tabular-nums;
   padding: .1rem .3rem; border-radius: 6px; background: var(--surface-2);
@@ -1112,13 +1141,13 @@ a.button.primary { background: var(--accent); border-color: var(--accent); color
 .combatant.current .init { background: var(--accent); color: var(--accent-text); }
 .combatant-name { font-size: 1.02rem; }
 .badge.down { color: var(--danger); border-color: currentColor; }
-.hp-control { display: flex; align-items: center; flex-wrap: wrap; gap: .4rem; margin-top: .45rem; }
-.hp-readout { min-width: 8rem; font-variant-numeric: tabular-nums; }
+.hp-control { display: flex; align-items: center; flex-wrap: wrap; gap: .4rem; margin: .3rem 0 0; }
+.hp-readout { min-width: 6.5rem; font-variant-numeric: tabular-nums; }
 .hp-bar { height: 4px; margin-top: .2rem; background: var(--surface-2); border-radius: 2px; overflow: hidden; }
 .hp-bar span { display: block; height: 100%; background: var(--ok); }
 .combatant.down .hp-bar span { background: var(--danger); }
-.hp-control input { width: 4.5rem; text-align: center; }
-.conditions { margin-top: .4rem; }
+.hp-control input { width: 3.8rem; text-align: center; }
+.conditions { margin-top: .35rem; }
 .condition-chips { display: flex; flex-wrap: wrap; align-items: center; gap: .3rem; }
 .condition-chip {
   padding: .1rem .55rem; border-radius: 999px; font-size: .82rem; text-transform: capitalize;
