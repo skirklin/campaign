@@ -109,7 +109,7 @@ uv run campaign web            # http://127.0.0.1:8765
     answer cost is folded away under it (ⓘ): tokens, lookups, seconds and
     dollars, with the breakdown into cached and uncached input on hover.
     The tab opens ready for a new question, under where things stand:
-    the last session, the quests still open, the party with their HP, and
+    the last session, the quests the party has taken up, the party with their HP, and
     the fights ready to run. Conversations are kept (per
     person): the latest few are listed under the suggestions, the rest
     behind "All N conversations" (an encounter made in one is kept if
