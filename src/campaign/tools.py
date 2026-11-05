@@ -274,6 +274,9 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
     def stat_block(name: str) -> str:
         """The full stat block of a creature or NPC, as the book prints it, ready to run in combat.
 
+        A creature the book runs on another's stat block ("Aetala (NG veteran)")
+        gets that one, titled with both names: "Aetala (Veteran)".
+
         Args:
             name: Name or alias, e.g. "Morgantha" or "dread boar".
         """
@@ -285,9 +288,12 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         if view is None:
             return f"No creature called {name!r}. Try find_entities(kind='monster')."
         blocks = world.attribute_values(view["id"], "stat_block")
-        if not blocks:
-            return f"{view['name']} has no stat block in the digested material. Try search_reference."
-        return "\n\n".join(format_stat_block(view["name"], json.loads(b)) for b in blocks)
+        if blocks:
+            return "\n\n".join(format_stat_block(view["name"], json.loads(b)) for b in blocks)
+        if found := world.stat_block(view["id"]):
+            sb, source = found
+            return format_stat_block(f"{view['name']} ({source['name']})", sb)
+        return f"{view['name']} has no stat block in the digested material. Try search_reference."
 
     def encounter(creatures: list[encounters.Creature], party_size: int | None = None,
                   party_level: int | None = None) -> str:

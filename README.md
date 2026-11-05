@@ -301,6 +301,13 @@ The digest turns a module into these things the assistant can use:
   the paragraph that says how many a round) and lair actions. Each joins
   the creature the book's text names (Sydon's block joins "Sydon, Lord of
   Storms"), or is a monster of its own.
+- **Which stat block a creature uses**, where the book runs it on another's:
+  "Aetala (NG veteran)", "two hunters (LG scouts)", a boar that is the
+  bestiary's great boar. The encounter card and the `stat_block` tool follow
+  that to the stat block, in any loaded book (the SRD's veteran, the
+  appendix's Great Boar), and show it under both names ("Corrupted White
+  Boar", run as the Great Boar); what the adventure changes stays with the
+  creature.
 
 Facts are what the book says is true: what a character claims is kept as
 theirs ("Anni says…"), and where something is keeps the book's whole

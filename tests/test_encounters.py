@@ -124,3 +124,38 @@ def test_a_pinned_id_wins_over_the_name_and_the_book_text_is_at_hand():
 
     passage = encounters.book_passage(store, camp, world.resolve("Skeleton")["id"])
     assert [p["text"][:9] for p in passage] == ["Skeleton.", "Actions. "]
+
+
+def test_a_creature_runs_on_the_stat_block_the_book_says_it_uses():
+    store = Store(":memory:")
+    camp = store.create_campaign("Odyssey", "dm")
+    src = store.add_source(camp, "Odyssey", "module", [{"heading": "", "text": "x", "page": 1}])
+    World(store, camp).apply_book(src, [
+        entry("Great Boar", block("14", "52 (7d10 + 14)", "3 (700 XP)")),
+        entry("Scout", block("13 (leather armor)", "16 (3d8 + 3)", "1/2 (100 XP)")),
+        {**entry("Corrupted White Boar", None, aliases=["the boar"]), "stat_block_of": "great boar",
+         "facts": ["Gains one level of exhaustion at the end of each of its turns"]},
+        {**entry("Taneias", None), "kind": "npc", "stat_block_of": "scouts"},  # as the book says it: plural
+        {**entry("Kyrah", None), "kind": "npc"},
+    ], key="k")
+    world = World(store, camp)
+    boar = world.resolve("Corrupted White Boar")
+    assert world.lookup("the boar")[0]["name"] == "Corrupted White Boar"
+    sb, source = world.stat_block(boar["id"])
+    assert source["name"] == "Great Boar" and sb["hit_points"] == "52 (7d10 + 14)"
+    assert world.stat_block(world.resolve("Taneias")["id"])[1]["name"] == "Scout"
+    assert world.stat_block(world.resolve("Kyrah")["id"]) is None
+
+    # The encounter: the creature the adventure names, run on the bestiary's block, with its XP.
+    r = encounters.build(store, camp, encounters.Spec(creatures=[{"name": "the boar"}], party={"size": 4, "level": 1}))
+    (c,) = r["creatures"]
+    assert (c["name"], c["block_from"]["name"], c["xp_each"]) == ("Corrupted White Boar", "Great Boar", 700)
+    assert encounters.summary(r)["creatures"][0]["stat_block_of"] == "Great Boar"
+    # A card pinned to the creature when it had no block finds the one it uses now.
+    r = encounters.build(store, camp, encounters.Spec(creatures=[{"name": "Corrupted Boar", "id": boar["id"]}]))
+    assert r["creatures"][0]["found"] and r["creatures"][0]["name"] == "Corrupted White Boar"
+
+    tools = {t.__name__: t for t in build_tools(ToolContext(store, camp))}
+    text = tools["stat_block"]("Taneias")
+    assert text.startswith("Taneias (Scout)\nAC 13 (leather armor) · HP 16 (3d8 + 3)")
+    assert "no stat block" in tools["stat_block"]("Kyrah")

@@ -138,6 +138,7 @@ class Entity(BaseModel):
     summary: str
     pages: list[int]
     facts: list[str]
+    stat_block_of: str | None  # the creature whose stat block this one uses: "veteran", "sea hag", "great boar"
     area_key: str | None  # a keyed area's map key, e.g. "C3"
     read_aloud: str | None  # boxed text to read to the players
     treasure: list[str]  # what can be found here, or what it carries
@@ -197,7 +198,12 @@ Return:
   appears on; facts, short standalone statements with numbers copied
   exactly ("Reward: 50 gp each from Ismark", "DC 15 Wisdom save or be
   charmed"). Stat blocks are read separately: leave their numbers out of
-  facts.
+  facts. For a creature that runs on another creature's stat block, as books
+  often say ("Aetala (NG veteran)", "two hunters (LG scouts)", "Heleka, a sea
+  hag", a boar that is "the great boar" of the bestiary), give stat_block_of:
+  that stat block's name, singular, as its own heading would title it
+  ("veteran", "scout", "sea hag", "great boar"). Leave it empty for anything
+  with its own stat block here, and for anything else.
   For a keyed area (a numbered or lettered room or site on a map), also give
   area_key, the key as printed ("C3", "12", "K20a"), and put its traps,
   hazards, locks and checks with their DCs in facts. For anything, give
@@ -612,6 +618,7 @@ def combine(group: list[dict[str, Any]], name: str | None = None, summary: str |
         "summary": summary or max((e["summary"] for e in group), key=len),
         "pages": sorted({p for e in group for p in e["pages"]}),
         "facts": _dedupe([f for e in group for f in e["facts"]]),
+        "stat_block_of": first("stat_block_of"),
         "area_key": first("area_key"),
         "read_aloud": first("read_aloud"),
         "treasure": _dedupe([t for e in group for t in e.get("treasure") or []]),
@@ -753,7 +760,7 @@ def fill_missing_lines(sb: dict[str, Any], text: str) -> dict[str, Any]:
 def stat_block_entry(sb: dict[str, Any], page: int | None) -> dict[str, Any]:
     """A stat block as an entry in the source's catalog, for the creature of that name."""
     return {"name": sb["name"], "kind": "monster", "aliases": [], "summary": "", "pages": [page] if page else [],
-            "facts": [], "stat_block": sb, "area_key": None, "read_aloud": None, "treasure": []}
+            "facts": [], "stat_block_of": None, "stat_block": sb, "area_key": None, "read_aloud": None, "treasure": []}
 
 
 STATBLOCK_EFFORT = "low"  # copying, not judging

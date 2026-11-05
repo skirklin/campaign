@@ -66,6 +66,7 @@ class FakeDigest:
                 ents.append(Entity(
                     name=m[2], kind=m[1], aliases=[m[3]] if m[3] else [], summary=f"{m[2]} in {title}",
                     pages=[], facts=[f"seen in {title}"], area_key=key[1] if key else None,
+                    stat_block_of=(re.findall(rf"^USES {re.escape(m[2])}: (.+)$", user, re.M) or [None])[0],
                     read_aloud=None, treasure=re.findall(rf"^TREASURE {re.escape(m[2])}: (.+)$", user, re.M),
                 ))
             tables = [
@@ -688,6 +689,10 @@ Sydon can take 3 legendary actions, choosing from the options below.
 Attack. Sydon makes one attack with his glaive.
 
 ## Beasts
+ENTITY monster The Hill Wolf | the grey wolf
+USES The Hill Wolf: wolves
+The hill wolf hunts the shepherds.
+
 ### Wolf
 _Medium beast, unaligned_
 
@@ -721,6 +726,9 @@ def test_stat_blocks_are_read_on_their_own_and_join_the_world(env):
         "Attack. Sydon makes one attack with his glaive."]
     assert sb["senses"] == "truesight 120 ft., passive Perception 16"  # put back from the text
     assert world.resolve("Wolf")["kind"] == "monster"
+    # A creature the book runs on another's block gets that block, by the name the book gave it.
+    sb, source = world.stat_block(world.resolve("the grey wolf")["id"])
+    assert source["name"] == "Wolf" and sb["hit_points"] == "11 (2d8 + 2)"
 
     tools = {t.__name__: t for t in build_tools(ToolContext(store, camp))}
     text = tools["stat_block"]("Sydon")
