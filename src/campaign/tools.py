@@ -280,7 +280,7 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         Args:
             name: Name or alias, e.g. "Morgantha" or "dread boar".
         """
-        e = world.resolve(name)
+        e = world.creature(name)
         view = world.view(e["id"]) if e else None
         if view is None:
             hits = world.lookup(name, limit=1)

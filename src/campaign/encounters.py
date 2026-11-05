@@ -115,7 +115,7 @@ def find_stat_block(world: World, name: str, entity_id: int | None = None) -> di
     pinned entity has neither, the name gets a chance to find one. `block_from` is the entity the
     block belongs to."""
     views = [world.view(entity_id)] if entity_id else []
-    if (e := world.resolve(name)) and e["id"] != entity_id:
+    if (e := world.creature(name)) and e["id"] != entity_id:
         views.append(world.view(e["id"]))
     if not any(views):
         views = world.lookup(name, limit=1)

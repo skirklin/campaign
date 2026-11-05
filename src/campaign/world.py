@@ -191,17 +191,31 @@ class World:
         In a player's view, aliases from DM-only material don't count, unless
         `every_alias` (for matching the book's own entries when applying it).
         """
-        alias_filter = "" if every_alias else self._alias_filter
-        rows = self.conn.execute(
-            "SELECT e.id, e.kind FROM entities e WHERE e.campaign_id = ? AND (e.name = ? COLLATE NOCASE"
-            f" OR e.id IN (SELECT entity_id FROM aliases WHERE alias = ?{alias_filter}))"
-            " ORDER BY e.name = ? COLLATE NOCASE DESC, e.id",  # its own name before someone's alias
-            (self.campaign.id, name.strip(), name.strip(), name.strip()),
-        ).fetchall()
+        rows = self._named(name, every_alias)
         if not rows:
             return None
         best = next((r for r in rows if r["kind"] == kind), rows[0])
         return self.entity(best["id"])
+
+    def _named(self, name: str, every_alias: bool = False) -> list[sqlite3.Row]:
+        """Every entity called `name`, by canonical name or alias: its own name before someone's alias."""
+        alias_filter = "" if every_alias else self._alias_filter
+        return self.conn.execute(
+            "SELECT e.id, e.kind FROM entities e WHERE e.campaign_id = ? AND (e.name = ? COLLATE NOCASE"
+            f" OR e.id IN (SELECT entity_id FROM aliases WHERE alias = ?{alias_filter}))"
+            " ORDER BY e.name = ? COLLATE NOCASE DESC, e.id",
+            (self.campaign.id, name.strip(), name.strip(), name.strip()),
+        ).fetchall()
+
+    def creature(self, name: str, exclude: set[int] = frozenset()) -> dict[str, Any] | None:
+        """The entity to run when a fight names `name`: of everything called that, one with a stat
+        block (its own or one it uses) first, then a creature rather than lore or a place ("Sydon" is
+        both a piece of lore and the Titan, Sydon, Lord of Storms, whose block it is)."""
+        rows = [r for r in self._named(name) if r["id"] not in exclude]
+        creatures = [r for r in rows if _family(r["kind"]) == "creature" or r["kind"] == "pc"]
+        armed = next((r for r in creatures if self.stat_block(r["id"])), None)
+        best = armed or (creatures[0] if creatures else rows[0] if rows else None)
+        return self.entity(best["id"]) if best else None
 
     def ensure_entity(self, name: str, kind: str) -> dict[str, Any]:
         found = self.resolve(name, kind)
@@ -511,8 +525,7 @@ class World:
             uses = self.attribute_values(e["id"], USES_STAT_BLOCK)
             if not uses:
                 return None
-            e = next((hit for n in _singulars(uses[-1].strip())
-                      if (hit := self.resolve(n, kind="monster")) and hit["id"] not in seen), None)
+            e = next((hit for n in _singulars(uses[-1].strip()) if (hit := self.creature(n, exclude=seen))), None)
         return None
 
     def list(self, kind: str | None = None, q: str | None = None, in_play: bool = False) -> list[dict[str, Any]]:
