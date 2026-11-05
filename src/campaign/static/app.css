@@ -586,6 +586,10 @@ button.send { width: 2.3rem; height: 2.3rem; padding: 0; border-radius: 50%; fon
   border-bottom: 1px solid var(--rule); padding-bottom: .1rem;
 }
 .statblock-wrap > .fact-meta { margin: -.6rem 0 0; }
+.sb-type { margin: .1rem 0 0; font-style: italic; font-size: .85rem; }
+.sb-section h5 .uses { margin-left: .2rem; vertical-align: .1rem; }
+.sb-intro { font-style: italic; }
+.sb-spells { display: block; margin: .15rem 0 0 .8rem; }
 
 /* -- the world's entries -------------------------------------------------------------- */
 

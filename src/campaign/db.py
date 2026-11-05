@@ -89,7 +89,7 @@ END;
 -- the same module into another campaign, reuses every unchanged node.
 CREATE TABLE digests (
     key            TEXT PRIMARY KEY,
-    kind           TEXT NOT NULL CHECK (kind IN ('leaf', 'branch')),
+    kind           TEXT NOT NULL CHECK (kind IN ('leaf', 'branch', 'statblock')),
     output         TEXT NOT NULL,
     model          TEXT NOT NULL,
     input_tokens   INTEGER NOT NULL DEFAULT 0,
@@ -97,7 +97,8 @@ CREATE TABLE digests (
     created_at     TEXT NOT NULL
 );
 
--- The digest tree for a source as last planned: which node maps to which key.
+-- The digest plan for a source as last made: which node maps to which key. The tree
+-- (leaves and branches), then each stat block, read on its own, beside it (no parent).
 CREATE TABLE digest_nodes (
     id          INTEGER PRIMARY KEY,
     source_id   INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
@@ -107,7 +108,7 @@ CREATE TABLE digest_nodes (
     title       TEXT NOT NULL,
     page_start  INTEGER,
     page_end    INTEGER,
-    is_leaf     INTEGER NOT NULL,
+    kind        TEXT NOT NULL CHECK (kind IN ('leaf', 'branch', 'statblock')),
     chars       INTEGER NOT NULL DEFAULT 0,
     digest_key  TEXT,
     error       TEXT
@@ -438,20 +439,46 @@ CREATE INDEX inventory_log_campaign ON inventory_log(campaign_id, id);
 # While this is a prototype there are no migrations: a schema change edits
 # SCHEMA and bumps the version, and if the data in the one deployment is worth
 # keeping, a step from the version before goes in UPGRADES until it has run.
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 
 # Steps that bring the deployed database up to SCHEMA_VERSION, keyed by the
 # version they start from. Delete each once the deployment has taken it.
 # They run with foreign keys off, so a table can be rebuilt without its
 # dependents cascading away; references are checked afterwards.
 UPGRADES: dict[int, str] = {
-    # 18: where a character's sheet is kept, and what a mirrored one was last read from.
-    18: """
-ALTER TABLE characters ADD COLUMN sheet_source TEXT NOT NULL DEFAULT 'app'
-    CHECK (sheet_source IN ('app', 'elsewhere', 'dndbeyond'));
-ALTER TABLE characters ADD COLUMN synced_at TEXT;
-ALTER TABLE characters ADD COLUMN synced_blob TEXT;
-UPDATE characters SET sheet_source = 'elsewhere' WHERE sheet IS NULL;
+    # 19: stat blocks are read on their own, beside the digest tree.
+    19: """
+CREATE TABLE digests_new (
+    key            TEXT PRIMARY KEY,
+    kind           TEXT NOT NULL CHECK (kind IN ('leaf', 'branch', 'statblock')),
+    output         TEXT NOT NULL,
+    model          TEXT NOT NULL,
+    input_tokens   INTEGER NOT NULL DEFAULT 0,
+    output_tokens  INTEGER NOT NULL DEFAULT 0,
+    created_at     TEXT NOT NULL
+);
+INSERT INTO digests_new SELECT * FROM digests;
+DROP TABLE digests;
+ALTER TABLE digests_new RENAME TO digests;
+CREATE TABLE digest_nodes_new (
+    id          INTEGER PRIMARY KEY,
+    source_id   INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    parent_id   INTEGER REFERENCES digest_nodes(id) ON DELETE CASCADE,
+    seq         INTEGER NOT NULL,
+    depth       INTEGER NOT NULL,
+    title       TEXT NOT NULL,
+    page_start  INTEGER,
+    page_end    INTEGER,
+    kind        TEXT NOT NULL CHECK (kind IN ('leaf', 'branch', 'statblock')),
+    chars       INTEGER NOT NULL DEFAULT 0,
+    digest_key  TEXT,
+    error       TEXT
+);
+INSERT INTO digest_nodes_new SELECT id, source_id, parent_id, seq, depth, title, page_start, page_end,
+    CASE WHEN is_leaf THEN 'leaf' ELSE 'branch' END, chars, digest_key, error FROM digest_nodes;
+DROP TABLE digest_nodes;
+ALTER TABLE digest_nodes_new RENAME TO digest_nodes;
+CREATE INDEX digest_nodes_source ON digest_nodes(source_id, seq);
 """,
 }
 
@@ -813,9 +840,9 @@ class Store:
             for seq, r in enumerate(rows):
                 ids.append(self.conn.execute(
                     "INSERT INTO digest_nodes (source_id, parent_id, seq, depth, title, page_start,"
-                    " page_end, is_leaf, chars, digest_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " page_end, kind, chars, digest_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (source_id, None if r["parent"] is None else ids[r["parent"]], seq, r["depth"],
-                     r["title"], r["page_start"], r["page_end"], int(r["is_leaf"]), r["chars"], r["key"]),
+                     r["title"], r["page_start"], r["page_end"], r["kind"], r["chars"], r["key"]),
                 ).lastrowid)
         return ids
 
@@ -1031,7 +1058,7 @@ class Store:
     def existing_digest_plan(self, source_id: int) -> list[dict[str, Any]]:
         """The saved plan's rows in order, with each parent as an index into the list."""
         rows = [dict(r) for r in self.conn.execute(
-            "SELECT id, parent_id, title, is_leaf, chars, digest_key, error FROM digest_nodes"
+            "SELECT id, parent_id, title, kind, chars, digest_key, error FROM digest_nodes"
             " WHERE source_id = ? ORDER BY seq", (source_id,))]
         index = {r["id"]: i for i, r in enumerate(rows)}
         for r in rows:
@@ -1085,11 +1112,12 @@ class Store:
         return row["source_id"], json.loads(row["output"]) if row["output"] else None
 
     def digest_outline(self, source_id: int) -> list[dict[str, Any]]:
-        """The digest tree with each node's summary (None until digested)."""
+        """The digest tree with each node's summary (None until digested); not the stat blocks."""
         rows = self.conn.execute(
-            "SELECT n.id, n.parent_id, n.depth, n.title, n.page_start, n.page_end, n.is_leaf,"
+            "SELECT n.id, n.parent_id, n.depth, n.title, n.page_start, n.page_end, n.kind,"
             " n.chars, n.error, d.output FROM digest_nodes n"
-            " LEFT JOIN digests d ON d.key = n.digest_key WHERE n.source_id = ? ORDER BY n.seq",
+            " LEFT JOIN digests d ON d.key = n.digest_key WHERE n.source_id = ? AND n.kind != 'statblock'"
+            " ORDER BY n.seq",
             (source_id,),
         )
         out = []
@@ -1106,19 +1134,23 @@ class Store:
         return None if row is None else row["source_id"]
 
     def source_catalog(self, source_id: int) -> list[dict[str, Any]]:
-        """The entities the digest found in a source, once its root is digested."""
-        row = self.conn.execute(
-            "SELECT d.output FROM digest_nodes n JOIN digests d ON d.key = n.digest_key"
-            " WHERE n.source_id = ? AND n.parent_id IS NULL",
+        """The entities the digest found in a source, once its root is digested, and its stat blocks
+        read so far (see digest.catalog)."""
+        rows = self.conn.execute(
+            "SELECT n.kind, d.output FROM digest_nodes n JOIN digests d ON d.key = n.digest_key"
+            " WHERE n.source_id = ? AND n.parent_id IS NULL ORDER BY n.seq",
             (source_id,),
-        ).fetchone()
-        return json.loads(row["output"])["entities"] if row else []
+        ).fetchall()
+        if not rows or rows[0]["kind"] == "statblock":  # the tree's root isn't done yet
+            return []
+        return [e for r in rows for e in json.loads(r["output"])["entities"]]
 
     def roll_tables(self, campaign: Campaign) -> list[dict[str, Any]]:
         """The tables to roll on that the digest found in the campaign's visible sources."""
         out = []
         for r in self.conn.execute(
-            "SELECT s.title, d.output FROM sources s JOIN digest_nodes n ON n.source_id = s.id AND n.parent_id IS NULL"
+            "SELECT s.title, d.output FROM sources s JOIN digest_nodes n ON n.source_id = s.id"
+            " AND n.parent_id IS NULL AND n.kind != 'statblock'"
             f" JOIN digests d ON d.key = n.digest_key WHERE {self._visible_sources_clause(campaign)} ORDER BY s.id",
             (campaign.id,),
         ):
