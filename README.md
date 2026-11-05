@@ -108,9 +108,9 @@ uv run campaign web            # http://127.0.0.1:8765
     for the breakdown into cached and uncached input).
     The tab opens ready for a new question. Conversations are kept (per
     person): the latest few are listed under the suggestions, the rest
-    behind "All N conversations" (and "Delete all", for a clean start;
-    encounters made in them are kept), and each has its own link, so a
-    reload or going back keeps your place. In a player campaign it only knows
+    behind "All N conversations" (an encounter made in one is kept if
+    it's deleted), and each has its own link, so a reload or going back
+    keeps your place. In a player campaign it only knows
     what the party knows. With editor
     access it can also record what you tell it happened.
   - **Encounters**: every fight the assistant has put together for you,

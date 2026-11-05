@@ -910,11 +910,6 @@ def create_app(
         s.set_conversation_title(conversation_id, body.title.strip()[:120])
         return s.conversation(conversation_id)
 
-    @app.delete("/api/campaigns/{slug}/chats", status_code=204)
-    def delete_chats(request: Request, c: Campaign = Depends(reader), s: Store = Depends(store)) -> None:
-        """Every conversation of mine in this campaign. The encounters made in them stay."""
-        s.delete_conversations(c, None if local else user_of(request)["id"])
-
     @app.delete("/api/campaigns/{slug}/chats/{conversation_id}", status_code=204)
     def delete_chat(conversation_id: int, request: Request, c: Campaign = Depends(reader), s: Store = Depends(store)) -> None:
         my_conversation(s, request, c, conversation_id)

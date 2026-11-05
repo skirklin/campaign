@@ -105,8 +105,8 @@ def test_the_tool_saves_the_fight_and_hands_back_the_card(tmp_path):
         assert client.patch(base, json={"state": state}).json()["state"] == state
         assert client.get(base).json()["state"] == state
         assert client.patch(base, json={"title": "The crypt"}).json()["title"] == "The crypt"
-        # Clearing the conversations keeps the encounters made in them.
-        assert client.delete("/api/campaigns/chateau/chats").status_code == 204
+        # Deleting the conversation it was made in keeps the encounter.
+        assert client.delete(f"/api/campaigns/chateau/chats/{conv}").status_code == 204
         assert client.get("/api/campaigns/chateau/chats").json() == []
         e = client.get(base).json()
         assert e["conversation_id"] is None and e["state"] == state

@@ -1164,9 +1164,6 @@ a.button.primary { background: var(--accent); border-color: var(--accent); color
 .lair-actions ul { margin: .3rem 0 0; padding-left: 1.1rem; }
 .combatant .statblock-card { margin: .6rem 0 .1rem; }
 .tracker-end { margin: 1.2rem 0; display: flex; justify-content: flex-end; }
-.chat-history-foot { display: flex; justify-content: space-between; align-items: baseline; }
-.chat-history button.clear-chats { text-decoration: none; }
-.chat-history button.clear-chats:hover { color: var(--danger); }
 
 /* Stat block entries you can roll. */
 .action-roll {

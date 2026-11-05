@@ -995,13 +995,6 @@ class Store:
         with self.conn:
             self.conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
 
-    def delete_conversations(self, campaign: Campaign, user_id: int | None) -> int:
-        """Every conversation one person has had in a campaign. Their encounters stay."""
-        with self.conn:
-            return self.conn.execute(
-                "DELETE FROM conversations WHERE campaign_id = ? AND user_id IS ?", (campaign.id, user_id)
-            ).rowcount
-
     # -- encounters ------------------------------------------------------------------
 
     def create_encounter(self, campaign: Campaign, user_id: int | None, conversation_id: int | None,
