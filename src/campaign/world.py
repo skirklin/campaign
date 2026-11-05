@@ -53,6 +53,16 @@ TREASURE = "Treasure: "  # starts the statement of each thing of value the book 
 # Attributes too long to list among an entity's current values. "mechanics" is an item's
 # definition, what it does for whoever has it equipped (charsheet.ItemMechanics, as JSON).
 BULKY = ("stat_block", "read_aloud", "mechanics")
+USES_STAT_BLOCK = "uses_stat_block"  # the name of the creature whose stat block an entity runs on
+
+
+def _singulars(name: str) -> list[str]:
+    """A stat block's name as given, then as singular as English plurals allow ("scouts", "wolves")."""
+    out = [name]
+    for plural, single in (("ves", "f"), ("ies", "y"), ("es", ""), ("s", "")):
+        if name.lower().endswith(plural) and len(name) > len(plural) + 1:
+            out.append(name[: -len(plural)] + single)
+    return list(dict.fromkeys(out))
 
 
 def _naming(alias: str) -> bool:
@@ -488,6 +498,23 @@ class World:
         return [f["value"] for f in self.facts(entity_id) if f["attribute"] == attribute
                 and f["valid_to"] is None and f["modality"] == "fact" and f["value"]]
 
+    def stat_block(self, entity_id: int) -> tuple[dict[str, Any], dict[str, Any]] | None:
+        """The stat block to run a creature with, and the entity it's from: the creature's own (the
+        latest, if the book gives several), or else the one it uses ("Aetala (NG veteran)": the
+        veteran's), followed a few steps at most. None if neither is in this viewer's material."""
+        seen: set[int] = set()
+        e = self.entity(entity_id)
+        while e is not None and e["id"] not in seen and len(seen) < 4:
+            seen.add(e["id"])
+            if blocks := self.attribute_values(e["id"], "stat_block"):
+                return json.loads(blocks[-1]), e
+            uses = self.attribute_values(e["id"], USES_STAT_BLOCK)
+            if not uses:
+                return None
+            e = next((hit for n in _singulars(uses[-1].strip())
+                      if (hit := self.resolve(n, kind="monster")) and hit["id"] not in seen), None)
+        return None
+
     def list(self, kind: str | None = None, q: str | None = None, in_play: bool = False) -> list[dict[str, Any]]:
         """Entities with their current attributes and fact counts.
 
@@ -630,6 +657,9 @@ class World:
                     run, 0, attribute="stat_block", value=json.dumps(sb), party_knows=known,
                     source_id=source_id, pages=pages,
                 )
+            if (uses := item.get("stat_block_of")) and not item.get("stat_block"):
+                self.record(e["id"], f"Uses the {uses} stat block", run, 0, attribute=USES_STAT_BLOCK, value=uses,
+                            party_knows=known, source_id=source_id, pages=pages)
             if text := item.get("read_aloud"):
                 self.record(e["id"], f"Read aloud: {text}", run, 0, attribute="read_aloud", value=text,
                             party_knows=known, source_id=source_id, pages=pages)

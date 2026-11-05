@@ -183,7 +183,7 @@ def test_digest_endpoints_and_original_kept(client, monkeypatch):
 
     outline = client.get(f"/api/campaigns/strahd/sources/{r['id']}/outline").json()
     assert outline[0]["parent_id"] is None and outline[0]["summary"].startswith("Branch summary")
-    leaf = next(n for n in outline if n["is_leaf"] and n["entity_count"])
+    leaf = next(n for n in outline if n["kind"] == "leaf" and n["entity_count"])
     node = client.get(f"/api/campaigns/strahd/sources/{r['id']}/outline/{leaf['id']}").json()
     assert node["summary"] == leaf["summary"] and len(node["entities"]) == leaf["entity_count"]
     assert client.get(f"/api/campaigns/strahd/sources/{r['id'] + 1}/outline/{leaf['id']}").status_code == 404

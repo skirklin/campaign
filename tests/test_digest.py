@@ -10,7 +10,7 @@ import pytest
 
 from campaign import digest, library
 from campaign.db import Store
-from campaign.digest import BranchOutput, Entity, LeafOutput, Merge, RollTable, TableRow
+from campaign.digest import BranchOutput, Entity, LeafOutput, Merge, RollTable, StatBlock, StatBlockOutput, TableRow
 from campaign.ingest import parse_pdf
 from campaign.tools import ToolContext, build_tools
 from campaign.world import World
@@ -40,26 +40,33 @@ class FakeDigest:
     """Stands in for Claude. Leaves: entities come from ENTITY lines.
     Branches: merges entities whose alias is another entity's name."""
 
-    def __init__(self, fail_on: str | None = None, text_sensitive: bool = False):
+    def __init__(self, fail_on: str | None = None, text_sensitive: bool = False, fail_kind: str | None = None):
         self.calls: list[tuple[str, str]] = []
         self.fail_on = fail_on
+        self.fail_kind = fail_kind
         self.text_sensitive = text_sensitive
         self.beta = NS(messages=NS(stream=self.stream))
 
     def stream(self, **kw):
         user = kw["messages"][0]["content"]
         title = re.sub(r" \(pp?\..*\)$", "", user.split("\n", 1)[0].removeprefix("Section: "))
-        kind = "leaf" if kw["output_format"] is LeafOutput else "branch"
+        kind = {LeafOutput: "leaf", BranchOutput: "branch", StatBlockOutput: "statblock"}[kw["output_format"]]
+        if kind == "statblock":
+            parsed = fake_stat_block(user)
+            title = parsed.stat_block.name if parsed.stat_block else "?"
         self.calls.append((kind, title))
-        if self.fail_on and self.fail_on in title:
+        if self.fail_on and self.fail_on in title and self.fail_kind in (None, kind):
             raise RuntimeError("boom")
-        if kind == "leaf":
+        if kind == "statblock":
+            pass
+        elif kind == "leaf":
             ents = []
             for m in re.finditer(r"^ENTITY (\w+) ([^|\n]+?)(?: \| (.+))?$", user, re.M):
                 key = re.search(rf"^KEY {re.escape(m[2])} (\S+)$", user, re.M)
                 ents.append(Entity(
                     name=m[2], kind=m[1], aliases=[m[3]] if m[3] else [], summary=f"{m[2]} in {title}",
-                    pages=[], facts=[f"seen in {title}"], stat_block=None, area_key=key[1] if key else None,
+                    pages=[], facts=[f"seen in {title}"], area_key=key[1] if key else None,
+                    stat_block_of=(re.findall(rf"^USES {re.escape(m[2])}: (.+)$", user, re.M) or [None])[0],
                     read_aloud=None, treasure=re.findall(rf"^TREASURE {re.escape(m[2])}: (.+)$", user, re.M),
                 ))
             tables = [
@@ -84,6 +91,36 @@ class FakeDigest:
                 summary += f" ({len(user)} chars)"
             parsed = BranchOutput(summary=summary, merges=merges)
         return FakeStream(NS(stop_reason="end_turn", parsed_output=parsed, usage=NS(input_tokens=100, output_tokens=10)))
+
+
+def fake_stat_block(text):
+    """The marked stat block in `text`, read the way the prompt asks: its title, its numbers, and its
+    entries under their headings (the senses line left out, for the check against the text to put back)."""
+    before, after = text.split(digest.MARK)
+    titles = re.findall(r"^#+ (.+)$", before, re.M)
+    if not titles or "Ship" in titles[-1]:
+        return StatBlockOutput(found=False, stat_block=None)
+    field = lambda label: (re.search(rf"^{label} (.+)$", after, re.M) or [None, None])[1]  # noqa: E731
+    sections, current = {"traits": [], "actions": [], "legendary_actions": []}, "traits"
+    intro = None
+    for line in after.split("Challenge", 1)[1].splitlines()[1:]:
+        if line.startswith("#"):
+            break
+        if line.strip() in ("Actions", "Legendary Actions"):
+            current = line.strip().lower().replace(" ", "_")
+        elif line.strip():
+            if current == "legendary_actions" and "legendary actions" in line:
+                intro = line.strip()
+            else:
+                sections[current].append(line.strip())
+    return StatBlockOutput(found=True, stat_block=StatBlock(
+        name=titles[-1], size_type=(re.findall(r"^_(.+)_$", before, re.M) or [""])[-1], armor_class=re.match(r"Armor Class (.+)", after)[1],
+        hit_points=field("Hit Points"), speed=field("Speed") or "30 ft.", initiative=None,
+        strength=10, dexterity=12, constitution=10, intelligence=10, wisdom=10, charisma=10,
+        saving_throws=None, skills=None, damage_vulnerabilities=None, damage_resistances=None,
+        damage_immunities=field("Damage Immunities"), condition_immunities=None, senses=None, languages=None,
+        challenge=field("Challenge"), bonus_actions=[], reactions=[], legendary_intro=intro, lair_intro=None,
+        lair_actions=[], other=[], **sections))
 
 
 @pytest.fixture
@@ -231,7 +268,7 @@ def test_packing_small_siblings(tmp_path):
     store = Store(tmp_path / "p.db")
     camp = store.create_campaign("P", "dm")
     r = library.add_reference(store, camp, f"# Dungeon\n{rooms}".encode(), "d.md")
-    leaves = [n["title"] for n in store.digest_outline(r["id"]) if n["is_leaf"]]
+    leaves = [n["title"] for n in store.digest_outline(r["id"]) if n["kind"] == "leaf"]
     assert leaves == ["Room 1; Room 2; Room 3", "Room 4; Room 5"]
 
 
@@ -241,7 +278,7 @@ def test_long_section_is_split(tmp_path, monkeypatch):
     camp = store.create_campaign("S", "dm")
     body = "\n\n".join("para " * 100 for _ in range(20))  # ~10k chars
     r = library.add_reference(store, camp, f"# Long\n{body}".encode(), "l.md")
-    titles = [n["title"] for n in store.digest_outline(r["id"]) if n["is_leaf"]]
+    titles = [n["title"] for n in store.digest_outline(r["id"]) if n["kind"] == "leaf"]
     assert len(titles) >= 3 and all("(part" in t for t in titles)
 
 
@@ -577,28 +614,145 @@ def test_one_limit_on_calls_in_flight_across_sources(env, monkeypatch):
     assert most == 2 and store.digest_status(a["id"])["done"] == 8
 
 
-def test_a_stat_block_gets_back_the_lines_the_model_dropped():
-    text = """# Swarm of Trickered Treats
+def test_finding_stat_blocks_in_a_clean_book():
+    goblin, ogre = digest.find_stat_blocks([
+        {"page": 4, "heading": "Bestiary > Goblin", "text": "## Goblin\n\n_Small humanoid, neutral evil_\n\n"
+         "**Armor Class** 15 (leather armor, shield)\n**Hit Points** 7 (2d6)\n\n***Scimitar.*** Melee Weapon Attack"},
+        {"page": 5, "heading": "Bestiary > Ogre", "text": "## Ogre\n\n_Large giant, chaotic evil_\n\n"
+         "**AC** 11 **Initiative** -1 (9)\n**Hit Points** 59 (7d10 + 21)\n\n***Greatclub.*** Melee Weapon Attack"},
+        {"page": 6, "heading": "Bestiary > Rules", "text": "A creature's AC is how hard it is to hit."},
+    ])
+    assert (goblin.title, goblin.page_start, ogre.title, ogre.page_start) == ("Stat block: Goblin", 4, "Stat block: Ogre", 5)
+    # Each from its title to the next block's title, with its own Armor Class line marked.
+    assert goblin.text.startswith("Section: Bestiary > Goblin\n\n### Goblin") and "Scimitar" in goblin.text and "Ogre" not in goblin.text
+    assert goblin.text.count(digest.MARK) == 1 and f"{digest.MARK}**Armor Class** 15" in goblin.text
+    assert "Greatclub" in ogre.text and "how hard it is" in ogre.text
+    assert f"{digest.MARK}**AC** 11" in ogre.text
 
-_Medium swarm of Tiny constructs_
 
-**AC** 12 **Initiative** +2 (12)<br />
-**Hit Points** 28 (4d8 + 10)<br />
+def test_a_block_under_a_generic_heading_is_named_by_its_section():
+    (treat,) = digest.find_stat_blocks([
+        {"page": None, "heading": "Monsters > Swarm of Trickered Treats > Description", "text": "Candy piles."},
+        {"page": None, "heading": "Monsters > Swarm of Trickered Treats > Attributes",
+         "text": "_Medium swarm of Tiny constructs_\n\n**AC** 12 **Initiative** +2 (12)<br />\n**Hit Points** 28 (4d8 + 10)"},
+    ])
+    assert treat.title == "Stat block: Swarm of Trickered Treats"
+    assert treat.text.startswith("Section: Monsters > Swarm of Trickered Treats > Attributes\n\n### Attributes")
 
-**Resistances** Bludgeoning, Piercing, Slashing<br />
-**Immunities** Blinded, Charmed<br />
-**Senses** Blindsight 10 ft., Passive Perception 6<br />
-**Languages** understands the languages of its creator but cannot speak<br />
-**Challenge** 1/4 (50 XP)
 
-The **Swarm of Trickered Treats** Armor Class 99 is just a mention.
+def test_a_stat_block_a_pdf_split_and_interleaved_arrives_whole():
+    """Sydon's block on p. 347 of Odyssey of the Dragonlords, as the PDF's text gives it: its legendary
+    actions under an outline section of their own, and its columns interleaved."""
+    (sydon,) = digest.find_stat_blocks([
+        {"page": 347, "heading": "Sydon, The Lord of Storms > Sydon, The Lord of Storms",
+         "text": "Manipulative. Lutheria is fond of bargaining with"},
+        {"page": 347, "heading": "Sydon, The Lord of Storms > Sydon",
+         "text": "Huge celestial (empyrean), lawful evil\n\nArmor Class 22 (natural)\nHit Points 313 (19d12 + 190)\n"
+                 "Speed 50 ft., fly 50 ft., swim 50 ft.\n\nGlaive. Melee Weapon Attack: +17 to hit, reach 10 ft.\n\n"
+                 "STR\nDEX\nCON\nINT\nWIS\nCHA\n30 (+10) 21 (+5) 30 (+10) 21 (+5) 22 (+6) 27 (+8)\n\n"
+                 "Saving Throws Str +17, Int +12, Wis +13, Cha +15\nDamage Immunities bludgeoning, piercing, and slashing"},
+        {"page": 347, "heading": "Sydon, The Lord of Storms > Legendary Actions",
+         "text": "from nonmagical attacks\nSenses truesight 120 ft., passive Perception 16\nLanguages all\n"
+                 "Challenge 23 (50,000 XP)\n\nSydon can take 3 legendary actions, choosing from\nthe options below.\n\n"
+                 "Attack. Sydon makes one attack with his glaive or bolt.\nTremor Strike (Costs 2 Actions). Sydon strikes the"},
+    ])
+    assert sydon.title == "Stat block: Sydon" and sydon.page_start == 347
+    assert sydon.text.startswith("Section: Sydon, The Lord of Storms > Sydon\n\n### Sydon\n")
+    assert "Lutheria" not in sydon.text
+    assert "Tremor Strike" in sydon.text and f"{digest.MARK}Armor Class 22" in sydon.text
+    # The labelled lines the reading leaves out are put back from the text; what it gave is kept.
+    got = digest.fill_missing_lines({"name": "Sydon", "senses": None, "languages": "all", "skills": None}, sydon.text)
+    assert got["senses"] == "truesight 120 ft., passive Perception 16" and got["languages"] == "all"
+    assert got["saving_throws"] == "Str +17, Int +12, Wis +13, Cha +15" and got["skills"] is None
+
+
+BESTIARY = """\
+# Bestiary
+## Titans
+ENTITY npc Sydon, Lord of Storms | Sydon
+Sydon rules the storms.
+
+### Sydon
+_Huge celestial (empyrean), lawful evil_
+
+Armor Class 22 (natural)
+Hit Points 313 (19d12 + 190)
+Speed 50 ft., fly 50 ft.
+Damage Immunities lightning
+Senses truesight 120 ft., passive Perception 16
+Challenge 23 (50,000 XP)
+Magic Resistance. Sydon has advantage on saving throws against spells.
+Actions
+Glaive. Melee Weapon Attack: +17 to hit, reach 10 ft., one target. Hit: 23 (3d8 + 10) slashing damage.
+Legendary Actions
+Sydon can take 3 legendary actions, choosing from the options below.
+Attack. Sydon makes one attack with his glaive.
+
+## Beasts
+ENTITY monster The Hill Wolf | the grey wolf
+USES The Hill Wolf: wolves
+The hill wolf hunts the shepherds.
+
+### Wolf
+_Medium beast, unaligned_
+
+Armor Class 13 (natural armor)
+Hit Points 11 (2d8 + 2)
+Challenge 1/4 (50 XP)
+Bite. Melee Weapon Attack: +4 to hit, reach 5 ft., one target. Hit: 7 (2d4 + 2) piercing damage.
+
+### The Ultros Ship
+Armor Class 15
+Hit Points 300
 """
-    sb = {"armor_class": "12", "other": ["Senses blindsight 10 ft., passive Perception 6", "Immunity: blinded, charmed"]}
-    got = digest.complete_stat_block(sb, text, "Swarm of Trickered Treats")
-    assert got["other"] == [
-        "Senses blindsight 10 ft., passive Perception 6", "Immunity: blinded, charmed",
-        "Damage Resistances Bludgeoning, Piercing, Slashing",
-        "Languages understands the languages of its creator but cannot speak",
-    ]
-    assert digest.complete_stat_block(got, text, "Swarm of Trickered Treats") == got  # nothing more to add
-    assert digest.complete_stat_block(sb, text, "Imp") == sb  # not in this text: left alone
+
+
+def test_stat_blocks_are_read_on_their_own_and_join_the_world(env):
+    store, camp, db = env
+    r = library.add_reference(store, camp, BESTIARY.encode(), "bestiary.md", title="Bestiary", kind="module")
+    fake = FakeDigest()
+    stats = digest.run(db, r["id"], client=fake)
+    assert stats["failed"] == 0
+    assert sorted(t for k, t in fake.calls if k == "statblock") == ["?", "Sydon", "Wolf"]  # the ship isn't one
+    status = store.digest_status(r["id"])
+    assert status["total"] == status["done"] == stats["nodes"]
+    assert [n["kind"] for n in store.digest_outline(r["id"])].count("statblock") == 0  # beside the tree
+
+    world = World(store, camp)
+    # Sydon's block joins the Sydon the book's text named; the wolf, which nothing named, is a monster of its own.
+    sydon = world.resolve("Sydon, Lord of Storms")
+    (sb,) = [json.loads(v) for v in world.attribute_values(sydon["id"], "stat_block")]
+    assert sb["legendary_intro"].startswith("Sydon can take 3") and sb["legendary_actions"] == [
+        "Attack. Sydon makes one attack with his glaive."]
+    assert sb["senses"] == "truesight 120 ft., passive Perception 16"  # put back from the text
+    assert world.resolve("Wolf")["kind"] == "monster"
+    # A creature the book runs on another's block gets that block, by the name the book gave it.
+    sb, source = world.stat_block(world.resolve("the grey wolf")["id"])
+    assert source["name"] == "Wolf" and sb["hit_points"] == "11 (2d8 + 2)"
+
+    tools = {t.__name__: t for t in build_tools(ToolContext(store, camp))}
+    text = tools["stat_block"]("Sydon")
+    assert text.startswith("Sydon, Lord of Storms\nHuge celestial (empyrean), lawful evil\nAC 22 (natural) · HP 313")
+    assert "\nDamage Immunities lightning\n" in text
+    assert "Legendary Actions:\nSydon can take 3 legendary actions, choosing from the options below.\n- Attack." in text
+
+    # Everything is cached: running again calls nothing, and another campaign gets it free.
+    again = FakeDigest()
+    assert digest.run(db, r["id"], client=again)["digested"] == 0 and again.calls == []
+    other = store.create_campaign("Other", "dm")
+    r2 = library.add_reference(store, other, BESTIARY.encode(), "bestiary.md", title="Bestiary", kind="module")
+    assert r2["pending"] == 0
+    assert World(store, other).attribute_values(World(store, other).resolve("Wolf")["id"], "stat_block")
+
+
+def test_a_failed_stat_block_doesnt_hold_up_the_book(env, monkeypatch):
+    store, camp, db = env
+    r = library.add_reference(store, camp, BESTIARY.encode(), "bestiary.md", title="Bestiary", kind="module")
+    stats = digest.run(db, r["id"], client=FakeDigest(fail_on="Wolf", fail_kind="statblock"))
+    assert stats["failed"] == 1
+    world = World(store, camp)
+    assert world.attribute_values(world.resolve("Sydon")["id"], "stat_block")  # applied without the wolf's
+    assert world.resolve("Wolf") is None
+    digest.retry_failed(store, r["id"])
+    digest.run(db, r["id"], client=FakeDigest())
+    assert world.attribute_values(world.resolve("Wolf")["id"], "stat_block")  # and again once it's read

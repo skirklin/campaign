@@ -260,15 +260,17 @@ function actionControls(name, body) {
   return out;
 }
 
-// The stat_block tool's text: name, "AC … · HP … · Speed … · CR …", ability line, other
-// lines, then "Traits:", "Actions:" (or other) sections of "- " items. Anything that
-// doesn't look like that is shown as it is.
+// The stat_block tool's text (tools.format_stat_block): name, the type line, "AC … · HP … · Speed …
+// · CR …", the ability line, labelled lines, then "Traits:", "Actions:", "Legendary Actions:" (and
+// so on) sections, each an optional opening paragraph and "- " entries. Anything that doesn't look
+// like that is shown as it is.
 export function statBlockFromText(text) {
   const lines = text.split("\n").map((l) => l.trim());
   const name = lines.shift() || "";
+  const type = /^AC\s/i.test(lines[0] || "") ? "" : lines.shift() || "";
   const top = lines.shift() || "";
   const parts = Object.fromEntries(top.split(/\s+·\s+/).map((p) => {
-    const m = p.match(/^(AC|HP|Speed|CR)\s+(.*)$/i);
+    const m = p.match(/^(AC|Initiative|HP|Speed|CR)\s+(.*)$/i);
     return m ? [m[1].toLowerCase(), m[2]] : [p, ""];
   }));
   if (!parts.ac || !parts.hp) return h("pre", h("code", text));
@@ -283,40 +285,80 @@ export function statBlockFromText(text) {
       continue;
     }
     const head = l.match(/^([A-Z][\w ]{1,30}):$/);
-    if (head) { sections.push([head[1], []]); continue; }
+    if (head) { sections.push({ title: head[1], intro: "", items: [] }); continue; }
+    const last = sections[sections.length - 1];
     const item = l.replace(/^[-*•]\s+/, "");
-    if (sections.length && item !== l) sections[sections.length - 1][1].push(item);
-    else if (sections.length) sections[sections.length - 1][1].push(l);
-    else props.push(l);
+    if (!last) props.push(l);
+    else if (item !== l) last.items.push(item);
+    else if (!last.items.length) last.intro = last.intro ? `${last.intro} ${l}` : l;
+    else last.items[last.items.length - 1] += ` ${l}`;
   }
-  return statBlockCard({ name, ac: parts.ac, hp: parts.hp, speed: parts.speed, cr: parts.cr, scores, props, sections });
+  return statBlockCard({ name, type, ac: parts.ac, initiative: parts.initiative, hp: parts.hp, speed: parts.speed,
+    cr: parts.cr, scores, props, sections });
 }
+
+// A stat block's labelled lines and sections, as the books order them (and tools.format_stat_block).
+const SB_LINES = [["saving_throws", "Saving Throws"], ["skills", "Skills"],
+  ["damage_vulnerabilities", "Damage Vulnerabilities"], ["damage_resistances", "Damage Resistances"],
+  ["damage_immunities", "Damage Immunities"], ["condition_immunities", "Condition Immunities"],
+  ["senses", "Senses"], ["languages", "Languages"]];
+const SB_SECTIONS = [["traits", "Traits"], ["actions", "Actions"], ["bonus_actions", "Bonus Actions"],
+  ["reactions", "Reactions"], ["legendary_actions", "Legendary Actions", "legendary_intro"],
+  ["lair_actions", "Lair Actions", "lair_intro"], ["other", "More"]];
 
 // The digest's structured stat block (as stored on the world's entities).
 export function statBlockFromData(name, sb) {
   const scores = {};
   for (const [full, k] of Object.entries(ABILITY_NAMES)) scores[k] = sb[full] ?? null;
   return statBlockCard({
-    name, ac: sb.armor_class, hp: sb.hit_points, speed: sb.speed, cr: sb.challenge, scores,
-    props: sb.other || [],
-    sections: [["Traits", sb.traits || []], ["Actions", sb.actions || []]],
+    name, type: sb.size_type, ac: sb.armor_class, initiative: sb.initiative, hp: sb.hit_points, speed: sb.speed,
+    cr: sb.challenge, scores,
+    props: SB_LINES.filter(([field]) => sb[field]).map(([field, label]) => `${label} ${sb[field]}`),
+    sections: SB_SECTIONS.map(([field, title, intro]) => ({ title, intro: intro ? sb[intro] || "" : "", items: sb[field] || [] })),
   });
 }
 
-function statBlockCard({ name, ac, hp, speed, cr, scores, props, sections }) {
+// How many legendary actions a creature takes a round: "can take 3 legendary actions",
+// "Legendary Action Uses: 3". Three when the block lists them without saying.
+function legendaryUses(intro) {
+  const m = String(intro || "").match(/(\d+)\s+legendary actions|Legendary Action Uses:?\s*(\d+)/i);
+  return m ? Number(m[1] || m[2]) : 3;
+}
+
+const pips = (n, label) => h("span.uses", { title: label }, Array.from({ length: Math.min(n, 9) }, (_, i) =>
+  h("input", { type: "checkbox", "aria-label": `${label} ${i + 1}` })));
+
+// A spellcasting entry's lists, each on a line of its own: "Cantrips (at will):", "3rd level (3 slots):"
+// (with a box per slot), "At will:", "1/day each:".
+const SPELL_LIST = /(Cantrips \(at will\)|At will|\d+(?:st|nd|rd|th)[ -]level \((\d+) slots?\)|\d+\/day(?: each)?)\s*:\s*/gi;
+
+function entryText(name, body) {
+  const marks = [...body.matchAll(SPELL_LIST)];
+  if (!marks.length) return inline(body);
+  const out = [...inline(body.slice(0, marks[0].index).trim())];
+  marks.forEach((m, i) => {
+    const rest = body.slice(m.index + m[0].length, i + 1 < marks.length ? marks[i + 1].index : undefined).trim();
+    out.push(h("span.sb-spells", m[2] ? pips(Number(m[2]), `${name}: ${m[1]} slot`) : "",
+      h("em", `${m[1]}: `), ...inline(rest)));
+  });
+  return out;
+}
+
+function statBlockCard({ name, type, ac, initiative, hp, speed, cr, scores, props, sections }) {
   const entry = (text) => {
     // "Tusk. Melee Weapon Attack: …" -> the name in bold italics, as the books print it.
     const m = text.match(/^([^.:]{2,60}?(?:\([^)]*\))?)\.\s+(.*)$/s);
-    if (!m) return h("p", inline(text));
-    return h("p", h("strong", h("em", `${m[1]}.`)), " ", ...actionControls(m[1], m[2]), ...inline(m[2]));
+    if (!m) return h("p", entryText(name, text));
+    return h("p", h("strong", h("em", `${m[1]}.`)), " ", ...actionControls(m[1], m[2]), ...entryText(m[1], m[2]));
   };
   const hpDice = String(hp || "").match(/\(([^)]*d[^)]*)\)/);
   return h("section.statblock-card",
     h("header",
-      h("h4", name),
+      h("div", h("h4", name), type && h("p.sb-type", type)),
       cr && h("span.sb-cr", `CR ${cr}`)),
     h("div.sb-vitals",
       h("div", h("span.label", "Armor Class"), h("span", ac)),
+      initiative && h("div", h("span.label", "Initiative"), h("span", inline(initiative))),
       h("div", h("span.label", "Hit Points"), h("span", hpDice ? [hp.replace(hpDice[0], "").trim(), " ", ...dice(hpDice[0])] : hp)),
       speed && h("div", h("span.label", "Speed"), h("span", speed))),
     Object.values(scores).some((v) => v !== null && v !== undefined) && h("div.sb-abilities",
@@ -328,10 +370,12 @@ function statBlockCard({ name, ac, hp, speed, cr, scores, props, sections }) {
           mod !== null ? diceChip(mod >= 0 ? `+${mod}` : `${mod}`, parseExpr(`1d20${mod >= 0 ? "+" : ""}${mod}`)) : h("span", ""));
       })),
     props.length > 0 && h("div.sb-props", props.map((p) => {
-      const m = p.match(/^(Saving Throws|Skills|Senses|Languages|Damage \w+|Condition Immunities|Challenge|Proficiency Bonus)\s+(.*)$/i);
+      const m = p.match(/^(Saving Throws|Skills|Senses|Languages|Damage \w+|Condition Immunities|Immunities|Challenge|Proficiency Bonus)\s+(.*)$/i);
       return h("p", m ? [h("strong", m[1]), " ", ...inline(m[2])] : inline(p));
     })),
-    sections.filter(([, items]) => items.length).map(([title, items]) => h("div.sb-section",
-      h("h5", title), items.map(entry))),
+    sections.filter((sec) => sec.items.length || sec.intro).map((sec) => h("div.sb-section",
+      h("h5", sec.title, sec.title === "Legendary Actions" ? [" ", pips(legendaryUses(sec.intro), "Legendary action")] : ""),
+      sec.intro && h("p.sb-intro", inline(sec.intro)),
+      sec.items.map(entry))),
   );
 }

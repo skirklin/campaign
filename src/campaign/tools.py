@@ -27,20 +27,38 @@ def _section(n: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# A stat block's labelled lines and its sections, in the order the books print them.
+STAT_BLOCK_LINES = (
+    ("saving_throws", "Saving Throws"), ("skills", "Skills"),
+    ("damage_vulnerabilities", "Damage Vulnerabilities"), ("damage_resistances", "Damage Resistances"),
+    ("damage_immunities", "Damage Immunities"), ("condition_immunities", "Condition Immunities"),
+    ("senses", "Senses"), ("languages", "Languages"),
+)
+STAT_BLOCK_SECTIONS = (
+    ("traits", "Traits", None), ("actions", "Actions", None), ("bonus_actions", "Bonus Actions", None),
+    ("reactions", "Reactions", None), ("legendary_actions", "Legendary Actions", "legendary_intro"),
+    ("lair_actions", "Lair Actions", "lair_intro"), ("other", "More", None),
+)
+
+
 def format_stat_block(name: str, sb: dict[str, Any]) -> str:
+    """A stat block as text: what the stat_block tool returns, and what a ```statblock fence holds
+    for the app to show as a card (markdown.js reads it back)."""
     def mod(score: int) -> str:
         return f"{score} ({(score - 10) // 2:+d})"
 
     abilities = [(a[:3].upper(), sb.get(a)) for a in
                  ("strength", "dexterity", "constitution", "intelligence", "wisdom", "charisma")]
-    lines = [name, f"AC {sb['armor_class']} · HP {sb['hit_points']} · Speed {sb['speed']}"
-             + (f" · CR {sb['challenge']}" if sb.get("challenge") else "")]
+    top = [f"AC {sb['armor_class']}", sb.get("initiative") and f"Initiative {sb['initiative']}",
+           f"HP {sb['hit_points']}", f"Speed {sb['speed']}", sb.get("challenge") and f"CR {sb['challenge']}"]
+    lines = [name, *([sb["size_type"]] if sb.get("size_type") else []), " · ".join(t for t in top if t)]
     if any(v is not None for _, v in abilities):
         lines.append("  ".join(f"{a} {mod(v) if v is not None else '—'}" for a, v in abilities))
-    lines += sb.get("other") or []
-    for title, items in (("Traits", sb.get("traits")), ("Actions", sb.get("actions"))):
-        if items:
-            lines += ["", f"{title}:", *(f"- {i}" for i in items)]
+    lines += [f"{label} {sb[field]}" for field, label in STAT_BLOCK_LINES if sb.get(field)]
+    for field, title, intro in STAT_BLOCK_SECTIONS:
+        items = sb.get(field) or []
+        if items or (intro and sb.get(intro)):
+            lines += ["", f"{title}:", *([sb[intro]] if intro and sb.get(intro) else []), *(f"- {i}" for i in items)]
     return "\n".join(lines)
 
 
@@ -256,6 +274,9 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
     def stat_block(name: str) -> str:
         """The full stat block of a creature or NPC, as the book prints it, ready to run in combat.
 
+        A creature the book runs on another's stat block ("Aetala (NG veteran)")
+        gets that one, titled with both names: "Aetala (Veteran)".
+
         Args:
             name: Name or alias, e.g. "Morgantha" or "dread boar".
         """
@@ -267,9 +288,12 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         if view is None:
             return f"No creature called {name!r}. Try find_entities(kind='monster')."
         blocks = world.attribute_values(view["id"], "stat_block")
-        if not blocks:
-            return f"{view['name']} has no stat block in the digested material. Try search_reference."
-        return "\n\n".join(format_stat_block(view["name"], json.loads(b)) for b in blocks)
+        if blocks:
+            return "\n\n".join(format_stat_block(view["name"], json.loads(b)) for b in blocks)
+        if found := world.stat_block(view["id"]):
+            sb, source = found
+            return format_stat_block(f"{view['name']} ({source['name']})", sb)
+        return f"{view['name']} has no stat block in the digested material. Try search_reference."
 
     def encounter(creatures: list[encounters.Creature], party_size: int | None = None,
                   party_level: int | None = None) -> str:

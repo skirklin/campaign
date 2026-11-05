@@ -4,20 +4,28 @@ The document's section tree (see ingest.py) is reduced bottom-up:
 
 - A **leaf** is a section's own text. Claude summarizes it and extracts the
   NPCs, monsters, locations, items, quests, factions and lore it mentions,
-  with aliases, pages, facts and stat blocks.
+  with aliases, pages and facts.
 - A **branch** combines its children's digests, never raw text. Claude
   writes a summary of the whole section and says which of the children's
   entities are the same thing under different names. The merge itself is
   done in code.
 
-The root's entities become the source's catalog, which is applied to the
-campaign's world model as facts true from session 0 (see world.py).
+Stat blocks are read on their own, outside the tree. Every stat block in
+the source is found in code by its Armor Class line, wherever the outline
+put it (a PDF often splits one across sections, and interleaves its columns
+with the text around it), and Claude copies each one, word for word, into
+its parts (`find_stat_blocks`, STATBLOCK_SYSTEM).
+
+The root's entities and the stat blocks become the source's catalog, which
+is applied to the campaign's world model as facts true from session 0 (see
+world.py).
 
 Caching works like a Merkle tree. Every node's output is stored under a
 hash of exactly what produced it:
 
-    leaf key   = H("leaf",   LEAF_VERSION,   model, title, text)
-    branch key = H("branch", BRANCH_VERSION, model, title, H(child output) for each child)
+    leaf key       = H("leaf",      LEAF_VERSION,      model, title, text)
+    branch key     = H("branch",    BRANCH_VERSION,    model, title, H(child output) for each child)
+    stat block key = H("statblock", STATBLOCK_VERSION, model, text around it)
 
 so a node is digested again only if its own text changed, or one of its
 children's digests changed. Editing one chapter re-digests that chapter's
@@ -47,8 +55,9 @@ from pydantic import BaseModel
 from .db import Store
 from .loops import LeasedLoop
 
-LEAF_VERSION = 3  # 2: rollable tables, keyed areas, read-aloud text, treasure; 3: claims, placement, sets, checked stat blocks
+LEAF_VERSION = 4  # 2: rollable tables, keyed areas, read-aloud text, treasure; 3: claims, placement, sets; 4: no stat blocks
 BRANCH_VERSION = 2  # 2: stricter merge rules (no merging across kinds, members into groups, shared titles)
+STATBLOCK_VERSION = 1
 MODEL = os.environ.get("CAMPAIGN_DIGEST_MODEL", os.environ.get("CAMPAIGN_MODEL", "claude-opus-5-5"))
 EFFORT = os.environ.get("CAMPAIGN_DIGEST_EFFORT", "medium")
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
@@ -83,19 +92,43 @@ MIN_LEAF_CHARS = 6_000  # shorter sibling sections are packed into one call
 
 
 class StatBlock(BaseModel):
+    """A creature's stat block in its printed parts. Entries are "Name. text", word for word."""
+
+    name: str
+    size_type: str  # "Huge celestial (empyrean), lawful evil"
     armor_class: str
     hit_points: str
     speed: str
+    initiative: str | None  # printed only in 2024-style blocks
     strength: int | None
     dexterity: int | None
     constitution: int | None
     intelligence: int | None
     wisdom: int | None
     charisma: int | None
+    saving_throws: str | None
+    skills: str | None
+    damage_vulnerabilities: str | None
+    damage_resistances: str | None
+    damage_immunities: str | None
+    condition_immunities: str | None
+    senses: str | None
+    languages: str | None
     challenge: str
     traits: list[str]
     actions: list[str]
-    other: list[str]  # saves, skills, senses, languages, reactions, legendary actions
+    bonus_actions: list[str]
+    reactions: list[str]
+    legendary_intro: str | None  # "Sydon can take 3 legendary actions, …"
+    legendary_actions: list[str]
+    lair_intro: str | None
+    lair_actions: list[str]
+    other: list[str]  # anything else under its own heading: "Mythic Actions. …", "Regional Effects. …"
+
+
+class StatBlockOutput(BaseModel):
+    found: bool  # False when the marked line isn't a creature's stat block (a ship, a trap)
+    stat_block: StatBlock | None
 
 
 class Entity(BaseModel):
@@ -105,7 +138,7 @@ class Entity(BaseModel):
     summary: str
     pages: list[int]
     facts: list[str]
-    stat_block: StatBlock | None
+    stat_block_of: str | None  # the creature whose stat block this one uses: "veteran", "sea hag", "great boar"
     area_key: str | None  # a keyed area's map key, e.g. "C3"
     read_aloud: str | None  # boxed text to read to the players
     treasure: list[str]  # what can be found here, or what it carries
@@ -153,7 +186,7 @@ Return:
   Name names. Don't retell it.
 - entities: every distinct thing a GM or player might later ask about by name.
   - npc: named characters
-  - monster: creature types with a stat block here, or a notable encounter
+  - monster: creature types, and notable encounters
   - location: named places, areas, and keyed rooms with distinctive content
   - item: magic items and notable treasure
   - quest: hooks, missions and goals, with who gives them and the reward
@@ -164,7 +197,13 @@ Return:
   as "the hag" or "the burgomaster"); a 1-2 sentence summary; the pages it
   appears on; facts, short standalone statements with numbers copied
   exactly ("Reward: 50 gp each from Ismark", "DC 15 Wisdom save or be
-  charmed"); and stat_block only when the full stat block is in this text.
+  charmed"). Stat blocks are read separately: leave their numbers out of
+  facts. For a creature that runs on another creature's stat block, as books
+  often say ("Aetala (NG veteran)", "two hunters (LG scouts)", "Heleka, a sea
+  hag", a boar that is "the great boar" of the bestiary), give stat_block_of:
+  that stat block's name, singular, as its own heading would title it
+  ("veteran", "scout", "sea hag", "great boar"). Leave it empty for anything
+  with its own stat block here, and for anything else.
   For a keyed area (a numbered or lettered room or site on a map), also give
   area_key, the key as printed ("C3", "12", "K20a"), and put its traps,
   hazards, locks and checks with their DCs in facts. For anything, give
@@ -226,6 +265,53 @@ Return:
   Leave everything else out.
 """
 
+MARK = "▶ "  # starts the Armor Class line of the stat block a call is about
+
+STATBLOCK_SYSTEM = f"""\
+You transcribe one creature's stat block from a tabletop RPG book into its
+parts, for a game master to run at the table from what you return.
+
+The block to transcribe is the one whose Armor Class line starts with
+"{MARK.strip()}". The text around it may hold other stat blocks or prose; ignore
+them. If it came from a PDF, the columns may be interleaved: the block's
+parts can be separated by other text, appear before its Armor Class line,
+or carry on after a page footer. Gather every part that belongs to this
+creature, and only those.
+
+Copy every entry word for word as printed: every number, DC, die, range,
+duration, condition and rider, and every spell in a spell list. Join lines
+the PDF broke and undo hyphenation across lines, but never summarize,
+shorten, reword or leave anything out. If a sentence is cut off where the
+text ends, keep what's there.
+
+- name: the creature's name, as the book titles this stat block.
+- size_type: the size, type and alignment line, as printed.
+- armor_class, hit_points, speed, initiative (2024-style blocks only),
+  saving_throws, skills, damage_vulnerabilities, damage_resistances,
+  damage_immunities, condition_immunities, senses, languages, challenge:
+  each value as printed, without its label ("22 (natural armor)",
+  "313 (19d12 + 190)", "23 (50,000 XP)"). A 2024-style "Immunities" line
+  is split: damage types to damage_immunities, conditions to
+  condition_immunities. Leave out what the block doesn't print.
+- strength … charisma: the ability scores (the score, not the modifier).
+- traits, actions, bonus_actions, reactions, legendary_actions,
+  lair_actions: each entry as one string, its name, a period and its text
+  ("Bite. Melee Weapon Attack: +14 to hit, reach 10 ft., one target. Hit:
+  19 (2d10 + 8) piercing damage."), in the book's order and under the
+  heading the book puts it under. Traits are the entries before Actions.
+  A spellcasting entry is one string with all its spell lines.
+- legendary_intro, lair_intro: the paragraph that opens those sections
+  ("Sydon can take 3 legendary actions, …").
+- other: anything else printed under a heading of its own (mythic actions,
+  regional effects), each as "Heading. text".
+
+The text opens with the heading path of the section the block is in, which
+names the creature when the block's own heading doesn't ("Attributes").
+
+If the marked line isn't a creature's stat block (a ship, a trap, an
+object), return found false and no stat_block.
+"""
+
 
 # -- the tree ------------------------------------------------------------------
 
@@ -241,15 +327,25 @@ class DNode:
     key: str | None = None
     output: dict[str, Any] | None = None
     error: str | None = None
+    statblock: bool = False  # one stat block's text, read on its own (not part of the tree)
+    stat_blocks: list[DNode] = field(default_factory=list)  # the root's: every stat block in the source
 
     @property
     def is_leaf(self) -> bool:
         return not self.children
 
+    @property
+    def kind(self) -> str:
+        return "statblock" if self.statblock else "leaf" if self.is_leaf else "branch"
+
     def walk(self) -> Iterator[DNode]:
         yield self
         for c in self.children:
             yield from c.walk()
+
+    def calls(self) -> list[DNode]:
+        """Every node of a root's plan: the tree, then the stat blocks."""
+        return [*self.walk(), *self.stat_blocks]
 
 
 def _pages(items: list[Any]) -> tuple[int | None, int | None]:
@@ -262,18 +358,32 @@ def _pages(items: list[Any]) -> tuple[int | None, int | None]:
 
 def _render(chunks: list[dict[str, Any]]) -> str:
     """Section text for Claude, with page markers and the local headings."""
+    return _render_spans(chunks)[0]
+
+
+def _render_spans(chunks: list[dict[str, Any]]) -> tuple[str, list[tuple[int, str]]]:
+    """The rendered text, and where each chunk's part of it starts with the chunk's heading path."""
     parts: list[str] = []
+    spans: list[tuple[int, str]] = []
+    size = 0
     page = heading = None
+
+    def add(text: str) -> None:
+        nonlocal size
+        size += len(text) + (2 if parts else 0)
+        parts.append(text)
+
     for c in chunks:
+        spans.append((size + (2 if parts else 0), c["heading"] or ""))
         if c["page"] is not None and c["page"] != page:
             page = c["page"]
-            parts.append(f"[p. {page}]")
+            add(f"[p. {page}]")
         local = c["heading"].split(" > ")[-1] if c["heading"] else ""
         if local and local != heading:
             heading = local
-            parts.append(f"### {local}")
-        parts.append(c["text"])
-    return "\n\n".join(parts)
+            add(f"### {local}")
+        add(c["text"])
+    return "\n\n".join(parts), spans
 
 
 def _leaf(title: str, chunks: list[dict[str, Any]]) -> DNode | None:
@@ -362,6 +472,82 @@ def build_tree(title: str, nodes: list[dict[str, Any]], chunks: list[dict[str, A
     return branch(title, by_node.get(None, []), kids.get(None, []), title)
 
 
+# -- finding stat blocks -------------------------------------------------------------
+
+# A stat block's Armor Class line: "Armor Class 22 (natural)", "**Armor Class** 15", "**AC** 12 **Initiative** +2".
+_AC_LINE = re.compile(r"^[ \t*_#>]*(?:Armor Class|AC)\b[*_:\s]*\d", re.IGNORECASE | re.MULTILINE)
+# What can sit between a stat block's title and its Armor Class line: its type line ("Huge celestial,
+# lawful evil", often in italics), page marks and blank lines.
+_TITLE = re.compile(r"^\s*(#{1,6}\s+\S.*|\*\*[^*]+\*\*|__[^_]+__)\s*$")
+_BETWEEN = re.compile(
+    r"^\s*(\[p\. \d+\]|[*_][^*_].*[*_]|(Tiny|Small|Medium|Large|Huge|Gargantuan)\b.*|)\s*$", re.IGNORECASE)
+# Headings that name a part of a stat block, not the creature (homebrew often puts the block under "Attributes").
+_GENERIC = re.compile(
+    r"^(attributes|statistics|stats|stat ?block|actions|bonus actions|reactions|legendary actions|lair actions"
+    r"|traits|description|abilities|combat|variants?)$", re.IGNORECASE)
+STATBLOCK_REACH = 8_000  # how far past its Armor Class line a block may run, for PDFs that interleave columns
+STATBLOCK_LEAD = 1_500  # how far before it to start, when no title shows where it starts
+
+
+def _title_start(text: str, ac: int) -> int | None:
+    """Where the block whose Armor Class line starts at `ac` begins: its title (a heading or a bold
+    name) just above, past its type line and page marks. None if nothing marks it."""
+    found, i = None, ac
+    for _ in range(10):
+        if i <= 0:
+            break
+        j = text.rfind("\n", 0, i - 1) + 1
+        line = text[j:i].rstrip("\n")
+        if _TITLE.match(line):
+            found = j
+        elif not _BETWEEN.match(line):
+            break
+        i = j
+    return found
+
+
+def _title_text(text: str, start: int | None) -> str:
+    if start is None:
+        return ""
+    return re.sub(r"^[#*_\s]+|[*_\s]+$", "", text[start:].split("\n", 1)[0])
+
+
+def _creature(heading: str) -> str:
+    """The creature a heading path names: its last part that isn't a part of a stat block."""
+    names = [p for p in (re.sub(r"[#*_]", "", x).strip() for x in heading.split(" > ")) if p and not _GENERIC.match(p)]
+    return names[-1] if names else ""
+
+
+def find_stat_blocks(chunks: list[dict[str, Any]]) -> list[DNode]:
+    """Every stat block in a source, each as the text around it with its Armor Class line marked,
+    after the heading path of the section that line is in.
+
+    A block runs from its title to the next block's title, so a clean book (Markdown,
+    a well-made PDF) gives each call one block. Where nothing marks where blocks
+    start, the window reaches further either way and the call is told which one it's
+    about, so a block a PDF split apart or interleaved with other text still arrives whole.
+    """
+    text, spans = _render_spans(chunks)
+    acs = [m.start() for m in _AC_LINE.finditer(text)]
+    titles = [_title_start(text, a) for a in acs]
+    pages = [(m.start(), int(m.group(1))) for m in re.finditer(r"^\[p\. (\d+)\]$", text, re.MULTILINE)]
+    out = []
+    for i, a in enumerate(acs):
+        start = titles[i] if titles[i] is not None else max(0, a - STATBLOCK_LEAD)
+        end = min(len(text), a + STATBLOCK_REACH)
+        if i + 1 < len(acs) and titles[i + 1] is not None:
+            end = min(end, titles[i + 1])
+        page = next((p for pos, p in reversed(pages) if pos < a), None)
+        heading = next((hd for pos, hd in reversed(spans) if pos <= a), "")
+        name = _title_text(text, titles[i])
+        name = name if name and not _GENERIC.match(name) else _creature(heading)
+        title = f"Stat block: {name}" if name else f"Stat block, p. {page}" if page else "Stat block"
+        window = text[start:a] + MARK + text[a:end]
+        out.append(DNode(title, page, page, text=f"Section: {heading}\n\n{window}" if heading else window,
+                         statblock=True))
+    return out
+
+
 # -- cache keys ------------------------------------------------------------------
 
 
@@ -377,6 +563,10 @@ def leaf_key(node: DNode, model: str) -> str:
     return _h("leaf", str(LEAF_VERSION), model, node.title, node.text)
 
 
+def statblock_key(node: DNode, model: str) -> str:
+    return _h("statblock", str(STATBLOCK_VERSION), model, node.text)
+
+
 def branch_key(node: DNode, model: str) -> str:
     assert all(c.output is not None for c in node.children)
     return _h("branch", str(BRANCH_VERSION), model, node.title, *(output_hash(c.output) for c in node.children))
@@ -386,7 +576,9 @@ def _resolve(store: Store, node: DNode, model: str) -> None:
     """Fill in keys and cached outputs bottom-up, as far as the cache reaches."""
     for c in node.children:
         _resolve(store, c, model)
-    if node.is_leaf:
+    if node.statblock:
+        node.key = statblock_key(node, model)
+    elif node.is_leaf:
         node.key = leaf_key(node, model)
     elif all(c.output is not None for c in node.children):
         node.key = branch_key(node, model)
@@ -426,7 +618,7 @@ def combine(group: list[dict[str, Any]], name: str | None = None, summary: str |
         "summary": summary or max((e["summary"] for e in group), key=len),
         "pages": sorted({p for e in group for p in e["pages"]}),
         "facts": _dedupe([f for e in group for f in e["facts"]]),
-        "stat_block": first("stat_block"),
+        "stat_block_of": first("stat_block_of"),
         "area_key": first("area_key"),
         "read_aloud": first("read_aloud"),
         "treasure": _dedupe([t for e in group for t in e.get("treasure") or []]),
@@ -527,66 +719,62 @@ def branch_prompt(node: DNode, candidates: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-# The lines of a stat block between its armor class and its challenge that a model most often drops,
-# as books label them (2014 and 2024 styles). Checked against the source after extraction.
+# The labelled lines of a stat block between its armor class and its challenge, as books label them
+# (2014 and 2024 styles), and the field each goes in. Checked against the source after a block is read.
 STAT_LINES = {
-    "saving throws": "Saving Throws", "skills": "Skills",
-    "damage vulnerabilities": "Damage Vulnerabilities", "vulnerabilities": "Damage Vulnerabilities",
-    "damage resistances": "Damage Resistances", "resistances": "Damage Resistances",
-    "damage immunities": "Damage Immunities", "condition immunities": "Condition Immunities",
-    "immunities": "Immunities", "senses": "Senses", "languages": "Languages",
+    "saving throws": "saving_throws", "skills": "skills",
+    "damage vulnerabilities": "damage_vulnerabilities", "vulnerabilities": "damage_vulnerabilities",
+    "damage resistances": "damage_resistances", "resistances": "damage_resistances",
+    "damage immunities": "damage_immunities", "condition immunities": "condition_immunities",
+    "senses": "senses", "languages": "languages",
 }
 STAT_LINES |= {k.removesuffix("ies") + "y" if k.endswith("ies") else k.removesuffix("s"): v
                for k, v in STAT_LINES.items() if k not in ("senses", "skills", "languages", "saving throws")}
 _STAT_LINE = re.compile(
     r"^\W*(" + "|".join(sorted(map(re.escape, STAT_LINES), key=len, reverse=True)) + r")\b\W*\s+(.+?)\s*$",
     re.IGNORECASE)
-_AC = re.compile(r"\b(armor class|AC)\b", re.IGNORECASE)
 _CHALLENGE = re.compile(r"^\W*(challenge|CR)\b", re.IGNORECASE | re.MULTILINE)
 
 
-def stat_lines_in_text(text: str, name: str) -> dict[str, str]:
-    """The labelled lines (saves, skills, resistances, senses, languages...) of `name`'s stat block in
-    `text`, by label: from the first armor class within a few lines of the name to its challenge."""
-    # The name as a line of its own (a heading or a bold title), not a mention in someone else's block.
-    title = r"^[#*_\s]*" + re.escape(name.strip()) + r"[*_\s]*$"
-    for m in re.finditer(title, text, re.IGNORECASE | re.MULTILINE):
-        ac = _AC.search(text, m.end(), m.end() + 600)
-        if ac is None:
-            continue
-        end = _CHALLENGE.search(text, ac.end())
-        if end is None:
-            return {}
-        out: dict[str, str] = {}
-        for line in text[ac.end():end.start()].splitlines():
-            line = re.sub(r"<br\s*/?>", "", line)
-            if hit := _STAT_LINE.match(line):
-                label = STAT_LINES[hit.group(1).lower()]
-                out.setdefault(label, re.sub(r"[*_]", "", hit.group(2)).strip())
-        return out
-    return {}
+def stat_lines(text: str) -> dict[str, str]:
+    """The labelled lines (saves, skills, resistances, senses, languages…) of the marked stat block in
+    `text`, by field: from its marked Armor Class line to its challenge."""
+    start = text.find(MARK)
+    end = _CHALLENGE.search(text, start) if start >= 0 else None
+    if end is None:
+        return {}
+    out: dict[str, str] = {}
+    for line in text[start:end.start()].splitlines():
+        line = re.sub(r"<br\s*/?>", "", line)
+        if hit := _STAT_LINE.match(line):
+            out.setdefault(STAT_LINES[hit.group(1).lower()], re.sub(r"[*_]", "", hit.group(2)).strip())
+    return out
 
 
-def complete_stat_block(sb: dict[str, Any], text: str, name: str) -> dict[str, Any]:
-    """Add back the labelled lines the source prints for this stat block but the extraction left out."""
-    have = " ".join([*(sb.get("other") or []), *(sb.get("traits") or [])]).lower()
-    # Present if its label is (however phrased: "Resistance:", "Damage Immunities") or its value is.
-    stems = {"Saving Throws": "sav", "Skills": "skill", "Damage Vulnerabilities": "vulnerab",
-             "Damage Resistances": "resist", "Damage Immunities": "damage immun",
-             "Condition Immunities": "condition immun", "Immunities": "immun", "Senses": "sens",
-             "Languages": "language"}
-    missing = [f"{label} {value}" for label, value in stat_lines_in_text(text, name).items()
-               if stems[label] not in have and value.lower()[:20] not in have]
-    return {**sb, "other": [*(sb.get("other") or []), *missing]} if missing else sb
+def fill_missing_lines(sb: dict[str, Any], text: str) -> dict[str, Any]:
+    """Add the labelled lines the source prints for this stat block but the reading left out."""
+    missing = {f: v for f, v in stat_lines(text).items() if not sb.get(f)}
+    return {**sb, **missing}
+
+
+def stat_block_entry(sb: dict[str, Any], page: int | None) -> dict[str, Any]:
+    """A stat block as an entry in the source's catalog, for the creature of that name."""
+    return {"name": sb["name"], "kind": "monster", "aliases": [], "summary": "", "pages": [page] if page else [],
+            "facts": [], "stat_block_of": None, "stat_block": sb, "area_key": None, "read_aloud": None, "treasure": []}
+
+
+STATBLOCK_EFFORT = "low"  # copying, not judging
 
 
 def digest_node(client: Any, node: DNode, model: str, effort: str) -> tuple[dict[str, Any], int, int]:
+    if node.statblock:
+        parsed, i, o = _call(client, STATBLOCK_SYSTEM, node.text, StatBlockOutput, model, STATBLOCK_EFFORT)
+        sb = parsed.stat_block.model_dump() if parsed.found and parsed.stat_block else None
+        entities = [stat_block_entry(fill_missing_lines(sb, node.text), node.page_start)] if sb else []
+        return {"entities": entities}, i, o
     if node.is_leaf:
         parsed, i, o = _call(client, LEAF_SYSTEM, leaf_prompt(node), LeafOutput, model, effort)
         entities = [e.model_dump() for e in parsed.entities]
-        for e in entities:
-            if e["stat_block"]:
-                e["stat_block"] = complete_stat_block(e["stat_block"], node.text, e["name"])
         # The same name twice within one section is the same thing.
         groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
         for e in entities:
@@ -603,12 +791,21 @@ def digest_node(client: Any, node: DNode, model: str, effort: str) -> tuple[dict
 # -- planning and running ------------------------------------------------------------
 
 
+def catalog(root: DNode) -> tuple[list[dict[str, Any]], str]:
+    """A digested source's catalog: the tree's entities, then a stat block entry for each stat block
+    read so far. With the key it's applied under, which changes whenever one of them does."""
+    read = [n for n in root.stat_blocks if n.output is not None]
+    entities = [*root.output["entities"], *(e for n in read for e in n.output["entities"])]
+    return entities, _h(root.key, *(n.key for n in read))
+
+
 def _materialize(store: Store, source_id: int, root: DNode) -> None:
     """Apply the book's catalog to its campaign's world model as the state before play."""
     from .world import World
 
     campaign = store.campaign_by_id(store.source(source_id)["campaign_id"])
-    World(store, campaign).apply_book(source_id, root.output["entities"], key=root.key)
+    entities, key = catalog(root)
+    World(store, campaign).apply_book(source_id, entities, key=key)
 
 
 def plan(store: Store, source_id: int, model: str = MODEL, save: bool = True) -> DNode | None:
@@ -628,7 +825,10 @@ def plan(store: Store, source_id: int, model: str = MODEL, save: bool = True) ->
         if save:
             store.save_digest_plan(source_id, [])
         return None
+    root.stat_blocks = find_stat_blocks(chunks)
     _resolve(store, root, model)
+    for n in root.stat_blocks:
+        _resolve(store, n, model)
     if not save:
         return root
 
@@ -639,17 +839,19 @@ def plan(store: Store, source_id: int, model: str = MODEL, save: bool = True) ->
         idx = len(rows)
         rows.append({
             "parent": parent, "depth": depth, "title": n.title, "page_start": n.page_start,
-            "page_end": n.page_end, "is_leaf": n.is_leaf, "chars": len(n.text), "key": n.key,
+            "page_end": n.page_end, "kind": n.kind, "chars": len(n.text), "key": n.key,
         })
         order.append(n)
         for c in n.children:
             flatten(c, idx, depth + 1)
 
     flatten(root, None, 0)
+    for n in root.stat_blocks:  # beside the tree, not in it
+        flatten(n, None, 0)
     for n in order:  # a section that failed for good stays failed until asked again
         if n.output is None and n.key and (f := store.digest_failure(n.key)) and f["retry_at"] is None:
             n.error = f["error"]
-    shape = lambda r: (r["parent"], r["title"], bool(r["is_leaf"]), r["chars"])  # noqa: E731
+    shape = lambda r: (r["parent"], r["title"], r["kind"], r["chars"])  # noqa: E731
     existing = store.existing_digest_plan(source_id)
     if [shape(r) for r in existing] == [shape(r) for r in rows]:
         updates = []
@@ -669,7 +871,7 @@ def plan(store: Store, source_id: int, model: str = MODEL, save: bool = True) ->
 
 
 def pending_calls(root: DNode | None) -> int:
-    return 0 if root is None else sum(1 for n in root.walk() if n.output is None)
+    return 0 if root is None else sum(1 for n in root.calls() if n.output is None)
 
 
 # -- cost ------------------------------------------------------------------------------
@@ -688,6 +890,8 @@ LEAF_OVERHEAD = 2000  # system prompt + output schema, in tokens
 LEAF_OUT_PER_IN = 0.8  # thinking + summary + entities, per input token (0.5 came out 36-42% low on Sonnet)
 BRANCH_OVERHEAD = 1200
 BRANCH_OUT_PER_IN = 0.3
+STATBLOCK_OVERHEAD = 1500
+STATBLOCK_OUT_PER_IN = 0.6  # the block copied out, and some thinking to sort out interleaved columns
 VISIBLE_SHARE = 0.5  # of a node's output tokens, how much is the summary/entities its parent reads
 MIN_SAMPLES = 5
 
@@ -717,6 +921,7 @@ def estimate(store: Store, root: DNode | None, model: str = MODEL) -> dict[str, 
     history = store.digest_history(model)
     leaves = [h for h in history if h["kind"] == "leaf" and h["chars"]]
     branches = [h for h in history if h["kind"] == "branch"]
+    blocks = [h for h in history if h["kind"] == "statblock" and h["chars"]]
     if len(leaves) >= MIN_SAMPLES:
         leaf_in = lambda chars: chars * sum(h["input_tokens"] for h in leaves) / sum(h["chars"] for h in leaves)
         leaf_ratio = sum(h["output_tokens"] for h in leaves) / sum(h["input_tokens"] for h in leaves)
@@ -727,6 +932,12 @@ def estimate(store: Store, root: DNode | None, model: str = MODEL) -> dict[str, 
         sum(h["output_tokens"] for h in branches) / sum(h["input_tokens"] for h in branches)
         if len(branches) >= MIN_SAMPLES else BRANCH_OUT_PER_IN
     )
+    if len(blocks) >= MIN_SAMPLES:
+        block_in = lambda chars: chars * sum(h["input_tokens"] for h in blocks) / sum(h["chars"] for h in blocks)
+        block_ratio = sum(h["output_tokens"] for h in blocks) / sum(h["input_tokens"] for h in blocks)
+    else:
+        block_in = lambda chars: STATBLOCK_OVERHEAD + chars / CHARS_PER_TOKEN
+        block_ratio = STATBLOCK_OUT_PER_IN
 
     totals = {"calls": 0, "input_tokens": 0.0, "output_tokens": 0.0}
 
@@ -743,6 +954,12 @@ def estimate(store: Store, root: DNode | None, model: str = MODEL) -> dict[str, 
 
     if root is not None:
         visible(root)
+        for n in root.stat_blocks:
+            if n.output is None:
+                i = block_in(len(n.text))
+                totals["calls"] += 1
+                totals["input_tokens"] += i
+                totals["output_tokens"] += i * block_ratio
     i, o = round(totals["input_tokens"]), round(totals["output_tokens"])
     return {
         "model": model, "calls": totals["calls"], "input_tokens": i, "output_tokens": o,
@@ -784,7 +1001,7 @@ def run(
                  "input_tokens": 0, "output_tokens": 0}
         if root is None:
             return stats
-        nodes = list(root.walk())
+        nodes = root.calls()
         stats["nodes"] = len(nodes)
         stats["cached"] = sum(1 for n in nodes if n.output is not None)
         stats["waiting"] = sum(1 for n in nodes if n.error)  # gave up earlier; plan() marked them
@@ -852,7 +1069,7 @@ def run(
                         store.set_digest_node(n.row_id, n.key, n.error)
                         stats["failed"] += 1
                     else:
-                        store.put_digest(n.key, "leaf" if n.is_leaf else "branch", output, model, i, o)
+                        store.put_digest(n.key, n.kind, output, model, i, o)
                         store.clear_digest_failures([n.key])
                         store.set_digest_node(n.row_id, n.key)
                         n.output = output
@@ -893,7 +1110,7 @@ def request(store: Store, source_id: int, model: str | None = None) -> str:
 def retry_failed(store: Store, source_id: int, model: str = MODEL) -> int:
     """Forget the failures of a source's sections, so the next run tries them again."""
     root = plan(store, source_id, model, save=False)
-    keys = [n.key for n in root.walk() if n.key] if root else []
+    keys = [n.key for n in root.calls() if n.key] if root else []
     store.clear_digest_failures(keys)
     return len(keys)
 

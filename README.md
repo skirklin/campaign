@@ -281,26 +281,48 @@ uv run campaign digest            # digest (or resume) everything not yet digest
 uv run campaign outline 1         # print the outline with section summaries
 ```
 
-The digest turns a module into two things the assistant can use:
+The digest turns a module into these things the assistant can use:
 - **An outline**: a summary for the book, each chapter, and each section,
   with page ranges. The book and chapter summaries are part of every chat's
   system prompt. The `outline` tool drills into deeper sections.
 - **A catalog** of NPCs, monsters, locations, items, quests, factions and
-  lore. Each entry has aliases ("the hag", "the burgomaster"), pages, key
-  facts with exact numbers, and a stat block where there is one. Keyed
+  lore. Each entry has aliases ("the hag", "the burgomaster"), pages, and key
+  facts with exact numbers. Keyed
   areas carry their map key ("C3", which works as a name), read-aloud text,
   and traps and checks with their DCs; anything of value is listed as
   treasure where it lies. The catalog becomes the world model's starting
   state (session 0; see [The world model](#the-world-model)).
 - **The tables** to roll on: random encounters, treasure, rumors, each row
   as printed.
+- **Every stat block**, word for word, in its printed parts: the type line,
+  AC, HP, speed and ability scores; saves, skills, vulnerabilities,
+  resistances, immunities, senses and languages each as a line of its own;
+  then traits, actions, bonus actions, reactions, legendary actions (with
+  the paragraph that says how many a round) and lair actions. Each joins
+  the creature the book's text names (Sydon's block joins "Sydon, Lord of
+  Storms"), or is a monster of its own.
+- **Which stat block a creature uses**, where the book runs it on another's:
+  "Aetala (NG veteran)", "two hunters (LG scouts)", a boar that is the
+  bestiary's great boar. The encounter card and the `stat_block` tool follow
+  that to the stat block, in any loaded book (the SRD's veteran, the
+  appendix's Great Boar), and show it under both names ("Corrupted White
+  Boar", run as the Great Boar); what the adventure changes stays with the
+  creature.
 
 Facts are what the book says is true: what a character claims is kept as
 theirs ("Anni says…"), and where something is keeps the book's whole
-placement (the chest *under the tables*, *beneath the violet fungus*). Each
-stat block is checked against the book's text after it's read, and lines
-the model dropped (resistances, immunities, senses, languages, saves,
-skills) are put back.
+placement (the chest *under the tables*, *beneath the violet fungus*).
+
+Stat blocks are read apart from the rest, one call each. Code finds every
+one by its Armor Class line, wherever the book's outline put it: a PDF
+often splits a block across sections (Sydon's legendary actions sit under
+an outline entry of their own) and interleaves its columns with the text
+around it. Each call gets the text around one block, from its title to the
+next block's, or further either way where nothing marks where blocks
+start. The call also gets the heading path of the section the block is in,
+which names the creature when its own heading doesn't ("Attributes"), and
+the block's Armor Class line is marked so the call knows which one it's
+about. The labelled lines the reading leaves out are put back from the text.
 
 For a fight, the `encounter` tool takes the creatures and how many of
 each (with the adventure's changes to any of them, like "45 HP, vulnerable
@@ -312,7 +334,9 @@ that rolls the monsters' initiative. Each creature can show the book text
 its stat block was read from, to check it against. In any stat block, an
 attack has a button that rolls to hit and all its damage at once (dice
 doubled on a natural 20), a recharge ability rolls its d6, and "3/Day"
-abilities get tick boxes.
+abilities, legendary actions (as many as the creature takes a round) and
+spell slots get tick boxes. A spellcasting entry's lists are shown a line
+each.
 
 For running a session, the chat and MCP tools `stat_block`, `treasure`
 (what's at a place, and what the party has already taken) and `roll_table`
@@ -490,14 +514,19 @@ that tree bottom-up (`digest.py`):
   rules (`world.APPLY_VERSION`), or of the digest, takes effect when a
   server starts: it plans every source again, digests what changed, and
   applies cached catalogs again.
-- **The root's** entities become the source's catalog. Tables are passed up
-  unchanged.
+- **Stat blocks** are read beside the tree, not in it: one call per block,
+  on the text around it (see [Digesting reference material](#digesting-reference-material)).
+- **The root's** entities, then the stat blocks read so far, become the
+  source's catalog. Tables are passed up unchanged. A stat block that
+  fails doesn't hold the book up: the catalog is applied without it, and
+  again once it's read.
 
 Each node's output is cached under a hash of exactly what produced it:
 
 ```
-leaf key   = H("leaf",   LEAF_VERSION,   model, title, text)
-branch key = H("branch", BRANCH_VERSION, model, title, H(output of child 1), H(output of child 2), …)
+leaf key       = H("leaf",      LEAF_VERSION,      model, title, text)
+branch key     = H("branch",    BRANCH_VERSION,    model, title, H(output of child 1), H(output of child 2), …)
+stat block key = H("statblock", STATBLOCK_VERSION, model, text around it)
 ```
 
 So:

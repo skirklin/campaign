@@ -98,10 +98,11 @@ function encounterBody(r, slug) {
           `AC ${sb.armor_class}`, `HP ${c.hp}${c.hp_changed ? " (adventure)" : ""}`,
           c.cr && `CR ${c.cr}`, c.xp_each != null && `${c.xp_each.toLocaleString()} XP each`,
         ].filter(Boolean).join(" · ")),
+        c.block_from && h("span.small.muted", `${c.block_from.name} stat block`),
         c.note && h("span.small.encounter-note", c.note)),
       trackers,
-      statBlockFromData(c.name, { ...sb, hit_points: c.hp }),
-      c.id && bookText(slug, c.id),
+      statBlockFromData(c.block_from ? c.block_from.name : c.name, { ...sb, hit_points: c.hp }),
+      (c.block_from?.id || c.id) && bookText(slug, c.block_from?.id || c.id),
     );
   });
   return [head, thresholds, h("div.encounter-actions", roll), initiative, ...rows];

@@ -15,7 +15,6 @@ the spec again, so the answer stays short and the card is always current.
 
 from __future__ import annotations
 
-import json
 import re
 from fractions import Fraction
 from typing import Any
@@ -110,22 +109,25 @@ def party_of(store: Store, campaign: Any) -> Party | None:
     return Party(size=min(12, len(members)), level=max(1, min(20, round(sum(levels) / len(levels)))))
 
 
-def find_stat_block(world: World, name: str, entity_id: int | None = None) -> tuple[int | None, str, dict[str, Any] | None]:
-    """The entity's id, name and stat block (the latest, if the book gives several), or None.
-
-    By `entity_id` when given (and still there), else by name or alias.
-    """
-    view = world.view(entity_id) if entity_id else None
-    if view is None:
-        e = world.resolve(name)
-        view = world.view(e["id"]) if e else None
-    if view is None:
-        hits = world.lookup(name, limit=1)
-        view = hits[0] if hits else None
-    if view is None:
-        return None, name, None
-    blocks = world.attribute_values(view["id"], "stat_block")
-    return view["id"], view["name"], json.loads(blocks[-1]) if blocks else None
+def find_stat_block(world: World, name: str, entity_id: int | None = None) -> dict[str, Any]:
+    """The creature asked for and the stat block to run it with: by `entity_id` when given (and still
+    there), else by name or alias. The block is its own or the one it uses (World.stat_block); when a
+    pinned entity has neither, the name gets a chance to find one. `block_from` is the entity the
+    block belongs to."""
+    views = [world.view(entity_id)] if entity_id else []
+    if (e := world.resolve(name)) and e["id"] != entity_id:
+        views.append(world.view(e["id"]))
+    if not any(views):
+        views = world.lookup(name, limit=1)
+    views = [v for v in views if v]
+    for view in views:
+        if found := world.stat_block(view["id"]):
+            sb, source = found
+            return {"id": view["id"], "name": view["name"], "stat_block": sb,
+                    "block_from": None if source["id"] == view["id"] else {"id": source["id"], "name": source["name"]}}
+    if views:
+        return {"id": views[0]["id"], "name": views[0]["name"], "stat_block": None, "block_from": None}
+    return {"id": None, "name": name, "stat_block": None, "block_from": None}
 
 
 def book_passage(store: Store, campaign: Any, entity_id: int) -> list[dict[str, Any]]:
@@ -153,10 +155,12 @@ def build(store: Store, campaign: Any, spec: Spec) -> dict[str, Any]:
     party = spec.party or party_of(store, campaign)
     creatures = []
     for c in spec.creatures:
-        entity_id, name, sb = find_stat_block(world, c.name, c.id)
+        found = find_stat_block(world, c.name, c.id)
+        sb = found["stat_block"]
         rating, xp = challenge_xp(sb.get("challenge", "")) if sb else (None, None)
         creatures.append({
-            "asked_for": c.name, "id": entity_id, "name": name, "count": c.count, "found": sb is not None,
+            "asked_for": c.name, "id": found["id"], "name": found["name"], "block_from": found["block_from"],
+            "count": c.count, "found": sb is not None,
             "stat_block": sb, "hp": c.hp or (sb or {}).get("hit_points"), "hp_changed": bool(c.hp),
             "note": c.note, "cr": rating, "xp_each": xp,
         })
@@ -186,6 +190,7 @@ def summary(result: dict[str, Any]) -> dict[str, Any]:
         sb = c["stat_block"] or {}
         rows.append({k: v for k, v in {
             "name": c["name"], "count": c["count"], "found": c["found"],
+            "stat_block_of": c["block_from"]["name"] if c["block_from"] else None,
             "asked_for": c["asked_for"] if c["asked_for"].lower() != c["name"].lower() else None,
             "ac": sb.get("armor_class"), "hp": c["hp"], "cr": c["cr"], "xp_each": c["xp_each"],
             "note": c["note"] or None,
