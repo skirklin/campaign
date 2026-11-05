@@ -108,10 +108,27 @@ uv run campaign web            # http://127.0.0.1:8765
     for the breakdown into cached and uncached input).
     The tab opens ready for a new question. Conversations are kept (per
     person): the latest few are listed under the suggestions, the rest
-    behind "All N conversations", and each has its own link, so a reload
-    or going back keeps your place. In a player campaign it only knows
+    behind "All N conversations" (and "Delete all", for a clean start;
+    encounters made in them are kept), and each has its own link, so a
+    reload or going back keeps your place. In a player campaign it only knows
     what the party knows. With editor
     access it can also record what you tell it happened.
+  - **Encounters**: every fight the assistant has put together for you,
+    saved apart from the conversation it came from, with its difficulty
+    and how it stands. **Run this fight** opens the tracker:
+    - initiative: the monsters' rolled, one roll per kind of creature,
+      and the party's typed in; anyone else can be added;
+    - the turn order, with **Next turn** and the round;
+    - each monster's hit points, with **Hit** and **Heal**;
+    - conditions as chips, each opening its rule as the SRD words it;
+    - legendary actions, which come back at the start of the creature's
+      turn, and legendary resistance;
+    - the lair's turn on initiative 20 when a creature has lair actions;
+    - every monster's stat block a tap away.
+
+    The fight is saved on the server as it goes, so a reload or another
+    device carries on, until **End the fight**. Encounters are private to
+    whoever they were made for, like conversations.
   - **Sessions**: paste a transcript, or upload a text file or a recording,
     to run an ingest. A live log shows what Claude is reading and
     recording. Each past session has its recap and a **Revert** button.
@@ -343,9 +360,10 @@ For a fight, the `encounter` tool takes the creatures and how many of
 each (with the adventure's changes to any of them, like "45 HP, vulnerable
 to fire") and gives back their stat blocks, their XP and the encounter's
 difficulty for the party by the DMG's rules (the party defaults to the
-campaign's characters). In the Ask tab the answer shows it as an encounter
-card: the difficulty, every stat block, an HP box per monster and a button
-that rolls the monsters' initiative. Each creature can show the book text
+campaign's characters). It's saved as one of your encounters, under a
+title the assistant gives it, and the answer shows it as an encounter card:
+the difficulty, every stat block, and a button to run it (see
+**Encounters** above). Each creature can show the book text
 its stat block was read from, to check it against. In any stat block, an
 attack has a button that rolls to hit and all its damage at once (dice
 doubled on a natural 20), a recharge ability rolls its d6, and "3/Day"

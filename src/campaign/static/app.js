@@ -1,5 +1,6 @@
 import { characterList, sheetView } from "./sheet.js";
 import { campaignList, campaignView, entityView, sourceView } from "./campaigns.js";
+import { encounterView } from "./encounter.js";
 import { accountView, adminView } from "./admin.js";
 import { whoami } from "./util.js";
 
@@ -9,6 +10,7 @@ const routes = [
   [/^#\/account$/, () => accountView(), "account"],
   [/^#\/campaigns\/([^/]+)\/source\/(\d+)$/, (m) => sourceView(m[1], m[2]), "campaigns"],
   [/^#\/campaigns\/([^/]+)\/entity\/(\d+)$/, (m) => entityView(m[1], m[2]), "campaigns"],
+  [/^#\/campaigns\/([^/]+)\/encounters\/(\d+)$/, (m) => encounterView(m[1], m[2]), "campaigns"],
   [/^#\/campaigns\/([^/]+)\/ask\/(\d+)$/, (m) => campaignView(m[1], "ask", m[2]), "campaigns"],
   [/^#\/campaigns\/([^/]+)(?:\/(\w+))?$/, (m) => campaignView(m[1], m[2] || "ask"), "campaigns"],
   [/^#\/campaigns\/?$/, () => campaignList(), "campaigns"],

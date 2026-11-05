@@ -93,6 +93,13 @@ class ChatTitle(BaseModel):
     title: str = Field(min_length=1)
 
 
+class EncounterUpdate(BaseModel):
+    """A new title, or the fight as it stands now (the tracker's whole state), or `reset` to end it."""
+    title: str | None = Field(default=None, min_length=1)
+    state: dict[str, Any] | None = None
+    reset: bool = False
+
+
 class SheetUpdate(BaseModel):
     sheet: dict[str, Any]
     reason: str = "edited"
@@ -659,10 +666,53 @@ def create_app(
         except Exception as err:
             raise HTTPException(502, f"couldn't write a summary: {err}")
 
-    @app.post("/api/campaigns/{slug}/encounter")
-    def encounter(spec: encounters.Spec, c: Campaign = Depends(reader), s: Store = Depends(store)) -> dict[str, Any]:
-        """A fight as the encounter card shows it: each creature's stat block, XP and the difficulty."""
-        return encounters.build(s, c, spec)
+    # -- encounters --------------------------------------------------------------------
+    # Fights the assistant put together, saved apart from the conversation they were made
+    # in, each private to the person it was made for. A fight is built from the world as it
+    # is now each time it's read, so its stat blocks follow the material.
+
+    def my_encounter(s: Store, request: Request, c: Campaign, encounter_id: int) -> dict[str, Any]:
+        e = s.encounter(encounter_id)
+        if e is None or e["campaign_id"] != c.id or e["user_id"] != (None if local else user_of(request)["id"]):
+            raise HTTPException(404, "no such encounter")
+        return e
+
+    def encounter_view(s: Store, c: Campaign, e: dict[str, Any], built: bool = True) -> dict[str, Any]:
+        out = {k: e[k] for k in ("id", "title", "conversation_id", "conversation_title", "state",
+                                 "created_at", "updated_at")}
+        out["creatures"] = [{"name": x["name"], "count": x.get("count", 1)} for x in e["spec"]["creatures"]]
+        return out | ({"fight": encounters.build(s, c, encounters.Spec.model_validate(e["spec"]))} if built else {})
+
+    @app.get("/api/campaigns/{slug}/encounters")
+    def list_encounters(request: Request, c: Campaign = Depends(reader), s: Store = Depends(store)) -> list[dict]:
+        rows = s.encounters(c, None if local else user_of(request)["id"])
+        out = []
+        for e in rows:
+            v = encounter_view(s, c, e, built=False)
+            fight = encounters.build(s, c, encounters.Spec.model_validate(e["spec"]))
+            out.append(v | {k: fight.get(k) for k in ("difficulty", "xp", "monsters", "party")})
+        return out
+
+    @app.get("/api/campaigns/{slug}/encounters/{encounter_id}")
+    def get_encounter(encounter_id: int, request: Request, c: Campaign = Depends(reader),
+                      s: Store = Depends(store)) -> dict[str, Any]:
+        """The fight as the card and the tracker show it: its stat blocks, XP and difficulty, and how it stands."""
+        return encounter_view(s, c, my_encounter(s, request, c, encounter_id))
+
+    @app.patch("/api/campaigns/{slug}/encounters/{encounter_id}")
+    def update_encounter(encounter_id: int, body: EncounterUpdate, request: Request, c: Campaign = Depends(reader),
+                         s: Store = Depends(store)) -> dict[str, Any]:
+        my_encounter(s, request, c, encounter_id)
+        if body.state is not None and len(json.dumps(body.state)) > 200_000:
+            raise HTTPException(413, "that's more fight than a tracker holds")
+        s.update_encounter(encounter_id, title=body.title, state=body.state, clear_state=body.reset)
+        return encounter_view(s, c, s.encounter(encounter_id), built=False)
+
+    @app.delete("/api/campaigns/{slug}/encounters/{encounter_id}", status_code=204)
+    def delete_encounter(encounter_id: int, request: Request, c: Campaign = Depends(reader),
+                         s: Store = Depends(store)) -> None:
+        my_encounter(s, request, c, encounter_id)
+        s.delete_encounter(encounter_id)
 
     @app.get("/api/campaigns/{slug}/entities/{entity_id}/passage")
     def entity_passage(entity_id: int, c: Campaign = Depends(reader), s: Store = Depends(store)) -> list[dict[str, Any]]:
@@ -859,6 +909,11 @@ def create_app(
         my_conversation(s, request, c, conversation_id)
         s.set_conversation_title(conversation_id, body.title.strip()[:120])
         return s.conversation(conversation_id)
+
+    @app.delete("/api/campaigns/{slug}/chats", status_code=204)
+    def delete_chats(request: Request, c: Campaign = Depends(reader), s: Store = Depends(store)) -> None:
+        """Every conversation of mine in this campaign. The encounters made in them stay."""
+        s.delete_conversations(c, None if local else user_of(request)["id"])
 
     @app.delete("/api/campaigns/{slug}/chats/{conversation_id}", status_code=204)
     def delete_chat(conversation_id: int, request: Request, c: Campaign = Depends(reader), s: Store = Depends(store)) -> None:

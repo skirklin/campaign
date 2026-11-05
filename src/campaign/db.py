@@ -351,6 +351,23 @@ CREATE TABLE conversation_messages (
     usage            TEXT,            -- JSON: what the turn cost, on its last message
     PRIMARY KEY (conversation_id, seq)
 );
+-- Fights put together for a campaign (by the assistant's encounter tool), each private to
+-- the person it was made for, like their conversations, and kept apart from them: deleting
+-- the conversation an encounter was made in keeps the encounter. `spec` is what's in the
+-- fight (encounters.Spec); `state` is the fight being run (turn order, hit points,
+-- conditions), NULL until it starts.
+CREATE TABLE encounters (
+    id               INTEGER PRIMARY KEY,
+    campaign_id      INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    user_id          INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    conversation_id  INTEGER REFERENCES conversations(id) ON DELETE SET NULL,
+    title            TEXT NOT NULL,
+    spec             TEXT NOT NULL,
+    state            TEXT,
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL
+);
+CREATE INDEX encounters_campaign ON encounters(campaign_id, user_id, updated_at);
 
 -- Background work (a session ingest, reading a sheet from a scan) as durable rows:
 -- what's wanted, its input, state, retries and result, worked through by
@@ -439,46 +456,32 @@ CREATE INDEX inventory_log_campaign ON inventory_log(campaign_id, id);
 # While this is a prototype there are no migrations: a schema change edits
 # SCHEMA and bumps the version, and if the data in the one deployment is worth
 # keeping, a step from the version before goes in UPGRADES until it has run.
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 
 # Steps that bring the deployed database up to SCHEMA_VERSION, keyed by the
 # version they start from. Delete each once the deployment has taken it.
 # They run with foreign keys off, so a table can be rebuilt without its
 # dependents cascading away; references are checked afterwards.
 UPGRADES: dict[int, str] = {
-    # 19: stat blocks are read on their own, beside the digest tree.
-    19: """
-CREATE TABLE digests_new (
-    key            TEXT PRIMARY KEY,
-    kind           TEXT NOT NULL CHECK (kind IN ('leaf', 'branch', 'statblock')),
-    output         TEXT NOT NULL,
-    model          TEXT NOT NULL,
-    input_tokens   INTEGER NOT NULL DEFAULT 0,
-    output_tokens  INTEGER NOT NULL DEFAULT 0,
-    created_at     TEXT NOT NULL
+    # 20: encounters, saved apart from the conversations they were made in.
+    20: """
+-- Fights put together for a campaign (by the assistant's encounter tool), each private to
+-- the person it was made for, like their conversations, and kept apart from them: deleting
+-- the conversation an encounter was made in keeps the encounter. `spec` is what's in the
+-- fight (encounters.Spec); `state` is the fight being run (turn order, hit points,
+-- conditions), NULL until it starts.
+CREATE TABLE encounters (
+    id               INTEGER PRIMARY KEY,
+    campaign_id      INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    user_id          INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    conversation_id  INTEGER REFERENCES conversations(id) ON DELETE SET NULL,
+    title            TEXT NOT NULL,
+    spec             TEXT NOT NULL,
+    state            TEXT,
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL
 );
-INSERT INTO digests_new SELECT * FROM digests;
-DROP TABLE digests;
-ALTER TABLE digests_new RENAME TO digests;
-CREATE TABLE digest_nodes_new (
-    id          INTEGER PRIMARY KEY,
-    source_id   INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
-    parent_id   INTEGER REFERENCES digest_nodes(id) ON DELETE CASCADE,
-    seq         INTEGER NOT NULL,
-    depth       INTEGER NOT NULL,
-    title       TEXT NOT NULL,
-    page_start  INTEGER,
-    page_end    INTEGER,
-    kind        TEXT NOT NULL CHECK (kind IN ('leaf', 'branch', 'statblock')),
-    chars       INTEGER NOT NULL DEFAULT 0,
-    digest_key  TEXT,
-    error       TEXT
-);
-INSERT INTO digest_nodes_new SELECT id, source_id, parent_id, seq, depth, title, page_start, page_end,
-    CASE WHEN is_leaf THEN 'leaf' ELSE 'branch' END, chars, digest_key, error FROM digest_nodes;
-DROP TABLE digest_nodes;
-ALTER TABLE digest_nodes_new RENAME TO digest_nodes;
-CREATE INDEX digest_nodes_source ON digest_nodes(source_id, seq);
+CREATE INDEX encounters_campaign ON encounters(campaign_id, user_id, updated_at);
 """,
 }
 
@@ -991,6 +994,65 @@ class Store:
     def delete_conversation(self, conversation_id: int) -> None:
         with self.conn:
             self.conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
+
+    def delete_conversations(self, campaign: Campaign, user_id: int | None) -> int:
+        """Every conversation one person has had in a campaign. Their encounters stay."""
+        with self.conn:
+            return self.conn.execute(
+                "DELETE FROM conversations WHERE campaign_id = ? AND user_id IS ?", (campaign.id, user_id)
+            ).rowcount
+
+    # -- encounters ------------------------------------------------------------------
+
+    def create_encounter(self, campaign: Campaign, user_id: int | None, conversation_id: int | None,
+                         title: str, spec: dict[str, Any]) -> int:
+        """A new encounter, or the same one again if this conversation already made this very fight."""
+        text = json.dumps(spec, sort_keys=True)
+        if conversation_id is not None and (row := self.conn.execute(
+            "SELECT id FROM encounters WHERE campaign_id = ? AND user_id IS ? AND conversation_id = ? AND spec = ?",
+            (campaign.id, user_id, conversation_id, text),
+        ).fetchone()):
+            return row["id"]
+        with self.conn:
+            return self.conn.execute(
+                "INSERT INTO encounters (campaign_id, user_id, conversation_id, title, spec, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (campaign.id, user_id, conversation_id, title.strip()[:120], text, now(), now()),
+            ).lastrowid
+
+    def encounter(self, encounter_id: int) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT e.*, c.title AS conversation_title FROM encounters e"
+            " LEFT JOIN conversations c ON c.id = e.conversation_id WHERE e.id = ?", (encounter_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        out = dict(row)
+        out["spec"] = json.loads(out["spec"])
+        out["state"] = json.loads(out["state"]) if out["state"] else None
+        return out
+
+    def encounters(self, campaign: Campaign, user_id: int | None) -> list[dict[str, Any]]:
+        """One person's encounters in a campaign, the latest first."""
+        ids = [r["id"] for r in self.conn.execute(
+            "SELECT id FROM encounters WHERE campaign_id = ? AND user_id IS ? ORDER BY updated_at DESC, id DESC",
+            (campaign.id, user_id),
+        )]
+        return [self.encounter(i) for i in ids]
+
+    def update_encounter(self, encounter_id: int, *, title: str | None = None,
+                         state: dict[str, Any] | None = None, clear_state: bool = False) -> None:
+        with self.conn:
+            if title is not None:
+                self.conn.execute("UPDATE encounters SET title = ? WHERE id = ?", (title.strip()[:120], encounter_id))
+            if state is not None or clear_state:
+                self.conn.execute("UPDATE encounters SET state = ? WHERE id = ?",
+                                  (None if clear_state else json.dumps(state), encounter_id))
+            self.conn.execute("UPDATE encounters SET updated_at = ? WHERE id = ?", (now(), encounter_id))
+
+    def delete_encounter(self, encounter_id: int) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM encounters WHERE id = ?", (encounter_id,))
 
     # -- leases ----------------------------------------------------------------------
 

@@ -122,7 +122,8 @@ class ToolContext:
     session: int | None = None  # the session being ingested; otherwise the latest one
     run_kind: str = "chat"
     run_id: int | None = None
-    user_id: int | None = None  # who's asking, when signed in: owns the characters they create
+    user_id: int | None = None  # who's asking, when signed in: owns the characters and encounters they make
+    conversation_id: int | None = None  # the chat this is, if it's one: where an encounter was made
 
     @property
     def world(self) -> World:
@@ -295,7 +296,7 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
             return format_stat_block(f"{view['name']} ({source['name']})", sb)
         return f"{view['name']} has no stat block in the digested material. Try search_reference."
 
-    def encounter(creatures: list[encounters.Creature], party_size: int | None = None,
+    def encounter(title: str, creatures: list[encounters.Creature], party_size: int | None = None,
                   party_level: int | None = None) -> str:
         """Put a fight together: every creature's stat block, its XP, and how hard it is for the party.
 
@@ -307,14 +308,20 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         no characters, pass the size and level the user gave. Never assume a
         level: without one there's no difficulty, so ask for it.
 
+        The fight is saved in the campaign's Encounters, where the user can
+        run it: turn order, hit points, conditions, legendary actions. Call
+        it once per fight you mean to show; a variant ("make it harder") is
+        a fight of its own.
+
         Returns JSON: each creature's AC, HP, CR and XP (found false if no
         stat block is in the material: say so, never invent one), the total
         and adjusted XP and the difficulty by the DMG's rules, and `show`: a
         ```encounter block to put in your answer as it is. The app renders it
-        as a card with every stat block, HP to track and initiative to roll,
-        so don't reprint the stat blocks yourself.
+        as a card with every stat block and a button to run the fight, so
+        don't reprint the stat blocks yourself.
 
         Args:
+            title: A short name for the fight, as a DM would file it: "Boar hunt at the cave", "Gaius and Argyn on Yonder".
             creatures: Each kind of creature: name (as the book gives it), count, and optionally hp and note.
             party_size: How many characters, if not the campaign's party.
             party_level: Their level, if not the campaign's party's average.
@@ -329,7 +336,10 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         result = encounters.build(store, campaign, spec)
         for c, found in zip(spec.creatures, result["creatures"]):
             c.id = found["id"]  # the card shows what was matched here, whatever names change later
-        show = "```encounter\n" + spec.model_dump_json(exclude_none=True, exclude_defaults=True) + "\n```"
+        encounter_id = store.create_encounter(
+            campaign, ctx.user_id, ctx.conversation_id, title or "Encounter",
+            spec.model_dump(exclude_none=True, exclude_defaults=True))
+        show = "```encounter\n" + json.dumps({"id": encounter_id}) + "\n```"
         out = encounters.summary(result) | {"show": show}
         if party is None:
             out["no_difficulty"] = ("The party's " + ("level" if size else "size and level")

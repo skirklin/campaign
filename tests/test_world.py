@@ -394,30 +394,16 @@ def test_the_schema_is_made_whole_and_the_deployed_database_brought_up_to_it(tmp
         {"parent": 0, "depth": 1, "title": "Part", "page_start": 1, "page_end": 1, "kind": "leaf",
          "chars": 9, "key": "k-leaf"},
     ])
-    # The deployment as it stands: version 19, where a digest node was a leaf or a branch, and nothing else.
-    s.conn.executescript("""
-        PRAGMA foreign_keys = OFF;
-        CREATE TABLE d19 (key TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK (kind IN ('leaf', 'branch')),
-            output TEXT NOT NULL, model TEXT NOT NULL, input_tokens INTEGER NOT NULL DEFAULT 0,
-            output_tokens INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
-        INSERT INTO d19 SELECT * FROM digests; DROP TABLE digests; ALTER TABLE d19 RENAME TO digests;
-        CREATE TABLE n19 (id INTEGER PRIMARY KEY, source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
-            parent_id INTEGER REFERENCES digest_nodes(id) ON DELETE CASCADE, seq INTEGER NOT NULL,
-            depth INTEGER NOT NULL, title TEXT NOT NULL, page_start INTEGER, page_end INTEGER,
-            is_leaf INTEGER NOT NULL, chars INTEGER NOT NULL DEFAULT 0, digest_key TEXT, error TEXT);
-        INSERT INTO n19 SELECT id, source_id, parent_id, seq, depth, title, page_start, page_end, kind = 'leaf',
-            chars, digest_key, error FROM digest_nodes;
-        DROP TABLE digest_nodes; ALTER TABLE n19 RENAME TO digest_nodes;
-        CREATE INDEX digest_nodes_source ON digest_nodes(source_id, seq);
-        PRAGMA user_version = 19; PRAGMA foreign_keys = ON;""")
+    conv = s.create_conversation(camp, None, "Prep")
+    # The deployment as it stands: version 20, before encounters were saved.
+    s.conn.executescript("DROP TABLE encounters; PRAGMA user_version = 20;")
     s.close()
     s = Store(db)
     assert s.schema_version == SCHEMA_VERSION
-    plan = s.existing_digest_plan(src)
-    assert [(r["id"], r["kind"], r["parent"], r["digest_key"]) for r in plan] == [
-        (root, "branch", None, "k-root"), (leaf, "leaf", 0, "k-leaf")]
-    assert s.digest_status(src)["done"] == 2 and s.digest_outline(src)[0]["summary"] == "The book."
-    s.put_digest("k-sb", "statblock", {"entities": []}, "m", 10, 5)  # the new kind is allowed
+    assert s.digest_status(src)["done"] == 2 and s.conversation(conv)["title"] == "Prep"  # what was there stays
+    e = s.create_encounter(camp, None, conv, "Boar hunt", {"creatures": [{"name": "Great Boar"}]})
+    s.delete_conversation(conv)
+    assert s.encounter(e)["conversation_id"] is None  # an encounter outlives the chat it was made in
     assert list((tmp_path / "backups").glob(f"campaign-*-pre-v{SCHEMA_VERSION}.db"))
     s.close()
     assert Store(db).schema_version == SCHEMA_VERSION  # reopening changes nothing
