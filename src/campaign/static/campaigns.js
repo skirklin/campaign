@@ -9,7 +9,8 @@ import { renderMarkdown, inline, statBlockFromData } from "./markdown.js";
 import { encounterFence, encountersTab } from "./encounter.js";
 
 export async function campaignList() {
-  const [campaigns, info] = await Promise.all([api("GET", "/api/campaigns"), api("GET", "/api/info").catch(() => null)]);
+  const [campaigns, info, me] = await Promise.all([
+    api("GET", "/api/campaigns"), api("GET", "/api/info").catch(() => null), whoami()]);
   const name = h("input", { placeholder: "Campaign name", required: true, "aria-label": "Campaign name" });
   const role = h("select", { "aria-label": "Your role" },
     h("option", { value: "dm" }, "I'm the DM"), h("option", { value: "player" }, "I'm a player"));
@@ -32,7 +33,8 @@ export async function campaignList() {
     ),
     h("form.inline-form", { onsubmit: create }, name, role, h("button.primary", { type: "submit" }, "Create")),
     h("p.muted.small", "In a player campaign the assistant never sees DM-only material or anything the party hasn't discovered."),
-    info && h("p.muted.small.data-location",
+    // Where the data lives is for whoever runs the server, not everyone who signs in.
+    info && (me.local || me.is_admin) && h("p.muted.small.data-location",
       "Data is stored in ", h("code", info.data_dir),
       ` (schema v${info.schema_version}, ${info.originals.files} original files, ${(info.originals.bytes / 1e6).toFixed(1)} MB).`),
   );
@@ -78,8 +80,8 @@ async function askTab(c, _me, convId) {
   const thread = h("div.chat-thread");
   const head = h("div.chat-head");
   const input = h("textarea", { rows: 1, placeholder: c.role === "player"
-    ? "Ask about the campaign: what the party knows, rules, your character…"
-    : "Ask about the module, the world, or tell it what happened…", "aria-label": "Message" });
+    ? "Ask about the campaign or your character…"
+    : "Ask, or tell it what happened…", "aria-label": "Message" });
   const send = h("button.primary.send", { type: "submit", title: "Send", "aria-label": "Send" }, "↑");
   const fences = { encounter: encounterFence(c.slug) };
 
@@ -287,7 +289,7 @@ function ago(iso) {
   return then.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-// What an answer cost, quietly under it: "14.2k tokens · 4 lookups · 21s · $0.06".
+// What an answer cost, folded away under it: "14.2k tokens · 4 lookups · 21s · $0.06".
 function costLine(u) {
   const k = (n) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`);
   const total = u.input_tokens + u.cache_read_tokens + u.cache_write_tokens + u.output_tokens;
@@ -295,10 +297,11 @@ function costLine(u) {
   if (u.tool_calls) parts.push(`${u.tool_calls} lookup${u.tool_calls === 1 ? "" : "s"}`);
   if (u.seconds) parts.push(`${Math.round(u.seconds)}s`);
   if (u.cost_usd != null) parts.push(`$${u.cost_usd < 0.01 ? u.cost_usd.toFixed(3) : u.cost_usd.toFixed(2)}`);
-  return h("p.chat-cost", {
+  // Folded away: what an answer cost is there for whoever wants it, not a price tag on every question.
+  return h("details.chat-cost", {
     title: `${u.model}: ${u.input_tokens} input, ${u.cache_read_tokens} cached, ${u.cache_write_tokens} written to cache, `
       + `${u.output_tokens} output, in ${u.api_calls} calls`,
-  }, parts.join(" · "));
+  }, h("summary", { "aria-label": "What this answer cost" }, "ⓘ"), h("span", parts.join(" · ")));
 }
 
 // -- party ---------------------------------------------------------------------
@@ -365,7 +368,7 @@ function scanForm(c, jobs) {
     file.value = "";
   });
   return h("p.inline-form", btn, file,
-    h("span.muted.small", "A photo or PDF of a paper sheet. Claude reads it into a new character you can then "
+    h("span.muted.small", "A photo or PDF of a paper sheet. The assistant reads it into a new character you can then "
       + "correct; it takes a minute or two and carries on if you leave the page."));
 }
 
@@ -405,7 +408,7 @@ async function sessionsTab(c) {
   const date = h("input", { type: "date", value: new Date().toISOString().slice(0, 10), "aria-label": "Date played" });
   const text = h("textarea", { rows: 8, placeholder: "Paste a transcript or your session notes…", "aria-label": "Transcript" });
   const file = h("input", { type: "file", accept: ".txt,.md,.mp3,.m4a,.wav,.ogg,.flac,.opus,.webm", "aria-label": "Transcript or recording file" });
-  const submit = h("button.primary", { type: "submit" }, "Ingest session");
+  const submit = h("button.primary", { type: "submit" }, "Add session notes");
 
   // Ingests are jobs the server works through in the background: they carry on
   // whether or not this page is open, and survive restarts.
@@ -441,16 +444,18 @@ async function sessionsTab(c) {
       }
     },
   },
-    h("h2", "Add a session"),
+    h("h2", "Add session notes"),
     h("div.identity", h("label.field", h("span", "Session #"), number), h("label.field", h("span", "Played on"), date)),
     text,
     h("div.file-row", h("span.muted", "or upload a transcript or recording:"), file),
     h("div.actions", submit, h("span.muted.small",
-      "Claude reads it, updates NPCs, quests and the journal, and writes a recap. Takes a few minutes, "
-      + "and carries on in the background: you can close this page.")),
+      "The assistant reads them, updates NPCs, quests and the journal, and writes a recap. Takes a few minutes, "
+      + "and carries on in the background: you can close this page. A session can be reverted if it gets things wrong.")),
   );
 
-  return h("div", canEdit(c) && form, jobs.el, h("h2.section-title", "Sessions"), list);
+  // What's been played first; adding to it folds away beneath, open when there's nothing yet.
+  return h("div", h("h2.section-title", "Sessions"), list, jobs.el,
+    canEdit(c) && h("details.add-panel", { open: !data.sessions.length }, h("summary", "+ Add session notes"), form));
 }
 
 // -- jobs ------------------------------------------------------------------------
@@ -588,9 +593,9 @@ async function referenceTab(c) {
       submit.textContent = "Reading…";
       try {
         const r = await api("POST", `${base}/sources`, fd);
-        toast(!r.pending ? `Loaded: ${r.chunks} chunks, digest already cached`
-          : r.digesting ? `Loaded: digesting ${r.pending} sections (${estimateText(r.estimate)})`
-          : `Loaded: ${r.pending} sections to digest, ${estimateText(r.estimate)}`);
+        toast(!r.pending ? "Loaded, and already read"
+          : r.digesting ? `Loaded: reading it now (${estimateText(r.estimate)})`
+          : `Loaded: not read yet, ${estimateText(r.estimate)}`);
         form.reset();
         dmOnly.checked = true;
         refresh();
@@ -605,8 +610,8 @@ async function referenceTab(c) {
     h("h2", "Add reference material"),
     h("div.identity", file, title, kind),
     h("label.check", dmOnly, " DM only ", h("span.muted.small", "(hidden from the assistant in player campaigns)")),
-    h("label.check", digestNow, " Digest with Claude now ",
-      h("span.muted.small", "(builds the outline and the NPC/monster/item catalog. Leave it off to see a cost estimate first; only new or changed sections cost anything)")),
+    h("label.check", digestNow, " Have the assistant read it now ",
+      h("span.muted.small", "(outlines it and catalogs its people, places, things and stat blocks. Leave it off to see what that costs first)")),
     h("div.actions", submit),
   );
 
@@ -632,27 +637,31 @@ async function referenceTab(c) {
       );
     }));
   };
-  return h("div", canEdit(c) && form, h("h2.section-title", "Loaded"), list,
+  return h("div", h("h2.section-title", "Books and notes"), list,
+    canEdit(c) && h("details.add-panel", h("summary", "+ Add a book or notes"), form),
     h("h2.section-title", "Search"), h("form.inline-form", { onsubmit: search }, q, h("button", { type: "submit" }, "Search")), results);
 }
 
 const usd = (x) => (x === null || x === undefined ? "cost unknown" : x < 0.01 ? "<$0.01" : `$${x.toFixed(2)}`);
 const ktok = (n) => `${Math.round(n / 1000)}k tokens`;
-const estimateText = (e) => (e && e.calls ? `about ${usd(e.usd)} with ${e.model}` : "nothing to pay for");
+const estimateText = (e) => (e && e.calls ? `about ${usd(e.usd)} to read` : "nothing to pay for");
+// The particulars (calls, tokens, model), for whoever wants them, on hover rather than on the page.
+const estimateDetail = (e) => (e && e.calls ? `${e.calls} calls with ${e.model}, roughly ${ktok(e.input_tokens)} in and ${ktok(e.output_tokens)} out` : "");
 
+// Where reading a book has got to. "Reading" is the assistant going through the book once, to
+// outline it and catalog its people, places, things and stat blocks.
 function digestLine(d) {
-  const spent = d.input_tokens + d.output_tokens ? ` · ${usd(d.spent_usd)} so far` : "";
-  if (d.running) return h("span.digest-status.running", `Digesting… ${d.done}/${d.total} sections${spent}`);
+  const spentDetail = d.input_tokens + d.output_tokens ? `${ktok(d.input_tokens + d.output_tokens)}, ${usd(d.spent_usd)}` : "";
+  if (d.running) return h("span.digest-status.running", { title: spentDetail }, `Reading… ${d.done} of ${d.total} parts`);
   if (d.done === d.total && d.total) {
-    const tokens = d.input_tokens + d.output_tokens;
-    return h("span.digest-status.done", `Digested · ${d.entities} entries${tokens ? ` · ${ktok(tokens)}, ${usd(d.spent_usd)}` : ""}`);
+    return h("span.digest-status.done", { title: spentDetail && `Reading it cost ${spentDetail}` }, `Read · ${d.entities.toLocaleString()} entries`);
   }
-  const left = d.estimate?.calls ? ` · ${d.estimate.calls} calls left, ${estimateText(d.estimate)}` : "";
-  if (d.stuck) return h("span.digest-status.partial",
-    `${d.done}/${d.total} sections digested; the rest failed or wait on a failure${spent}`);
-  if (!d.done) return h("span.digest-status", `Not digested${left}`);
-  return h("span.digest-status.partial",
-    `${d.done}/${d.total} sections digested${d.failed ? `, ${d.failed} failed` : ""}${spent}${left}`);
+  const left = d.estimate?.calls ? ` · ${estimateText(d.estimate)}` : "";
+  if (d.stuck) return h("span.digest-status.partial", { title: spentDetail },
+    `Read ${d.done} of ${d.total} parts; the rest couldn't be read`);
+  if (!d.done) return h("span.digest-status", { title: estimateDetail(d.estimate) }, `Not read yet${left}`);
+  return h("span.digest-status.partial", { title: estimateDetail(d.estimate) },
+    `Read ${d.done} of ${d.total} parts${d.failed ? `, ${d.failed} couldn't be` : ""}${left}`);
 }
 
 function sourceRow(c, s, refresh) {
@@ -688,18 +697,18 @@ function sourceRow(c, s, refresh) {
           },
         }, h("option", { value: "dm" }, "DM only"), h("option", { value: "all" }, "Everyone")),
       h("div.muted.small",
-        `${s.chunks} chunks${s.first_page ? ` · pages ${s.first_page}–${s.last_page}` : ""} · `,
-        s.has_original
-          ? h("a", { href: `${base}/sources/${s.id}/original` }, "original")
-          : h("span", { title: "Uploaded before originals were kept. Upload it again to enable re-indexing." }, "original not kept"),
-        s.kind !== "transcript" ? [" · ", digestLine(d)] : ""),
+        s.first_page ? `pages ${s.first_page}–${s.last_page} · ` : "",
+        s.has_original ? [h("a", { href: `${base}/sources/${s.id}/original` }, "download"), " · "] : "",
+        s.kind !== "transcript" ? digestLine(d) : ""),
     ),
     h("div.source-actions",
       canDigest && h("button", {
         onclick: async () => {
           const e = d.estimate;
-          if (e?.calls && !confirm(`Digest ${s.title} with ${e.model}?\n\n${e.calls} calls, roughly ${ktok(e.input_tokens)} in and ${ktok(e.output_tokens)} out: ${usd(e.usd)}.`
-            + (e.calibrated_on ? `\n(Based on ${e.calibrated_on} sections already digested with this model.)` : "\n(A first guess: it gets better once a few sections have been digested with this model.)"))) return;
+          if (e?.calls && !confirm(`Have the assistant read ${s.title}? About ${usd(e.usd)}.\n\n`
+            + `It outlines the book and catalogs its people, places, things and stat blocks, so answers can draw on them. `
+            + `${estimateDetail(e)}.`
+            + (e.calibrated_on ? ` (Based on ${e.calibrated_on} parts already read with this model.)` : " (A first guess: it gets better once a few parts have been read.)"))) return;
           try {
             await api("POST", `${base}/sources/${s.id}/digest`);
             refresh();
@@ -707,9 +716,9 @@ function sourceRow(c, s, refresh) {
             toast(err.message, true);
           }
         },
-      }, d.stuck ? "Retry failed" : d.done ? "Resume digest" : "Digest"),
+      }, d.stuck ? "Retry the failed parts" : d.done ? "Finish reading" : "Read the book"),
       canStop && h("button", {
-        title: "Stop digesting: calls already in flight finish and are kept",
+        title: "Stop reading: what's already being read finishes and is kept",
         onclick: async () => {
           await api("DELETE", `${base}/sources/${s.id}/digest`);
           refresh();
@@ -718,7 +727,7 @@ function sourceRow(c, s, refresh) {
       canEdit(c) && h("button.icon", {
         title: "Remove", "aria-label": `Remove ${s.title}`,
         onclick: async () => {
-          if (!confirm(`Remove ${s.title}? The digest cache is kept, so re-uploading it later is free.`)) return;
+          if (!confirm(`Remove ${s.title}? What was read is kept, so uploading it again later costs nothing.`)) return;
           await api("DELETE", `${base}/sources/${s.id}`);
           refresh();
         },
@@ -877,9 +886,10 @@ function highlight(snippet) {
 // -- world state ---------------------------------------------------------------------
 
 const KIND_LABELS = { npc: "NPCs", pc: "Player characters", lore: "Lore" };
-const kindLabel = (k) => KIND_LABELS[k] || `${k}s`;
+const kindLabel = (k) => KIND_LABELS[k] || `${k.charAt(0).toUpperCase()}${k.slice(1)}s`;
 // `name` names a session (sessionNames): recaps by their title.
-const range = (f, name) => (f.valid_to === null ? `since ${name(f.valid_from)}`
+// Nothing for what's been true from the start and still is (the book's facts): the source says enough.
+const range = (f, name) => (f.valid_to === null ? (f.valid_from === 0 ? "" : `since ${name(f.valid_from)}`)
   : f.valid_to === f.valid_from ? `during ${name(f.valid_from)}` : `${name(f.valid_from)} to ${name(f.valid_to)}`);
 const ORIGINS = { ingest: (f, name) => name(f.run_session), chat: () => "chat", manual: () => "edited by hand" };
 const sourceLabel = (f, name) => (f.origin === "book" || !ORIGINS[f.origin] ? f.source || f.origin : ORIGINS[f.origin](f, name))
@@ -914,9 +924,9 @@ async function stateTab(c) {
     shown.forEach((e) => (groups[e.kind] ||= []).push(e));
     out.replaceChildren(
       all.length === 0 ? h("p.empty", inPlay.checked
-        ? "Nothing in play yet. Ingest a session, or tell the assistant what happened."
-        : "The world is empty. Digest a module or ingest a session.") : "",
-      ...Object.entries(groups).map(([k, items]) => h("div",
+        ? "Nothing in play yet. Add session notes, or tell the assistant what happened."
+        : "The world is empty. Have the assistant read a book, or add session notes.") : "",
+      ...Object.entries(groups).sort(([a], [b]) => kindRank(a) - kindRank(b)).map(([k, items]) => h("div",
         h("h2.section-title", `${kindLabel(k)} (${items.length})`),
         h("div.entity-grid", items.map((e) => worldCard(c, e))))),
     );
@@ -931,16 +941,23 @@ async function stateTab(c) {
     out);
 }
 
+// The kinds of thing in the world, in the order a DM reaches for them.
+const KIND_ORDER = ["pc", "npc", "monster", "location", "quest", "item", "faction", "lore"];
+const kindRank = (k) => (KIND_ORDER.includes(k) ? KIND_ORDER.indexOf(k) : KIND_ORDER.length);
+
+// An attribute's name as a person would say it: "uses_stat_block" -> "Stat block".
+const ATTRIBUTE_LABELS = { uses_stat_block: "Stat block" };
+export const attributeLabel = (k) => ATTRIBUTE_LABELS[k] || (k.charAt(0).toUpperCase() + k.slice(1)).replace(/_/g, " ");
+
 function worldCard(c, e) {
-  const attrs = Object.entries(e.current);
+  const attrs = Object.entries(e.current).filter(([k]) => k !== "status");
   return h("a.card.entity", { href: `#/campaigns/${c.slug}/entity/${e.id}` },
     h("div.entity-head", h("strong", e.name),
-      e.current.status && h(`span.badge.status-${e.current.status.replace(/\W+/g, "-")}`, e.current.status)),
+      e.current.status && h(`span.badge.status-${e.current.status.replace(/\W+/g, "-")}`, e.current.status),
+      e.table_activity > 0 && h("span.badge.in-play", { title: "Something has happened to it in play" }, "in play")),
     e.aliases.length > 0 && h("p.muted.small", "aka ", e.aliases.slice(0, 4).join(" · ")),
-    attrs.filter(([k]) => k !== "status").length > 0 && h("dl", attrs.filter(([k]) => k !== "status")
-      .flatMap(([k, v]) => [h("dt", k), h("dd", v)])),
+    attrs.length > 0 && h("dl", attrs.flatMap(([k, v]) => [h("dt", attributeLabel(k)), h("dd", v)])),
     e.headline && h("p", e.headline),
-    h("p.muted.small", `${e.current_facts} current · ${e.past_facts} past${e.table_activity ? "" : " · from the book only"}`),
   );
 }
 
@@ -958,30 +975,28 @@ export async function entityView(slug, id) {
   const sliderLabel = h("span.as-of-label");
   const renderAt = () => {
     const t = Number(slider.value);
-    sliderLabel.textContent = t === now ? `Now (${name(now)})` : `As of ${name(t)}`;
+    sliderLabel.textContent = t === now ? `now (after ${name(now)})` : `after ${name(t)}`;
     body.replaceChildren(...factSections(c, e, t, t === now).filter(Boolean));
   };
   slider.addEventListener("input", renderAt);
 
-  const summary = h("div.card.summary",
-    e.summary ? h("p", e.summary) : h("p.muted", "No summary for the current facts yet."),
-    canEdit(c) && h("button", {
-      onclick: async (ev) => {
-        ev.target.disabled = true;
-        ev.target.textContent = "Writing…";
-        try {
-          const r = await api("POST", `${base}/entities/${id}/summary`);
-          summary.firstChild.replaceWith(h("p", r.summary));
-          ev.target.remove();
-        } catch (err) {
-          toast(err.message, true);
-          ev.target.disabled = false;
-          ev.target.textContent = "Write summary";
-        }
-      },
-    }, e.summary ? "" : "Write summary"),
-  );
-  if (e.summary && canEdit(c)) summary.lastChild.remove();
+  // The summary written from everything known about it, when there is one; otherwise a quiet
+  // button to write one, rather than an empty box at the top of the page.
+  const summary = e.summary ? h("div.card.summary", h("p", e.summary)) : canEdit(c) && h("button.link.small.summarize", {
+    title: "Write a short summary from everything known about it, past and present",
+    onclick: async (ev) => {
+      ev.target.disabled = true;
+      ev.target.textContent = "Writing a summary…";
+      try {
+        const r = await api("POST", `${base}/entities/${id}/summary`);
+        ev.target.replaceWith(h("div.card.summary", h("p", r.summary)));
+      } catch (err) {
+        toast(err.message, true);
+        ev.target.disabled = false;
+        ev.target.textContent = "Summarize";
+      }
+    },
+  }, "Summarize");
 
   const others = list.entities.filter((x) => x.id !== e.id);
   const mergeInput = h("input", { list: "merge-options", placeholder: "Another entity's name", "aria-label": "Entity to merge" });
@@ -1001,12 +1016,13 @@ export async function entityView(slug, id) {
   return h("section.page",
     h("div.page-head", h("a", { href: `#/campaigns/${slug}/state` }, `← ${c.name}`)),
     h("div.page-head", h("h1", e.name), h("span.badge", e.kind),
-      e.character && h("a", { href: `#/characters/${e.character.id}` }, "Character sheet →")),
+      e.character && h("a", { href: `#/characters/${e.character.id}` }, "Character sheet →"),
+      h("span.spacer"), !e.summary && summary),
     e.aliases.length > 0 && h("p.muted", "Also known as ", e.aliases.join(" · ")),
-    summary,
-    now > 0 && h("div.as-of", sliderLabel, slider),
+    e.summary && summary,
+    now > 0 && h("label.as-of", h("span.as-of-title", "Show it as it was "), sliderLabel, slider),
     body,
-    canEdit(c) && h("details.card", h("summary", "Same thing as another entry?"), h("p.muted.small", "Merging keeps both histories; the other name becomes an alias."), merge),
+    canEdit(c) && h("details.card", h("summary", "Merge with another entry…"), h("p.muted.small", "For two entries that are the same thing: both histories are kept, and the other name becomes an alias."), merge),
   );
 }
 
@@ -1027,23 +1043,25 @@ function factSections(c, e, t, isNow) {
   const past = facts.filter((f) => !openAt(f));
   const events = e.all_events.filter((ev) => ev.session <= t);
 
-  const endButton = (f) => isNow && canEdit(c) && openAt(f) && h("button.icon", {
-    title: "No longer true", "aria-label": "Mark as no longer true",
+  const endButton = (f) => isNow && canEdit(c) && openAt(f) && h("button.link.small.end-fact", {
+    title: "It stops being true now; it stays in the history",
     onclick: async () => {
       await api("POST", `${base}/facts/${f.id}/end`);
       location.reload();
     },
-  }, "×");
+  }, "no longer true");
   const factRow = (f, text) => h("li.fact",
     h("span", text || inline(f.statement)),
-    h("span.fact-meta", range(f, name), " · ", sourceLabel(f, name), f.party_knows_from === null ? " · party doesn't know" : ""),
+    h("span.fact-meta", [range(f, name), sourceLabel(f, name)].filter(Boolean).join(" · "),
+      f.party_knows_from === null ? " · party doesn't know" : ""),
     endButton(f));
 
   const add = isNow && canEdit(c) && (() => {
     const statement = h("input", { placeholder: "Something that's now true", required: true, "aria-label": "Statement" });
     const attribute = h("input", { list: "attr-options", placeholder: "attribute (optional)", "aria-label": "Attribute" });
     const value = h("input", { placeholder: "value", "aria-label": "Value" });
-    const known = h("input", { type: "checkbox", checked: true });
+    // A DM's notes are the DM's until they say otherwise; in a player's campaign the party knows it all.
+    const known = h("input", { type: "checkbox", checked: c.role !== "dm" });
     return h("form.card.add-fact", {
       onsubmit: async (ev) => {
         ev.preventDefault();
@@ -1061,6 +1079,7 @@ function factSections(c, e, t, isNow) {
       statement,
       h("div.identity", attribute, value),
       h("datalist", { id: "attr-options" }, ["status", "location", "holder", "disposition", "leader", "allegiance", "condition"].map((a) => h("option", { value: a }))),
+      h("p.muted.small", "Or just tell the assistant in the Ask tab what happened, and it records it."),
       h("label.check", known, " The party knows this"),
       h("p.muted.small", "With an attribute, this replaces the current value, which moves to history."),
       h("div.actions", h("button.primary", { type: "submit" }, "Add")),
@@ -1072,7 +1091,7 @@ function factSections(c, e, t, isNow) {
       h("figcaption", "Read aloud"), h("blockquote", f.value), h("span.fact-meta", sourceLabel(f, name)))),
     h("section.card",
       h("h2", isNow ? "True now" : `True at the end of ${name(t)}`),
-      attrs.length > 0 && h("ul.facts.attrs", attrs.map((f) => factRow(f, h("span", h("strong", f.attribute), ": ", f.value)))),
+      attrs.length > 0 && h("ul.facts.attrs", attrs.map((f) => factRow(f, h("span", h("strong", attributeLabel(f.attribute)), ": ", f.value)))),
       statements.length > 0 && h("ul.facts", statements.map((f) => factRow(f))),
       attrs.length + statements.length === 0 && h("p.empty", "Nothing recorded."),
     ),
@@ -1082,6 +1101,11 @@ function factSections(c, e, t, isNow) {
       isNow && h("p.muted.small", "When the party takes something, mark it no longer true (×) and add it to the party's inventory (Party tab).")),
     ...statBlocks.map((f) => h("div.statblock-wrap",
       statBlockFromData(e.name, JSON.parse(f.value)), h("p.fact-meta", sourceLabel(f, name)))),
+    // No block of its own, but one it runs on ("Heleka, a sea hag"): that one, saying whose it is.
+    !statBlocks.length && e.borrowed_stat_block && h("div.statblock-wrap",
+      h("p.small.muted.borrowed", "Runs on the ", h("a", { href: `#/campaigns/${c.slug}/entity/${e.borrowed_stat_block.from.id}` },
+        e.borrowed_stat_block.from.name), " stat block"),
+      statBlockFromData(`${e.name} (${e.borrowed_stat_block.from.name})`, e.borrowed_stat_block.stat_block)),
     maybe.length > 0 && h("section.card", h("h2", "Rumors and possibilities"),
       h("ul.facts", maybe.map((f) => factRow(f, `${f.modality === "rumor" ? "Rumor: " : "Possible: "}${f.statement}`)))),
     past.length > 0 && h("section.card", h("h2", "No longer true"), h("ul.facts.past", past.map((f) => factRow(f)))),

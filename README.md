@@ -103,9 +103,9 @@ uv run campaign web            # http://127.0.0.1:8765
     above them. Answers are Markdown, rendered as it arrives (headings,
     lists, tables; the book's read-aloud text as a boxed quote); a stat
     block comes as a card laid out like the books', and dice in any answer
-    or stat block ("3d8+5", "+8 to hit") are buttons that roll. Under each
-    answer is what it cost: tokens, lookups, seconds and dollars (hover
-    for the breakdown into cached and uncached input).
+    or stat block ("3d8+5", "+8 to hit") are buttons that roll. What each
+    answer cost is folded away under it (ⓘ): tokens, lookups, seconds and
+    dollars, with the breakdown into cached and uncached input on hover.
     The tab opens ready for a new question. Conversations are kept (per
     person): the latest few are listed under the suggestions, the rest
     behind "All N conversations" (an encounter made in one is kept if
@@ -132,12 +132,14 @@ uv run campaign web            # http://127.0.0.1:8765
     The fight is saved on the server as it goes, so a reload or another
     device carries on, until **End the fight**. Encounters are private to
     whoever they were made for, like conversations.
-  - **Sessions**: paste a transcript, or upload a text file or a recording,
-    to run an ingest. A live log shows what Claude is reading and
-    recording. Each past session has its recap and a **Revert** button.
+  - **Sessions**: what's been played, then **Add session notes**: paste
+    notes or a transcript, or upload a text file or a recording, to run an
+    ingest. A live log shows what the assistant is reading and recording. Each past session has its recap and a **Revert** button.
     An ingest is a [job](#background-jobs): it continues with the page
     closed and survives restarts and deploys.
-  - **Reference**: upload module PDFs and notes, mark them DM-only (or
+  - **Reference**: the books and notes, then **Add a book or notes** to
+    upload module PDFs and notes. Each is **read** once (the digest,
+    below), with what reading it costs asked first. Mark them DM-only (or
     switch one to Everyone later: players then see its text and what the
     world took from it), and search the text directly.
   - **World state**: every person, place, item and quest, from the book and
@@ -398,7 +400,8 @@ that isn't a sheet, a character name already taken) fails at once.
 **Cancel** stops a job at its next step and undoes what it wrote. A new
 kind is a function in `jobs.KINDS` plus an endpoint that adds the row.
 
-**Digesting is a target, not a job.** Clicking **Digest** records on the
+**Digesting is a target, not a job.** The page calls it reading.
+Clicking **Read the book** records on the
 source which model it should be digested with; a loop in the server
 (`digest.Reconciler`) compares that with the digest cache and runs
 whatever's missing. It keeps no state of its own, so it doesn't matter
@@ -406,12 +409,12 @@ whether the page is open, the server restarts or a deploy replaces it: the
 next pass picks up from the database, and nothing finished is paid for
 twice. **Stop** clears the target (calls already in flight finish and are
 kept). A section that fails is retried after 1 and then 4 minutes, then
-waits until someone clicks **Retry failed**, so a broken section can't run
+waits until someone clicks **Retry the failed parts**, so a broken section can't run
 up a bill.
 
 **In the web UI**, uploading doesn't digest unless you tick the box. The
-source's line shows how many calls are left and a rough dollar estimate,
-and **Digest** asks before spending it. The first estimate is a guess; once
+source's line shows a rough dollar estimate (the calls, tokens and model on
+hover), and **Read the book** asks before spending it. The first estimate is a guess; once
 a few sections have been digested with the same model, it uses their
 measured token counts. While a digest runs, the source's page refreshes on
 its own: sections fill in as they finish, each one's entities can be opened

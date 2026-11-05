@@ -329,7 +329,8 @@ export async function encounterView(slug, id) {
   const conditionInfo = new Map();  // combatant key -> the condition whose rules are showing
 
   const hpControl = (x) => {
-    const amount = h("input", { type: "number", min: 0, placeholder: "0", inputmode: "numeric", "aria-label": `${x.name} damage or healing` });
+    const amount = h("input", { type: "number", min: 0, placeholder: "HP", inputmode: "numeric", title: "How much damage or healing",
+      "aria-label": `${x.name} damage or healing` });
     const apply = (sign) => {
       const n = Number(amount.value);
       if (!n) return amount.focus();

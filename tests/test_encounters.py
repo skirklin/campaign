@@ -204,3 +204,21 @@ def test_a_name_finds_the_creature_with_the_stat_block_not_the_lore():
     (c,) = encounters.build(store, camp, encounters.Spec(creatures=[{"name": "Sydon"}]))["creatures"]
     assert c["name"] == "Sydon, Lord of Storms" and c["xp_each"] == 50000
     assert world.stat_block(world.resolve("Galimus")["id"])[1]["name"] == "Sydon, Lord of Storms"
+
+
+def test_an_entity_page_shows_the_stat_block_it_runs_on(tmp_path):
+    db = tmp_path / "c.db"
+    store = Store(db)
+    camp = store.create_campaign("Odyssey", "dm")
+    src = store.add_source(camp, "Odyssey", "module", [{"heading": "", "text": "x", "page": 1}])
+    World(store, camp).apply_book(src, [
+        entry("Sea Hag", block("14 (natural armor)", "52 (7d8 + 21)", "2 (450 XP)")),
+        {**entry("Heleka", None), "stat_block_of": "sea hag"},
+    ], key="k")
+    heleka, hag = (World(store, camp).resolve(n)["id"] for n in ("Heleka", "Sea Hag"))
+    store.close()
+    with TestClient(create_app(db)) as client:
+        page = client.get(f"/api/campaigns/odyssey/entities/{heleka}").json()
+        assert page["borrowed_stat_block"]["from"] == {"id": hag, "name": "Sea Hag"}
+        assert page["borrowed_stat_block"]["stat_block"]["hit_points"] == "52 (7d8 + 21)"
+        assert client.get(f"/api/campaigns/odyssey/entities/{hag}").json()["borrowed_stat_block"] is None  # its own

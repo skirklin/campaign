@@ -627,6 +627,10 @@ def create_app(
         view["timeline"] = w.timeline(entity_id)
         view["all_events"] = w.events(entity_id=entity_id)
         view["character"] = s.character_for_entity(entity_id)
+        # The stat block it runs on when it has none of its own ("Heleka, a sea hag"), to show here too.
+        found = None if w.attribute_values(entity_id, "stat_block") else w.stat_block(entity_id)
+        view["borrowed_stat_block"] = found and {"from": {"id": found[1]["id"], "name": found[1]["name"]},
+                                                 "stat_block": found[0]}
         return view
 
     @app.post("/api/campaigns/{slug}/entities/{entity_id}/facts", status_code=201)
