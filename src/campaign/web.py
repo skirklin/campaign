@@ -1056,11 +1056,15 @@ def create_app(
             "sheet_url": ch["sheet_url"],
         }
         if sheet is None:
-            return card | {"summary": "", "species": "", "hp": None}
+            return card | {"summary": "", "species": "", "hp": None, "stats": None}
+        d = sheet.derived()
         return card | {
             "summary": " / ".join(f"{c.name} {c.level}" for c in sheet.classes),
             "species": sheet.species,
             "hp": sheet.hp.model_dump() | {"max": sheet.hp_max},
+            # What the DM wants of each of them in a fight, at a glance.
+            "stats": {"ac": d["ac"]["total"], "passive_perception": d["passive_perception"]["total"],
+                      "initiative": d["initiative"]["total"]},
         }
 
     @app.get("/api/characters")

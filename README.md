@@ -118,8 +118,16 @@ uv run campaign web            # http://127.0.0.1:8765
     and how it stands. **Run this fight** opens the tracker:
     - initiative: the monsters' rolled, one roll per kind of creature,
       and the party's typed in; anyone else can be added;
-    - the turn order, with **Next turn** and the round;
-    - each monster's hit points, with **Hit** and **Heal**;
+    - the turn order, with **Next turn**, **Back** and the round. Each
+      combatant is one line (initiative, name, AC, HP, conditions,
+      legendary ticks) that opens to its controls on its turn or when
+      tapped; monsters of one kind on one count are one block and one
+      turn, as group initiative goes; the fallen shrink to a thin line and
+      are passed over; the party show their AC and passive Perception;
+    - each monster's hit points, with **Hit** and **Heal**, and ticked
+      monsters (one at a time, or a whole block) taking one amount at once:
+      **Hit**, **Half** (rounded down, for those who saved) or **Heal**;
+    - a log of what changed, with **Undo**;
     - conditions as chips, each opening its rule as the SRD words it;
     - legendary actions, which come back at the start of the creature's
       turn, and legendary resistance;

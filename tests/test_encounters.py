@@ -222,3 +222,17 @@ def test_an_entity_page_shows_the_stat_block_it_runs_on(tmp_path):
         assert page["borrowed_stat_block"]["from"] == {"id": hag, "name": "Sea Hag"}
         assert page["borrowed_stat_block"]["stat_block"]["hit_points"] == "52 (7d8 + 21)"
         assert client.get(f"/api/campaigns/odyssey/entities/{hag}").json()["borrowed_stat_block"] is None  # its own
+
+
+def test_the_party_comes_with_what_a_dm_wants_of_it_in_a_fight(tmp_path):
+    db = tmp_path / "c.db"
+    store = Store(db)
+    camp = store.create_campaign("Odyssey", "dm")
+    store.create_character({"name": "Cid", "abilities": {"dex": 14, "wis": 12}, "skill_proficiencies": ["perception"],
+                            "classes": [{"name": "Barbarian", "level": 5}]}, camp.id)
+    store.create_character(None, camp.id, name="Ione")  # her sheet is kept elsewhere: nothing to show
+    store.close()
+    with TestClient(create_app(db)) as client:
+        cid, ione = client.get("/api/campaigns/odyssey/characters").json()
+    assert cid["stats"] == {"ac": 12, "passive_perception": 14, "initiative": 2}  # 10 + Dex; 10 + Wis + proficiency
+    assert ione["stats"] is None
