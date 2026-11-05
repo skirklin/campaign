@@ -1151,20 +1151,25 @@ class Reconciler(LeasedLoop):
     _replanned = False
 
     def replan(self) -> None:
-        """Once per start: plan every source with a target again (no API calls).
+        """Once per start: plan every source again (no API calls).
 
-        A new version of the digest (LEAF_VERSION, BRANCH_VERSION) or of how a
-        catalog is applied to the world (world.APPLY_VERSION) changes the
-        keys; planning saves the new ones, so changed sections get digested,
-        and a cached catalog is applied again under the new rules.
+        A new version of the digest (LEAF_VERSION, BRANCH_VERSION, STATBLOCK_VERSION)
+        or of how a catalog is applied to the world (world.APPLY_VERSION) changes
+        the keys; planning saves the new ones, so a source with a target gets
+        its changed sections digested, and one without shows what's left to do
+        (and its Digest button). Either way a catalog the cache already holds,
+        such as a book another campaign has digested under the new version, is
+        applied at once.
         """
         s = Store(self.db)
         try:
-            for t in s.digest_targets():
+            for src in s.all_sources():
                 if self.stopping:
                     return
+                if src["kind"] == "transcript" and not src["digest_model"]:
+                    continue
                 try:
-                    plan(s, t["id"], t["model"])
+                    plan(s, src["id"], src["digest_model"] or MODEL)
                 except Exception:  # one bad source shouldn't stop the rest
                     traceback.print_exc()
         finally:

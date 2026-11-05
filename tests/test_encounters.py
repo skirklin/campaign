@@ -159,3 +159,26 @@ def test_a_creature_runs_on_the_stat_block_the_book_says_it_uses():
     text = tools["stat_block"]("Taneias")
     assert text.startswith("Taneias (Scout)\nAC 13 (leather armor) · HP 16 (3d8 + 3)")
     assert "no stat block" in tools["stat_block"]("Kyrah")
+
+
+def test_a_name_finds_the_creature_with_the_stat_block_not_the_lore():
+    """Odyssey's world has "Sydon", a piece of lore about the Titans, beside the Titan himself, filed
+    as "Sydon, Lord of Storms" with "Sydon" among his aliases, and it's his block a fight wants."""
+    store = Store(":memory:")
+    camp = store.create_campaign("Odyssey", "dm")
+    src = store.add_source(camp, "Odyssey", "module", [{"heading": "", "text": "x", "page": 1}])
+    World(store, camp).apply_book(src, [
+        {**entry("Sydon", None), "kind": "lore", "facts": ["The Titans are feared everywhere."]},
+        {**entry("Sydon, Lord of Storms", block("22 (natural)", "313 (19d12 + 190)", "23 (50,000 XP)"),
+                 aliases=["Sydon"]), "kind": "npc"},
+        {**entry("Galimus", None), "kind": "npc", "stat_block_of": "Sydon"},  # a stand-in, run on the Titan's block
+    ], key="k")
+    world = World(store, camp)
+    assert world.resolve("Sydon")["kind"] == "lore"  # names still mean what they did everywhere else
+    assert world.creature("Sydon")["name"] == "Sydon, Lord of Storms"
+
+    tools = {t.__name__: t for t in build_tools(ToolContext(store, camp))}
+    assert tools["stat_block"]("Sydon").startswith("Sydon, Lord of Storms\nAC 22 (natural) · HP 313")
+    (c,) = encounters.build(store, camp, encounters.Spec(creatures=[{"name": "Sydon"}]))["creatures"]
+    assert c["name"] == "Sydon, Lord of Storms" and c["xp_each"] == 50000
+    assert world.stat_block(world.resolve("Galimus")["id"])[1]["name"] == "Sydon, Lord of Storms"

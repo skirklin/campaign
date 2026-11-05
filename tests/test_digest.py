@@ -756,3 +756,34 @@ def test_a_failed_stat_block_doesnt_hold_up_the_book(env, monkeypatch):
     digest.retry_failed(store, r["id"])
     digest.run(db, r["id"], client=FakeDigest())
     assert world.attribute_values(world.resolve("Wolf")["id"], "stat_block")  # and again once it's read
+
+
+def test_a_copy_without_a_target_catches_up_from_the_cache_after_a_new_version(env, monkeypatch):
+    """What happened to Odyssey's copy of the SRD: the same book in two campaigns, digested once, then
+    a new version of the digest. The copy with a target is digested again; the one without is planned
+    too, so it shows what's left (and its Digest button), and takes the new catalog from the cache."""
+    store, camp, db = env
+    copy_camp = store.create_campaign("Odyssey", "dm")
+    a = library.add_reference(store, camp, BESTIARY.encode(), "bestiary.md", title="Bestiary", kind="module")
+    store.set_digest_target(a["id"], digest.MODEL, "medium")
+    loop = digest.Reconciler(db, client_factory=FakeDigest)
+    while loop.pass_once():
+        pass
+    b = library.add_reference(store, copy_camp, BESTIARY.encode(), "bestiary.md", title="Bestiary", kind="module")
+    assert b["pending"] == 0 and store.source(b["id"])["digest_model"] is None
+
+    monkeypatch.setattr(digest, "STATBLOCK_VERSION", digest.STATBLOCK_VERSION + 1)
+    store.conn.execute("UPDATE leases SET expires_at = 0")
+    store.conn.commit()
+    loop = digest.Reconciler(db, client_factory=FakeDigest)
+    loop.replan()
+    status = store.digest_status(b["id"])
+    assert status["done"] < status["total"]  # out of date, and the page says so
+    while loop.reconcile_once():  # the one with a target is digested again...
+        pass
+    loop = digest.Reconciler(db, client_factory=FakeDigest)
+    loop.replan()  # ...and the next start finds the copy's new catalog in the cache, for nothing
+    status = store.digest_status(b["id"])
+    assert status["done"] == status["total"]
+    keys = {r["input_key"] for r in store.conn.execute("SELECT input_key FROM runs WHERE kind = 'book'")}
+    assert len(keys) == 1  # both campaigns applied the same new catalog
