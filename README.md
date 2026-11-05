@@ -119,15 +119,24 @@ uv run campaign web            # http://127.0.0.1:8765
     access it can also record what you tell it happened.
   - **Encounters**: every fight the assistant has put together for you,
     saved apart from the conversation it came from, with its difficulty
-    and how it stands. **Run this fight** opens the tracker:
-    - initiative: the monsters' rolled, one roll per kind of creature,
-      and the party's typed in; anyone else can be added;
+    and how it stands. **Open at the table** opens the fight's page,
+    which is a reference first:
+    - every kind of creature in the fight is one line (how many, AC, HP,
+      speed, CR) that opens to its stat block and the book text it was
+      read from. One opens at a time, folding the one before, so the rest
+      stay a glance away; **Open all** lays them all out to read side by
+      side. A last line holds the conditions' rules as the SRD words them;
+    - beside it on a laptop, or on a phone a tab away (**Stat blocks** /
+      **Turn order**), the DM can track the fight if they want to:
+      **Track turns** sets initiative (the monsters' rolled, one roll per
+      kind of creature, and the party's typed in; anyone else can be added);
     - the turn order, with **Next turn**, **Back** and the round. Each
       combatant is one line (initiative, name, AC, HP, conditions,
       legendary ticks) that opens to its controls on its turn or when
       tapped; monsters of one kind on one count are one block and one
       turn, as group initiative goes; the fallen shrink to a thin line and
       are passed over; the party show their AC and passive Perception;
+      **Stat block** on a monster opens its block in the reference;
     - each monster's hit points, with **Hit** and **Heal**, and ticked
       monsters (one at a time, or a whole block) taking one amount at once:
       **Hit**, **Half** (rounded down, for those who saved) or **Heal**;
@@ -135,13 +144,11 @@ uv run campaign web            # http://127.0.0.1:8765
     - conditions as chips, each opening its rule as the SRD words it;
     - legendary actions, which come back at the start of the creature's
       turn, and legendary resistance;
-    - the lair's turn on initiative 20 when a creature has lair actions;
-    - every kind of creature's stat block on screen at once: on a laptop
-      beside the turn order, in as many columns as fit and scrolling on
-      their own, the one whose turn it is lit up and brought into view;
-      on a phone under it. Each folds away, and all of them at once.
+    - the lair's turn on initiative 20 when a creature has lair actions.
 
-    The fight is saved on the server as it goes, so a reload or another
+    Stepping through turns never opens or folds a stat block: the
+    reference only marks whose turn it is, and stays as the DM left it.
+    The turn order is saved on the server as it goes, so a reload or another
     device carries on, until **End the fight**. Encounters are private to
     whoever they were made for, like conversations.
   - **Sessions**: the campaign's timeline, newest first: each session

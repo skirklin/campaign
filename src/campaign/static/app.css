@@ -1130,29 +1130,37 @@ a.button.primary { background: var(--accent); border-color: var(--accent); color
 .encounter-row-foot { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
 
 .tracker { max-width: 46rem; margin: 0 auto; }
-.tracker-panel { margin-top: 1.4rem; }
 .tracker-panel-head { display: flex; align-items: baseline; gap: .8rem; margin-bottom: .4rem; }
 .tracker-panel-head h3 { margin: 0; font: 600 1.05rem var(--serif); }
 .creature-sheets { display: flex; flex-direction: column; gap: .5rem; }
-.creature-sheet { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: .4rem .6rem; }
+.creature-sheet { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: .45rem .7rem; scroll-margin-top: calc(var(--below-topbar) + 3.2rem); }
 .creature-sheet > summary { cursor: pointer; display: flex; flex-wrap: wrap; align-items: baseline; gap: .2rem .6rem; }
 .creature-sheet.current { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
-.creature-sheet .statblock-card { margin: .5rem 0 .1rem; max-width: none; font-size: .86rem; padding: .6rem .75rem .7rem; }
+.creature-sheet .their-turn { display: none; }
+.creature-sheet.current .their-turn { display: inline-block; }
+.creature-sheet .statblock-card { margin: .5rem 0 .1rem; max-width: none; font-size: .9rem; padding: .6rem .75rem .7rem; }
 .creature-sheet .statblock-card h4 { font-size: 1.15rem; }
-/* On a laptop, the whole fight on one screen: the turn order on the left, and beside it every
-   kind of creature's stat block at once, in as many columns as fit, scrolling on their own. */
+.conditions-ref dl { margin: .5rem 0 .2rem; font-size: .9rem; }
+.conditions-ref dt { font-weight: 600; text-transform: capitalize; margin-top: .4rem; }
+.conditions-ref dd { margin: 0; }
+.conditions-ref dd ul { margin: .1rem 0; padding-left: 1.1rem; }
+.track-intro { background: var(--surface); border: 1px dashed var(--border); border-radius: var(--radius-sm); padding: .7rem .9rem; }
+.track-intro p { margin: 0 0 .5rem; }
+/* On a phone the reference and the turn order are two tabs; on a laptop, side by side. */
+.fight-tabs { display: flex; gap: .3rem; margin: .6rem 0 .8rem; position: sticky; top: var(--below-topbar); z-index: 3; background: var(--bg); padding: .3rem 0; }
+.fight-tabs button { flex: 1; border-radius: 999px; }
+.fight-tabs button.active { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+.tracker-layout[data-pane=ref] .fight-track, .tracker-layout[data-pane=track] .fight-ref { display: none; }
 @media (min-width: 1100px) {
   main:has(.tracker) { max-width: none; }
-  .tracker { max-width: none; }
-  .tracker-layout { display: grid; grid-template-columns: minmax(26rem, 34rem) minmax(0, 1fr); gap: 1.4rem; align-items: start; }
-  .tracker-panel {
-    margin-top: 0; position: sticky; top: calc(var(--below-topbar) + .5rem);
+  .tracker { max-width: 88rem; }
+  .fight-tabs { display: none; }
+  .tracker-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(26rem, 32rem); gap: 1.6rem; align-items: start; margin-top: 1rem; }
+  .tracker-layout[data-pane] .fight-track, .tracker-layout[data-pane] .fight-ref { display: block; }
+  .fight-track {
+    position: sticky; top: calc(var(--below-topbar) + .5rem);
     max-height: calc(100vh - var(--below-topbar) - 1rem); overflow: auto; padding-right: .3rem;
   }
-  .creature-sheets { display: block; columns: 21rem; column-gap: .8rem; }
-  .creature-sheet { break-inside: avoid; margin-bottom: .6rem; }
-  .creature-sheet .sb-abilities .dice-chip { font-size: .75rem; }
-  .combatant .sheet-link, .combatant-group .sheet-link { display: none; }  /* every stat block is already on screen */
 }
 .tracker-title { display: flex; align-items: center; flex-wrap: wrap; gap: .4rem .6rem; }
 .tracker-title h1 { margin: 0; }
@@ -1223,8 +1231,6 @@ a.button.primary { background: var(--accent); border-color: var(--accent); color
 .tracker-log > summary { cursor: pointer; color: var(--muted); }
 .tracker-log ol { list-style: none; margin: .3rem 0 0; padding: 0; max-height: 12rem; overflow: auto; }
 .tracker-log li { padding: .1rem 0; border-bottom: 1px solid var(--border); }
-.inline-sheet { margin: .4rem 0 .1rem; }
-.inline-sheet > summary { cursor: pointer; color: var(--accent); }
 .condition-chip {
   padding: .1rem .55rem; border-radius: 999px; font-size: .82rem; text-transform: capitalize;
   background: color-mix(in srgb, var(--warn) 14%, transparent); border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
@@ -1291,3 +1297,10 @@ ul.about-facts { margin: .3rem 0; padding-left: 1.1rem; }
 ul.about-facts li { margin: .15rem 0; }
 .about-license { font-size: .72rem; margin: 0; }
 .item-rules > button.link { color: var(--accent); text-decoration: underline; margin-top: .2rem; }
+/* Under the phone's tabs; in the laptop's own scrolling column, at its top. */
+.fight-track .tracker-bar { top: calc(var(--below-topbar) + 3rem); }
+.fight-track .bulk-bar { top: calc(var(--below-topbar) + 6.6rem); }
+@media (min-width: 1100px) {
+  .fight-track .tracker-bar { top: 0; }
+  .fight-track .bulk-bar { top: 3.6rem; }
+}
