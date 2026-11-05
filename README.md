@@ -106,8 +106,11 @@ uv run campaign web            # http://127.0.0.1:8765
     or stat block ("3d8+5", "+8 to hit") are buttons that roll. Under each
     answer is what it cost: tokens, lookups, seconds and dollars (hover
     for the breakdown into cached and uncached input).
-    Conversations are kept (per person), so you can come back to one; in
-    a player campaign it only knows what the party knows. With editor
+    The tab opens ready for a new question. Conversations are kept (per
+    person): the latest few are listed under the suggestions, the rest
+    behind "All N conversations", and each has its own link, so a reload
+    or going back keeps your place. In a player campaign it only knows
+    what the party knows. With editor
     access it can also record what you tell it happened.
   - **Sessions**: paste a transcript, or upload a text file or a recording,
     to run an ingest. A live log shows what Claude is reading and

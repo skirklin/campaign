@@ -48,14 +48,14 @@ const TABS = [
   ["members", "Members"],  // only with sign-in on
 ];
 
-export async function campaignView(slug, tab) {
+export async function campaignView(slug, tab, arg) {
   const [campaigns, me] = await Promise.all([api("GET", "/api/campaigns"), whoami()]);
   const c = campaigns.find((x) => x.slug === slug);
   if (!c) throw new Error(`No campaign "${slug}".`);
   const tabs = TABS.filter(([key]) => key !== "members" || !me.local);
   const body = h("div.tab-body", h("p.muted", "Loading…"));
   const render = { ask: askTab, ingest: sessionsTab, party: partyTab, reference: referenceTab, state: stateTab, journal: journalTab, members: membersTab }[tab] || sessionsTab;
-  render(c, me).then((el) => body.replaceChildren(el), (err) => body.replaceChildren(h("p.empty", err.message)));
+  render(c, me, arg).then((el) => body.replaceChildren(el), (err) => body.replaceChildren(h("p.empty", err.message)));
   return h("section.page",
     h("div.page-head", h("h1", c.name), h(`span.badge.${c.role}`, c.role === "dm" ? "DM" : "Player"),
       !canEdit(c) && h("span.badge", "view only")),
@@ -66,12 +66,16 @@ export async function campaignView(slug, tab) {
 
 // -- ask: chat with the campaign assistant ----------------------------------------
 
-async function askTab(c) {
+// The tab opens ready for a new question, with recent conversations listed
+// quietly under the suggestions. A conversation has its own address
+// (#/campaigns/<slug>/ask/<id>), so reloading or going back keeps your place.
+async function askTab(c, _me, convId) {
   const base = `/api/campaigns/${c.slug}`;
+  const askHref = `#/campaigns/${c.slug}/ask`;
   let chats = await api("GET", `${base}/chats`);
   let current = null;
   const thread = h("div.chat-thread");
-  const pick = h("select", { "aria-label": "Conversation" });
+  const head = h("div.chat-head");
   const input = h("textarea", { rows: 1, placeholder: c.role === "player"
     ? "Ask about the campaign: what the party knows, rules, your character…"
     : "Ask about the module, the world, or tell it what happened…", "aria-label": "Message" });
@@ -109,33 +113,66 @@ async function askTab(c) {
     return out;
   };
   const scrollDown = () => thread.lastElementChild?.scrollIntoView({ block: "end", behavior: "smooth" });
-  const fillPick = () => {
-    pick.replaceChildren(
-      h("option", { value: "" }, chats.length ? "New conversation" : "No conversations yet"),
-      ...chats.map((x) => h("option", { value: x.id }, `${x.title || "New conversation"} · ${ago(x.updated_at)}`)),
-    );
-    pick.value = current || "";
+  const chatLink = (x) => h("a.chat-past", { href: `${askHref}/${x.id}` },
+    h("span.chat-past-title", x.title || "Untitled conversation"), h("span.chat-past-when", ago(x.updated_at)));
+  // Earlier conversations, under the suggestions: the latest few, and the rest a click away.
+  const RECENT = 4;
+  const pastChats = () => {
+    if (!chats.length) return "";
+    const list = h("div.chat-past-list", chats.slice(0, RECENT).map(chatLink));
+    const more = chats.length > RECENT && h("button.link", {
+      type: "button",
+      onclick: () => {
+        list.replaceChildren(...chats.map(chatLink));
+        more.remove();
+      },
+    }, `All ${chats.length} conversations`);
+    return h("div.chat-history", h("h3", "Recent conversations"), list, more);
   };
-  const open = async (id) => {
-    current = id ? Number(id) : null;
-    pick.value = id || "";
-    if (!current) {
-      thread.replaceChildren(h("div.chat-welcome",
-        h("p", "Ask anything about this campaign."),
-        h("p.muted", c.role === "player"
-          ? "It only knows what the party knows."
-          : "It can look things up in the module and the world, roll on the book's tables, and record what happened at the table."),
-        h("div.chat-suggestions", (c.role === "player"
-          ? ["What do we know about our current quest?", "Remind me what happened last session", "Who is our patron?"]
-          : ["What's coming up next for the party?", "Give me the stat block for the next fight", "Roll a random encounter"])
-          .map((q) => h("button.suggestion", { type: "button", onclick: () => { input.value = q; form.requestSubmit(); } }, q)))));
-      return;
-    }
-    const conv = await api("GET", `${base}/chats/${current}`);
-    thread.replaceChildren(...turnsEls(conv.turns));
-    thread.lastElementChild?.scrollIntoView({ block: "end" });
+  // Above an open conversation: its title, renaming and deleting it, and the way back to a new one.
+  const fillHead = () => {
+    const conv = chats.find((x) => x.id === current);
+    if (!conv) return head.replaceChildren();
+    head.replaceChildren(
+      h("a.button", { href: askHref, title: "Ask something new" }, "+ New"),
+      h("strong.chat-title", conv.title || "New conversation"),
+      h("button", {
+        title: "Rename this conversation", "aria-label": "Rename this conversation",
+        onclick: async () => {
+          const title = prompt("Name this conversation", conv.title || "")?.trim();
+          if (!title || title === conv.title) return;
+          try {
+            Object.assign(conv, await api("PATCH", `${base}/chats/${current}`, { title }));
+            fillHead();
+          } catch (err) {
+            toast(err.message, true);
+          }
+        },
+      }, "✎"),
+      h("button.danger", {
+        onclick: async () => {
+          if (!confirm("Delete this conversation?")) return;
+          try {
+            await api("DELETE", `${base}/chats/${current}`);
+            location.replace(askHref);  // so going back doesn't land on what's gone
+          } catch (err) {
+            toast(err.message, true);
+          }
+        },
+      }, "Delete"));
   };
-  pick.addEventListener("change", () => open(pick.value));
+  const welcome = () => {
+    thread.replaceChildren(h("div.chat-welcome",
+      h("p", "Ask anything about this campaign."),
+      h("p.muted", c.role === "player"
+        ? "It only knows what the party knows."
+        : "It can look things up in the module and the world, roll on the book's tables, and record what happened at the table."),
+      h("div.chat-suggestions", (c.role === "player"
+        ? ["What do we know about our current quest?", "Remind me what happened last session", "Who is our patron?"]
+        : ["What's coming up next for the party?", "Give me the stat block for the next fight", "Roll a random encounter"])
+        .map((q) => h("button.suggestion", { type: "button", onclick: () => { input.value = q; form.requestSubmit(); } }, q))),
+      pastChats()));
+  };
 
   const form = h("form.chat-form", {
     onsubmit: async (e) => {
@@ -148,8 +185,10 @@ async function askTab(c) {
           const conv = await api("POST", `${base}/chats`);
           current = conv.id;
           chats = [{ ...conv, title: shortTitle(text) }, ...chats];  // until the server's is ready
-          fillPick();
-          if (thread.querySelector(".chat-welcome")) thread.replaceChildren();
+          // Its own address from now on; replaceState, so the page isn't drawn again.
+          history.replaceState(null, "", `${askHref}/${current}`);
+          fillHead();
+          thread.replaceChildren();
         }
         input.value = "";
         fit();
@@ -188,7 +227,7 @@ async function askTab(c) {
         if (usage && answer) answer.el.append(costLine(usage));
         typing.remove();
         chats = await api("GET", `${base}/chats`);
-        fillPick();
+        fillHead();
       } catch (err) {
         toast(err.message, true);
       } finally {
@@ -210,36 +249,22 @@ async function askTab(c) {
     }
   });
 
-  fillPick();
-  await open(chats[0]?.id || "");
-  return h("div.chat",
-    h("div.chat-head", pick,
-      h("button", { onclick: () => open("") }, "+ New"),
-      h("button", {
-        title: "Rename this conversation", "aria-label": "Rename this conversation",
-        onclick: async () => {
-          const conv = chats.find((x) => x.id === current);
-          if (!conv) return;
-          const title = prompt("Name this conversation", conv.title || "")?.trim();
-          if (!title || title === conv.title) return;
-          try {
-            Object.assign(conv, await api("PATCH", `${base}/chats/${current}`, { title }));
-            fillPick();
-          } catch (err) {
-            toast(err.message, true);
-          }
-        },
-      }, "✎"),
-      h("button.danger", {
-        onclick: async () => {
-          if (!current || !confirm("Delete this conversation?")) return;
-          await api("DELETE", `${base}/chats/${current}`);
-          chats = chats.filter((x) => x.id !== current);
-          fillPick();
-          open(chats[0]?.id || "");
-        },
-      }, "Delete")),
-    thread, form);
+  const conv = convId && await api("GET", `${base}/chats/${convId}`).catch(() => null);
+  if (conv) {
+    current = conv.id;
+    fillHead();
+    thread.replaceChildren(...turnsEls(conv.turns));
+    requestAnimationFrame(() => thread.lastElementChild?.scrollIntoView({ block: "end" }));
+  } else {
+    if (convId) {  // deleted, or someone else's: start a new one instead
+      history.replaceState(null, "", askHref);
+      toast("That conversation isn't there any more.", true);
+    }
+    welcome();
+    // Ready to type, except on a touch screen, where focusing would open the keyboard over the page.
+    if (matchMedia("(pointer: fine)").matches) requestAnimationFrame(() => input.focus());
+  }
+  return h("div.chat", head, thread, form);
 }
 
 // The question as a title until the server writes a proper one (the same cut it makes).
