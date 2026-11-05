@@ -381,7 +381,7 @@ async function sessionsTab(c) {
   const logPanel = h("div.job", { hidden: true });
 
   const renderSessions = (sessions) => list.replaceChildren(
-    sessions.length === 0 ? h("p.empty", "No sessions ingested yet.") : "",
+    sessions.length === 0 ? h("p.empty", "No sessions yet.") : "",
     ...[...sessions].reverse().map((s) => h("details.card.session",
       h("summary",
         s.kind === "recap" ? h("span.badge", "Recap") : h("span.session-num", `#${s.number}`),
@@ -404,6 +404,67 @@ async function sessionsTab(c) {
   );
   renderSessions(data.sessions);
 
+  // Session notes the assistant has read, waiting for the DM: what it would record, to accept, reword
+  // or leave out. Nothing in the campaign changes until Apply.
+  const reviews = h("div.reviews");
+  const refresh = async () => {
+    const fresh = await api("GET", `${base}/sessions`);
+    renderSessions(fresh.sessions);
+    renderReviews(fresh.reviews);
+    number.value = fresh.next;
+  };
+  const EDITABLE = { record_fact: "statement", add_journal_entry: "text" };  // the words a DM may want to change
+  const reviewCard = (job) => {
+    const r = job.result;
+    const title = h("input", { value: r.title || "", placeholder: "Title", "aria-label": "Session title" });
+    const summary = h("textarea", { rows: 4, "aria-label": "Recap" }, r.summary || "");
+    const rows = r.proposals.map((p, i) => {
+      const keep = h("input", { type: "checkbox", checked: true, "aria-label": `Keep: ${p.summary}` });
+      const field = EDITABLE[p.tool];
+      const words = field && h("input.proposal-words", { value: p.args[field] || "", "aria-label": "Its wording" });
+      // Whose fact it is, and the attribute it sets ("status → dead"), beside the words.
+      const about = p.tool === "record_fact" ? h("span.proposal-about", p.args.entity,
+        p.args.attribute ? h("span.muted", ` · ${attributeLabel(p.args.attribute)} → ${p.args.value}`) : "")
+        : p.tool === "add_journal_entry" ? h("span.proposal-about", "Journal") : null;
+      return { i, keep, field, words, el: h("li.proposal", h("label", keep, about || "", field ? words : h("span", p.summary))) };
+    });
+    const count = () => rows.filter((x) => x.keep.checked).length;
+    const apply = h("button.primary", {
+      onclick: async () => {
+        const accepted = rows.filter((x) => x.keep.checked).map((x) => x.i);
+        const edits = Object.fromEntries(rows.filter((x) => x.field && x.words.value !== r.proposals[x.i].args[x.field])
+          .map((x) => [x.i, { [x.field]: x.words.value }]));
+        try {
+          const made = await api("POST", `${base}/ingests/${job.id}/apply`, { accepted, edits, title: title.value, summary: summary.value });
+          toast(`Session ${job.session} recorded: ${made.made} changes` + (made.problems.length ? `; ${made.problems.length} couldn't be made` : ""),
+            made.problems.length > 0);
+          if (made.problems.length) alert(`These couldn't be made:\n\n${made.problems.join("\n")}`);
+          refresh();
+        } catch (err) {
+          toast(err.message, true);
+        }
+      },
+    }, `Apply ${count()} changes`);
+    rows.forEach((x) => x.keep.addEventListener("change", () => { apply.textContent = `Apply ${count()} changes`; }));
+    return h("section.card.review",
+      h("h2", `Session ${job.session}: what the notes say`),
+      h("p.muted.small", "The assistant read the notes and would record these. Untick what's wrong, reword what's off, then apply. "
+        + "Nothing has changed yet."),
+      h("label.field", h("span", "Title"), title),
+      h("label.field", h("span", "Recap"), summary),
+      h("h3", `Changes (${rows.length})`),
+      h("ol.proposals", rows.map((x) => x.el)),
+      h("div.actions", apply, h("button", {
+        onclick: async () => {
+          if (!confirm(`Leave out everything from session ${job.session}'s notes? The campaign stays as it is.`)) return;
+          await api("POST", `${base}/ingests/${job.id}/discard`);
+          refresh();
+        },
+      }, "Discard")));
+  };
+  const renderReviews = (list) => reviews.replaceChildren(...(canEdit(c) ? list.map(reviewCard) : []));
+  renderReviews(data.reviews || []);
+
   const number = h("input", { type: "number", min: 1, value: data.next, "aria-label": "Session number" });
   const date = h("input", { type: "date", value: new Date().toISOString().slice(0, 10), "aria-label": "Date played" });
   const text = h("textarea", { rows: 8, placeholder: "Paste a transcript or your session notes…", "aria-label": "Transcript" });
@@ -416,12 +477,11 @@ async function sessionsTab(c) {
     title: (job) => `Session ${job.session}: ${job.name}`,
     result: (job) => h("div.job-result",
       h("h3", `Session ${job.result.session}: ${job.result.title || "(untitled)"}`),
-      h("p.muted", `${job.result.facts} facts and ${job.result.journal_entries} journal ${job.result.journal_entries === 1 ? "entry" : "entries"} recorded.`)),
+      h("p.muted", job.result.review === "pending" ? `Read: ${job.result.proposals.length} changes for you to review, above.`
+        : job.result.review === "discarded" ? "Left out." : `${job.result.facts} facts and ${job.result.journal_entries} journal entries recorded.`)),
     onFinish: async (job) => {
-      toast(`Session ${job.result.session} recorded`);
-      const fresh = await api("GET", `${base}/sessions`);
-      number.value = fresh.next;
-      renderSessions(fresh.sessions);
+      toast(`Session ${job.result.session}'s notes are read: review what they'd change`);
+      refresh();
     },
   });
 
@@ -454,7 +514,7 @@ async function sessionsTab(c) {
   );
 
   // What's been played first; adding to it folds away beneath, open when there's nothing yet.
-  return h("div", h("h2.section-title", "Sessions"), list, jobs.el,
+  return h("div", reviews, h("h2.section-title", "Sessions"), list, jobs.el,
     canEdit(c) && h("details.add-panel", { open: !data.sessions.length }, h("summary", "+ Add session notes"), form));
 }
 

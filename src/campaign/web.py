@@ -93,6 +93,14 @@ class ChatTitle(BaseModel):
     title: str = Field(min_length=1)
 
 
+class IngestReview(BaseModel):
+    """What the DM accepted of an ingest: the proposals by number, with edits to their arguments, and the recap."""
+    accepted: list[int] = Field(default_factory=list)
+    edits: dict[int, dict[str, Any]] = Field(default_factory=dict)
+    title: str | None = None
+    summary: str | None = None
+
+
 class EncounterUpdate(BaseModel):
     """A new title; the party it's scored for (`party`, or `campaign_party` for the campaign's own);
     the fight as it stands now (the tracker's whole state), or `reset` to end it."""
@@ -596,9 +604,34 @@ def create_app(
 
     @app.get("/api/campaigns/{slug}/sessions")
     def sessions(c: Campaign = Depends(reader), s: Store = Depends(store)) -> dict[str, Any]:
-        # Recent ingests that are waiting, running or need attention (finished ones show as sessions).
-        active = [job_view(j) for j in s.jobs(c, "ingest") if j["state"] in ("wanted", "running", "failed")]
-        return {"sessions": s.sessions(c), "next": s.next_ingest_session(c), "ingests": active}
+        # Recent ingests that are waiting, running, need attention or wait for the DM's review (the ones
+        # applied show as sessions).
+        jobs = s.jobs(c, "ingest")
+        active = [job_view(j) for j in jobs if j["state"] in ("wanted", "running", "failed")]
+        reviews = [job_view(j) for j in jobs if j["state"] == "done" and (j["result"] or {}).get("review") == "pending"]
+        return {"sessions": s.sessions(c), "next": s.next_ingest_session(c), "ingests": active, "reviews": reviews}
+
+    def ingest_to_review(s: Store, c: Campaign, job_id: int) -> dict[str, Any]:
+        job = campaign_job(s, c, job_id)
+        if job["kind"] != "ingest" or job["state"] != "done" or (job["result"] or {}).get("review") != "pending":
+            raise HTTPException(409, "this session's notes aren't waiting for a review")
+        return job
+
+    @app.post("/api/campaigns/{slug}/ingests/{job_id}/apply")
+    def apply_ingest(job_id: int, body: IngestReview, c: Campaign = Depends(editor), s: Store = Depends(store)) -> dict:
+        """Make the changes the DM accepted from a session's notes (and the recap as they left it)."""
+        from .agent import apply_ingest as apply
+
+        job = ingest_to_review(s, c, job_id)
+        made = apply(s, c, job["result"], body.accepted, body.edits, body.title, body.summary)
+        s.update_job(job_id, result=job["result"] | {"review": "applied"} | made)
+        return made
+
+    @app.post("/api/campaigns/{slug}/ingests/{job_id}/discard", status_code=204)
+    def discard_ingest(job_id: int, c: Campaign = Depends(editor), s: Store = Depends(store)) -> None:
+        """None of it: the campaign stays as it was (the notes stay among the sources)."""
+        job = ingest_to_review(s, c, job_id)
+        s.update_job(job_id, result=job["result"] | {"review": "discarded"})
 
     @app.post("/api/campaigns/{slug}/sessions/{number}/revert")
     def revert(number: int, c: Campaign = Depends(editor), s: Store = Depends(store)) -> dict[str, int]:

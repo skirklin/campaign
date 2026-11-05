@@ -108,7 +108,8 @@ class Run:
 
 
 def run_ingest(run: Run) -> dict[str, Any]:
-    """Session N should be what this transcript says. Redoing it replaces the session's earlier recording."""
+    """What session N's notes say, as changes for the DM to review (agent.apply_ingest makes the ones they
+    accept). Nothing in the campaign changes until then, so redoing it, or cancelling it, is safe."""
     from .agent import describe_tool_call, ingest_session
 
     transcript = _transcript(run)
@@ -120,17 +121,8 @@ def run_ingest(run: Run) -> dict[str, Any]:
 
     return ingest_session(
         run.store, run.campaign, transcript, number=run.input["session"], played_on=run.input["played_on"],
-        on_text=lambda t: run.log.emit("text", t), on_tool=on_tool,
+        on_text=lambda t: run.log.emit("text", t), on_tool=on_tool, review=True,
     )
-
-
-def undo_ingest(run: Run) -> None:
-    from .world import World
-
-    try:
-        World(run.store, run.campaign).revert_session(run.input["session"])
-    except KeyError:
-        pass
 
 
 def _transcript(run: Run) -> str:
@@ -216,7 +208,7 @@ class Kind:
     undo: Callable[[Run], None] | None = None  # on cancel, take back what an attempt wrote
 
 
-KINDS = {"ingest": Kind(run_ingest, undo_ingest), "scan": Kind(run_scan)}
+KINDS = {"ingest": Kind(run_ingest), "scan": Kind(run_scan)}
 
 
 # -- the loop ---------------------------------------------------------------------------

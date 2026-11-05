@@ -899,10 +899,11 @@ class Store:
             self.conn.execute(f"UPDATE jobs SET {cols}, updated_at = ? WHERE id = ?", (*fields.values(), now(), job_id))
 
     def next_ingest_session(self, campaign: Campaign) -> int:
-        """The next session number, counting ingests still waiting to happen."""
+        """The next session number, counting ingests still waiting to happen or to be reviewed."""
         row = self.conn.execute(
             "SELECT max(json_extract(input, '$.session')) AS n FROM jobs"
-            " WHERE campaign_id = ? AND kind = 'ingest' AND state IN ('wanted', 'running')",
+            " WHERE campaign_id = ? AND kind = 'ingest' AND (state IN ('wanted', 'running')"
+            " OR (state = 'done' AND json_extract(result, '$.review') = 'pending'))",
             (campaign.id,),
         ).fetchone()
         return max(self.next_session_number(campaign), (row["n"] or 0) + 1)

@@ -14,7 +14,7 @@ from anthropic import beta_tool
 
 from .db import Campaign, Store
 from .digest import fallback_params
-from .tools import ToolContext, build_tools
+from .tools import WRITE_TOOLS, ToolContext, build_tools
 from .world import World
 
 MODEL = os.environ.get("CAMPAIGN_MODEL", "claude-opus-5-5")
@@ -177,6 +177,9 @@ class Agent:
     on_thinking: Callable[[str], None] | None = None
     model: str = MODEL
     messages: list[Any] = field(default_factory=list)
+    # Given, the tools that change the campaign aren't run: each call is kept here, as a change for
+    # the DM to accept or not (an ingest the DM reviews). The other tools run as ever.
+    proposals: list[dict[str, Any]] | None = None
     stop_reason: str | None = None  # of the last response
     usage: dict[str, Any] = field(default_factory=dict)  # what the last send() cost; see _new_usage
 
@@ -188,6 +191,12 @@ class Agent:
     def _run_tool(self, block: Any) -> dict[str, Any]:
         self.on_tool(block.name, block.input)
         tool = self.tools.get(block.name)
+        if self.proposals is not None and block.name in WRITE_TOOLS and tool is not None:
+            self.proposals.append({"tool": block.name, "args": dict(block.input),
+                                   "summary": describe_tool_call(block.name, block.input).strip(" ·")})
+            return {"type": "tool_result", "tool_use_id": block.id, "is_error": False, "content": (
+                "Noted for the DM to review: it's made only if they accept it, so nothing has changed yet and it "
+                "has no id to refer to. Carry on as if it were done.")}
         try:
             if tool is None:
                 raise ValueError(f"unknown tool {block.name}")
@@ -428,12 +437,18 @@ def ingest_session(
     number: int | None = None,
     played_on: str | None = None,
     source_title: str | None = None,
+    review: bool = False,
     **kw: Any,
 ) -> dict[str, Any]:
     """Store a transcript as a source, then have Claude fold it into the campaign state.
 
     Pass a Campaign rather than a slug to ingest as a particular viewer: a
     player's ingest only sees what players may see.
+
+    With `review`, nothing in the campaign changes: what the assistant would
+    record comes back as `proposals` (and the recap as `title` and `summary`),
+    for the DM to accept, edit or leave out, and `apply_ingest` makes the ones
+    they accept. Without it (the command line), the changes are made as it goes.
     """
     from .ingest import parse_markdown
 
@@ -445,15 +460,12 @@ def ingest_session(
         campaign, title, "transcript", parse_markdown(transcript),
         blob=blob, filename=f"session-{number}.txt",
     )
-    # Re-ingesting a session replaces what the previous ingest of it recorded.
     world = World(store, campaign)
-    try:
-        world.revert_session(number)
-    except KeyError:
-        pass
-    store.upsert_session(campaign, number, played_on=played_on, source_id=source_id)
+    if not review:
+        _replace_session(store, campaign, number, played_on, source_id)
     ctx = ToolContext(store, campaign, session=number, run_kind="ingest")
     result: dict[str, Any] = {"session": number}
+    proposals: list[dict[str, Any]] | None = [] if review else None
 
     def finish_session(title: str, summary: str) -> str:
         """Save the session's title and recap. Call once, after recording everything else.
@@ -462,16 +474,17 @@ def ingest_session(
             title: Short evocative title, e.g. "Death House".
             summary: 1-4 paragraph recap of what the party did, found and decided.
         """
-        store.upsert_session(campaign, number, title=title, summary=summary)
+        if not review:
+            store.upsert_session(campaign, number, title=title, summary=summary)
         result.update(title=title, summary=summary)
-        return "Session saved."
+        return "Session saved." if not review else "Recap noted for the DM to review."
 
     system = INGEST_SYSTEM.format(
         name=campaign.name, number=number, catalog=catalog(store, campaign), **_role_parts(campaign)
     )
     agent = Agent(
         store=store, ctx=ctx, system=system, effort=kw.pop("effort", "high"),
-        extra_tools=[finish_session], **kw,
+        extra_tools=[finish_session], proposals=proposals, **kw,
     )
     result["notes"] = agent.send(
         [
@@ -481,11 +494,57 @@ def ingest_session(
             }
         ]
     )
+    if review:
+        return result | {"review": "pending", "proposals": proposals, "source_id": source_id, "played_on": played_on}
     result["journal_entries"] = len(world.events(session=number))
     result["facts"] = store.conn.execute(
         "SELECT count(*) FROM facts WHERE run_id = ?", (ctx.run_id,)
     ).fetchone()[0] if ctx.run_id else 0
     return result
+
+
+def _replace_session(store: Store, campaign: Campaign, number: int, played_on: str | None, source_id: int) -> None:
+    """Session `number` is to be what this source says: what an earlier recording of it wrote is taken back."""
+    try:
+        World(store, campaign).revert_session(number)
+    except KeyError:
+        pass
+    store.upsert_session(campaign, number, played_on=played_on, source_id=source_id)
+
+
+def apply_ingest(
+    store: Store, campaign: Campaign, review: dict[str, Any], accepted: list[int],
+    edits: dict[int, dict[str, Any]] | None = None, title: str | None = None, summary: str | None = None,
+) -> dict[str, Any]:
+    """Make the changes the DM accepted from an ingest's review, in the order the assistant proposed them,
+    with their edits, and the recap as they left it. Session N then is what they accepted, replacing what
+    an earlier recording of it wrote."""
+    from anthropic import beta_tool
+
+    number = review["session"]
+    _replace_session(store, campaign, number, review.get("played_on"), review["source_id"])
+    ctx = ToolContext(store, campaign, session=number, run_kind="ingest")
+    tools = {f.__name__: beta_tool(f) for f in build_tools(ctx)}
+    proposals = review["proposals"]
+    made, problems = 0, []
+    for i in sorted(set(accepted)):
+        if not 0 <= i < len(proposals):
+            continue
+        p = proposals[i]
+        args = p["args"] | (edits or {}).get(i, {})
+        try:
+            said = str(tools[p["tool"]].call(args))
+        except Exception as err:  # what's left still goes in; the DM hears what didn't
+            said = f"Error: {err}"
+        if said.startswith("Error"):
+            problems.append(f"{p['summary']}: {said.removeprefix('Error: ')}")
+        else:
+            made += 1
+    store.upsert_session(campaign, number, title=(title if title is not None else review.get("title")) or "",
+                         summary=(summary if summary is not None else review.get("summary")) or "")
+    world = World(store, campaign)
+    facts = store.conn.execute("SELECT count(*) FROM facts WHERE run_id = ?", (ctx.run_id,)).fetchone()[0] if ctx.run_id else 0
+    return {"made": made, "problems": problems, "facts": facts, "journal_entries": len(world.events(session=number))}
 
 
 _DESCRIBE: dict[str, Callable[[dict[str, Any]], str]] = {

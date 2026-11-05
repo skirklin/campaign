@@ -142,7 +142,12 @@ uv run campaign web            # http://127.0.0.1:8765
     whoever they were made for, like conversations.
   - **Sessions**: what's been played, then **Add session notes**: paste
     notes or a transcript, or upload a text file or a recording, to run an
-    ingest. A live log shows what the assistant is reading and recording. Each past session has its recap and a **Revert** button.
+    ingest. A live log shows what the assistant is reading. **Nothing in the
+    campaign changes until the DM says so:** the ingest comes back as the
+    changes it would make (each fact with whose it is and what it sets, each
+    journal line, each item) and a draft recap, to untick, reword and
+    **Apply**, or **Discard**. Applied, session N is what was accepted,
+    replacing an earlier recording of it. Each past session has its recap and a **Revert** button.
     An ingest is a [job](#background-jobs): it continues with the page
     closed and survives restarts and deploys.
   - **Reference**: the books and notes, then **Add a book or notes** to

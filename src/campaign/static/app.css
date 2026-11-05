@@ -1057,6 +1057,16 @@ body:has(.chat-form) #toast { bottom: calc(6.5rem + env(safe-area-inset-bottom))
 .summarize { color: var(--accent); }
 .statblock-wrap .borrowed { margin: 0 0 -.4rem; }
 .as-of-title { color: var(--muted); white-space: nowrap; }
+/* Session notes waiting for the DM: what they'd change, to keep, reword or leave out. */
+.review { border-left: 4px solid var(--accent); }
+.review textarea { width: 100%; }
+.proposals { padding-left: 1.4rem; margin: .3rem 0 .8rem; display: flex; flex-direction: column; gap: .3rem; }
+.proposal label { display: flex; align-items: center; gap: .5rem; }
+.proposal input[type=checkbox] { flex: none; width: auto; }
+.proposal-words { flex: 1; min-width: 0; padding: .25rem .45rem; }
+.proposal-about { flex: none; max-width: 14rem; font-weight: 600; font-size: .9rem; }
+@media (max-width: 640px) { .proposal label { flex-wrap: wrap; } .proposal-about { max-width: none; } }
+.proposal:has(input[type=checkbox]:not(:checked)) { opacity: .5; text-decoration: line-through; }
 
 /* -- encounter cards: a fight in an answer ------------------------------------------- */
 

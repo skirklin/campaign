@@ -918,4 +918,13 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
     writers = [add_recap, record_fact, end_fact, retract_fact, party_learned, add_journal_entry, delete_journal_entry,
                update_character, create_character, add_party_member, refresh_from_dndbeyond, add_items, change_item, give_item, link_item, change_coin,
                split_party_coin, define_item]
+    assert {f.__name__ for f in writers} == set(WRITE_TOOLS), "WRITE_TOOLS names the tools that change things"
     return readers + (writers if writable else [])
+
+
+# The tools that change the campaign: left out for a viewer, and only proposed during an ingest the DM reviews.
+WRITE_TOOLS = (
+    "add_recap", "record_fact", "end_fact", "retract_fact", "party_learned", "add_journal_entry", "delete_journal_entry",
+    "update_character", "create_character", "add_party_member", "refresh_from_dndbeyond", "add_items", "change_item",
+    "give_item", "link_item", "change_coin", "split_party_coin", "define_item",
+)
