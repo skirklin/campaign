@@ -109,7 +109,7 @@ uv run campaign web            # http://127.0.0.1:8765
     answer cost is folded away under it (ⓘ): tokens, lookups, seconds and
     dollars, with the breakdown into cached and uncached input on hover.
     The tab opens ready for a new question, under where things stand:
-    the last session, the quests still open, the party with their HP, and
+    the last session, the quests the party has taken up, the party with their HP, and
     the fights ready to run. Conversations are kept (per
     person): the latest few are listed under the suggestions, the rest
     behind "All N conversations" (an encounter made in one is kept if
@@ -119,15 +119,24 @@ uv run campaign web            # http://127.0.0.1:8765
     access it can also record what you tell it happened.
   - **Encounters**: every fight the assistant has put together for you,
     saved apart from the conversation it came from, with its difficulty
-    and how it stands. **Run this fight** opens the tracker:
-    - initiative: the monsters' rolled, one roll per kind of creature,
-      and the party's typed in; anyone else can be added;
+    and how it stands. **Open at the table** opens the fight's page,
+    which is a reference first:
+    - every kind of creature in the fight is one line (how many, AC, HP,
+      speed, CR) that opens to its stat block and the book text it was
+      read from. One opens at a time, folding the one before, so the rest
+      stay a glance away; **Open all** lays them all out to read side by
+      side. A last line holds the conditions' rules as the SRD words them;
+    - beside it on a laptop, or on a phone a tab away (**Stat blocks** /
+      **Turn order**), the DM can track the fight if they want to:
+      **Track turns** sets initiative (the monsters' rolled, one roll per
+      kind of creature, and the party's typed in; anyone else can be added);
     - the turn order, with **Next turn**, **Back** and the round. Each
       combatant is one line (initiative, name, AC, HP, conditions,
       legendary ticks) that opens to its controls on its turn or when
       tapped; monsters of one kind on one count are one block and one
       turn, as group initiative goes; the fallen shrink to a thin line and
       are passed over; the party show their AC and passive Perception;
+      **Stat block** on a monster opens its block in the reference;
     - each monster's hit points, with **Hit** and **Heal**, and ticked
       monsters (one at a time, or a whole block) taking one amount at once:
       **Hit**, **Half** (rounded down, for those who saved) or **Heal**;
@@ -135,13 +144,11 @@ uv run campaign web            # http://127.0.0.1:8765
     - conditions as chips, each opening its rule as the SRD words it;
     - legendary actions, which come back at the start of the creature's
       turn, and legendary resistance;
-    - the lair's turn on initiative 20 when a creature has lair actions;
-    - every kind of creature's stat block on screen at once: on a laptop
-      beside the turn order, in as many columns as fit and scrolling on
-      their own, the one whose turn it is lit up and brought into view;
-      on a phone under it. Each folds away, and all of them at once.
+    - the lair's turn on initiative 20 when a creature has lair actions.
 
-    The fight is saved on the server as it goes, so a reload or another
+    Stepping through turns never opens or folds a stat block: the
+    reference only marks whose turn it is, and stays as the DM left it.
+    The turn order is saved on the server as it goes, so a reload or another
     device carries on, until **End the fight**. Encounters are private to
     whoever they were made for, like conversations.
   - **Sessions**: the campaign's timeline, newest first: each session
@@ -264,6 +271,20 @@ localhost without it, unless you pass `--no-auth`. With sign-in on:
   use the same list (`inventory`, `add_items`, `give_item`, `change_coin`,
   `define_item`). A character exported as JSON carries their things with
   them, and importing one (or scanning a paper sheet) puts them back.
+
+  **Tapping an item says what it is and does.** First comes what the world
+  knows about its world item (the book's lore, what's happened to it),
+  then the **rules** for it as the SRD 5.1 words them. Those rules come
+  with the app (`rules.py`, built from the SRD's markdown by
+  `scripts/srd_rules.py`), so they work without loading a book. They
+  cover magic items, spells, weapons, armor and adventuring gear, found by
+  the name the table uses: "Potion of Healing", "Scroll of Sending" (the
+  spell, at the scroll's save DC and attack bonus, with how spell scrolls
+  work folded under it), "+1 Arrows" (+1 ammunition, then arrows), "Potion
+  of Thunder Resistance", "Very nice dagger" (a dagger: 1d4 piercing,
+  finesse, light, thrown). Long text is cut short behind **Read it all**.
+  The assistant has the same lookup as the `rules` tool, and the book
+  wins where it says otherwise.
 - **Paper sheets can be scanned in.** On the Party tab, **From a scan or
   PDF…** takes a photo or PDF of a filled-in sheet; Claude reads it into a
   new character (`CAMPAIGN_SHEET_MODEL`, default `CAMPAIGN_MODEL`) and lists
@@ -401,7 +422,8 @@ each.
 
 For running a session, the chat and MCP tools `stat_block`, `treasure`
 (what's at a place, and what the party has already taken) and `roll_table`
-work from these.
+work from these. `rules` gives the SRD's own words for a magic item, spell,
+weapon, armor or piece of gear.
 
 See [How the digest works](#how-the-digest-works) for the caching rules.
 

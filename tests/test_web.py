@@ -314,6 +314,17 @@ def test_party_inventory(client):
     assert inv["log"][0]["text"] == "Vulkan took Potion of healing"
     assert client.post(f"{base}/items/999/move", json={"to": me}).status_code == 404
 
+    # Tapped, an item says what it is: the rules for it, and its world item.
+    potion = next(i for i in mine if i["name"] == "Potion of healing")
+    about = client.get(f"{base}/items/{potion['id']}/about").json()
+    assert about["rules"][0]["name"] == "Potion of Healing" and "2d4 + 2" in about["rules"][0]["text"]
+    assert about["license"].startswith("SRD 5.1")
+    shield = next(i for i in mine if i["name"] == "Shield")
+    about = client.get(f"{base}/items/{shield['id']}/about").json()
+    assert about["world"]["name"] == "Shield" and about["rules"][0]["text"].startswith("**AC +2**")
+    assert all(f.get("attribute") != "mechanics" for f in about["world"]["facts"])
+    assert client.get(f"{base}/items/999/about").status_code == 404
+
     # Equipping and defining: the sheet follows the definition.
     shield = next(i for i in mine if i["name"] == "Shield")
     assert shield["item"]["name"] == "Shield" and shield["bonuses"][0]["amount"] == 2

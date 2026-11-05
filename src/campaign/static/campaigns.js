@@ -326,14 +326,15 @@ function quickFind(c) {
   return h("div.quick-find", input, results);
 }
 
-// Where things stand, above a new question: the last session, the quests still open, the party, and
-// the fights ready to run. Filled in as it arrives, so the question box is ready at once.
+// Where things stand, above a new question: the last session, the quests the party has taken up (the
+// table has touched them, and they aren't done; the book's other quests stay in the World tab), the
+// party, and the fights ready to run. Filled in as it arrives, so the question box is ready at once.
 const DONE = /^(completed?|done|failed|resolved|abandoned|finished)$/i;
 function campaignHome(c) {
   const base = `/api/campaigns/${c.slug}`;
   const el = h("div.campaign-home");
   Promise.all([
-    api("GET", `${base}/sessions`), api("GET", `${base}/entities?kind=quest`),
+    api("GET", `${base}/sessions`), api("GET", `${base}/entities?kind=quest&in_play=true`),
     api("GET", `${base}/characters`), api("GET", `${base}/encounters`).catch(() => []),
   ]).then(([sessions, quests, party, fights]) => {
     const last = sessions.sessions[sessions.sessions.length - 1];
@@ -344,7 +345,7 @@ function campaignHome(c) {
       last && h("div.home-item.home-last", h("span.home-label", "Last time"),
         h("div", link(`#/campaigns/${c.slug}/ingest`, `#${last.number} ${last.title || "(untitled)"}`),
           last.summary && h("p.small", last.summary.split(/(?<=[.!?])\s/)[0]))),
-      open.length > 0 && h("div.home-item", h("span.home-label", "Open quests"),
+      open.length > 0 && h("div.home-item", h("span.home-label", "Quests under way"),
         h("div", open.map((q, i) => [i ? " · " : "", link(`#/campaigns/${c.slug}/entity/${q.id}`, q.name)]))),
       party.length > 0 && h("div.home-item", h("span.home-label", "The party"),
         h("div", party.map((p, i) => [i ? " · " : "", link(`#/characters/${p.id}`, p.name),

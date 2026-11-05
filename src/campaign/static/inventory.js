@@ -14,6 +14,7 @@
 
 import { api, h, toast, sign, bottomSheet, keypad, askQty, worth, sessionNames } from "./util.js";
 import { COINS, BONUS_TARGETS } from "./sheet.js";
+import { renderMarkdown } from "./markdown.js";
 
 // Close a sheet, then open what comes next once it's gone, so the back button stays in step with them.
 function after(dialog, next) {
@@ -245,16 +246,15 @@ export class InventoryView {
         type: "checkbox", checked: i[key], disabled: !x.can_edit,
         onchange: async (e) => { dialog.close(); this.send("PATCH", `/items/${i.id}`, { [key]: e.target.checked }); },
       }), label);
-    const world = i.item?.id && h("a", { href: `#/campaigns/${this.slug}/entity/${i.item.id}`, onclick: () => dialog.close() },
-      i.item.name === i.name ? "In the world" : `In the world: ${i.item.name}`);
     const bonuses = bonusText(i.bonuses);
     const takers = x.id === null ? this.takers : [];
+    const about = h("div.item-about", h("p.muted.small", "Looking it up…"));
     const dialog = bottomSheet(i.qty !== 1 ? `${i.name} ×${i.qty}` : i.name,
       i.notes ? h("p", i.notes) : null,
+      about,
       (bonuses || i.requires_attunement) && h("p", [bonuses, i.requires_attunement && "needs attunement"].filter(Boolean).join(" · ")),
       i.item?.secret && h("p.muted.small", "What it does is secret: the party doesn't know yet."),
       i.value_gp > 0 && h("p.muted.small", `Worth ${worth(i.value_gp)}${i.qty !== 1 ? ` each, ${worth(i.value_gp * i.qty)} in all` : ""}`),
-      world && h("p.small", world),
       x.kind === "character" && h("div.item-toggles", toggle("equipped", "Equipped"),
         i.requires_attunement && toggle("attuned", "Attuned")),
       h("div.hp-buttons",
@@ -270,6 +270,39 @@ export class InventoryView {
         x.can_edit && h("button", { onclick: () => after(dialog, () => this.editSheet(i)) }, "Edit"),
         this.data.can_define && !(i.item && !i.item.id) && h("button", { onclick: () => after(dialog, () => this.defineSheet(i)) },
           i.item?.defined || i.item?.secret ? "What it does…" : "Make it do something…")));
+    api("GET", `${this.base}/items/${i.id}/about`).then(
+      (a) => about.replaceChildren(...this.aboutParts(a, i, () => dialog.close())),
+      () => about.replaceChildren());
+  }
+
+  // What the item is: the world's own item (what the book and play say about it), then the rules for it.
+  aboutParts(a, i, close) {
+    const world = a.world && h("div.item-world",
+      h("div.about-head", h("strong", a.world.name === i.name ? "In the world" : a.world.name),
+        h("a.small", { href: `#/campaigns/${this.slug}/entity/${a.world.id}`, onclick: close }, "Everything known →")),
+      a.world.summary ? renderMarkdown(a.world.summary)
+        : a.world.facts.length > 0 && h("ul.about-facts", a.world.facts.map((f) => h("li", f.statement,
+          f.party_knows === false && h("span.muted.small", " (the party doesn't know)")))));
+    const rules = a.rules.map((r, n) => {
+      const body = h("div.rules-text", r.note && h("p.rules-note", r.note), renderMarkdown(r.text));
+      const head = h("div.about-head", h("strong", r.name), r.subtitle && h("em.muted.small", r.subtitle));
+      // The thing itself open; how its kind works (spell scrolls, +1 weapons) folded under it.
+      if (n > 0) return h("details.item-rules", h("summary", head), body);
+      const card = h("div.item-rules", head, body);
+      requestAnimationFrame(() => {
+        if (body.scrollHeight <= body.clientHeight + 4) return;
+        body.classList.add("clamped");
+        card.append(h("button.link.small", { onclick: (e) => { body.classList.remove("clamp", "clamped"); e.target.remove(); } }, "Read it all"));
+      });
+      body.classList.add("clamp");
+      return card;
+    });
+    return [
+      world,
+      ...rules,
+      a.license && h("p.muted.about-license", `Rules text: ${a.license}.`),
+      !world && rules.length === 0 && h("p.muted.small", "Nothing in the rules or the world says what this is yet."),
+    ].filter(Boolean);
   }
 
   addSheet(x) {

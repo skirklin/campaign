@@ -30,7 +30,7 @@ import json
 import sqlite3
 from typing import Any
 
-from . import dndbeyond
+from . import dndbeyond, rules
 from .charsheet import COINS, GP_PER_COIN, CharacterSheet, Gear, Item, ItemMechanics, no_coins
 from .db import Campaign, Store, now
 from .world import World
@@ -197,6 +197,21 @@ class Inventory:
             "active": bool(row["equipped"]) and (bool(row["attuned"]) or not needs),
             "item": item,
         }
+
+    def about(self, holding_id: int) -> dict[str, Any]:
+        """What a holding is and does: the rules for it (the SRD's, by its world item's name, else its own)
+        and what the world knows about its world item, as this viewer may see it."""
+        h = self.holding(holding_id)
+        item = h["item"] or {}
+        found = next((r for n in (item.get("name"), h["name"]) if n and (r := rules.about(n))), [])
+        world = None
+        # Not said to be any world item, but called just what one is: that one.
+        world_id = item.get("id") if h["item"] else self.find_item(h["name"])
+        if world_id and self.visible(world_id) and (view := self.world.view(world_id)):
+            facts = [f for f in view["facts"] if f.get("attribute") not in ("mechanics", "stat_block")]
+            world = {"id": view["id"], "name": view["name"], "summary": view["summary"], "facts": facts[:8],
+                     "more": max(0, len(facts) - 8)}
+        return {"rules": found, "world": world, "license": rules.LICENSE if found else None}
 
     def holdings(self, holder_id: int | None) -> list[dict[str, Any]]:
         rows = self.conn.execute(

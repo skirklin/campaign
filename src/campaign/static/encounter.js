@@ -2,11 +2,13 @@
 // conversation they were made in.
 //   - The card: a ```encounter block in an answer ({"id": n}) shows the saved fight, its
 //     difficulty and every stat block, built from the world as it is now, with a button to run it.
-//   - The tracker (#/campaigns/<slug>/encounters/<id>): the fight being run. Initiative for the
-//     monsters (rolled) and the party (typed in), then the turn order: hit points, conditions
-//     with their rules a tap away, legendary actions that come back on the creature's turn,
-//     legendary resistance, the lair's turn on initiative 20, and the round. The state is
-//     saved on the server, so a reload or another device carries on.
+//   - The fight's page (#/campaigns/<slug>/encounters/<id>): first a reference, every kind of
+//     creature in it a line (AC, HP, speed, CR) that opens to its stat block, one at a time,
+//     and the conditions' rules. Beside it (on a phone, a tab away), if the DM wants one, the
+//     turn order: initiative for the monsters (rolled) and the party (typed in), hit points,
+//     conditions, legendary actions and resistance, the lair's turn and the round. Stepping
+//     through turns never opens or folds a stat block: it only marks whose turn it is. The
+//     turn order is saved on the server, so a reload or another device carries on.
 //   - The list (the Encounters tab): every fight prepared, and how each stands.
 
 import { api, h, toast } from "./util.js";
@@ -72,7 +74,7 @@ function difficultyLine(f) {
 }
 
 function runLabel(state) {
-  return state?.started ? `Resume · round ${state.round}` : "Run this fight";
+  return state?.started ? `Open · round ${state.round}` : "Open at the table";
 }
 
 function cardBody(e, slug) {
@@ -267,7 +269,14 @@ export async function encounterView(slug, id) {
   const isDown = (x) => x.ref != null && x.hp != null && x.hp <= 0;
 
   // -- before the fight: initiative ---------------------------------------------------
+  let tracking = false;  // the DM asked for a turn order: show the initiative to set
   const setup = () => {
+    if (!tracking) {
+      return [h("div.track-intro",
+        h("p", "Track the fight here if you like: initiative, whose turn it is, hit points and conditions."),
+        h("p.muted.small", "The stat blocks don't need it: they stay as you leave them."),
+        h("button.primary", { onclick: () => { tracking = true; draw(); } }, "Track turns"))];
+    }
     const rollMonsters = () => change(() => {
       // One roll per kind of creature, as the DMG suggests: the goblins act together.
       const rolls = {};
@@ -355,38 +364,61 @@ export async function encounterView(slug, id) {
     return u.length > 1 && c ? `${c.name} ×${u.length}` : first.name;
   };
 
-  // Every kind of creature in the fight, its stat block on screen beside the turn order (on a
-  // laptop; under it on a phone), each foldable. Built once: the blocks don't change in a fight.
+  // The reference: every kind of creature in the fight, a line of what's asked for most (AC, HP,
+  // speed, CR) that opens to its stat block, and the conditions' rules. One block open at a time,
+  // so the rest stay a glance away; "Open all" for reading them side by side. Built once: the
+  // blocks don't change in a fight, and the turn order only marks whose turn it is.
   const wide = matchMedia("(min-width: 1100px)");
-  const sheets = fight.creatures.map((c, i) => {
+  let together = false;  // opened with "Open all": opening one doesn't fold the others
+  const sheets = [];
+  const accordion = (el) => {
+    el.addEventListener("toggle", () => {
+      if (!el.open) return;
+      if (!together) sheets.forEach((o) => { if (o !== el) o.open = false; });
+    });
+    sheets.push(el);
+    return el;
+  };
+  fight.creatures.forEach((c, i) => {
     const facts = creatureFacts(c);
-    const el = h("details.creature-sheet", { open: wide.matches },
+    const sb = c.stat_block || {};
+    const el = accordion(h("details.creature-sheet",
       h("summary",
         h("strong", c.count > 1 ? `${c.name} ×${c.count}` : c.name),
-        h("span.small.muted", [facts.ac && `AC ${facts.ac}`, c.hp && `HP ${c.hp}`, c.cr && `CR ${c.cr}`].filter(Boolean).join(" · ")),
+        h("span.small.muted", [facts.ac && `AC ${facts.ac}`, c.hp && `HP ${c.hp}`, sb.speed && `Speed ${sb.speed}`, c.cr && `CR ${c.cr}`]
+          .filter(Boolean).join(" · ")),
+        h("span.badge.their-turn", "their turn"),
+        c.block_from && h("span.small.muted", `${c.block_from.name} stat block`),
         c.note && h("span.small.encounter-note", c.note)),
       c.stat_block
         ? statBlockFromData(c.block_from ? c.block_from.name : c.name, { ...c.stat_block, hit_points: c.hp })
-        : h("p.small.muted", "No stat block for this in your material. Look it up in its own book."));
+        : h("p.small.muted", "No stat block for this in your material. Look it up in its own book."),
+      (c.block_from?.id || c.id) && bookText(slug, c.block_from?.id || c.id)));
     el.dataset.ref = i;
-    return el;
   });
-  const fold = (open) => sheets.forEach((el) => { el.open = open; });
-  const panel = h("aside.tracker-panel",
+  const conditions = accordion(h("details.creature-sheet.conditions-ref",
+    h("summary", h("strong", "Conditions"), h("span.small.muted", "the rules for each, as the SRD words them")),
+    h("dl.condition-list", CONDITION_NAMES.flatMap((n) => [h("dt", n), h("dd", h("ul", CONDITIONS[n].map((l) => h("li", l))))]))));
+  const fold = (open) => { together = open; sheets.forEach((el) => { el.open = open; }); };
+  const refPane = h("section.fight-ref",
     h("div.tracker-panel-head",
       h("h3", "In this fight"),
       h("span.spacer"),
-      h("button.link.small", { onclick: () => fold(true) }, "Unfold all"),
+      h("button.link.small", { onclick: () => fold(true) }, "Open all"),
       h("button.link.small", { onclick: () => fold(false) }, "Fold all")),
-    h("div.creature-sheets", sheets));
-  // Whose turn it is: their stat block lit up, opened and brought into view.
-  const showSheet = (ref, scroll) => {
-    sheets.forEach((el) => el.classList.toggle("current", Number(el.dataset.ref) === ref));
-    const el = sheets[ref];
+    h("div.creature-sheets", sheets.filter((el) => el !== conditions), conditions));
+  // From the turn order to a creature's stat block: that one open (the others folded), in view.
+  const layout = h("div.tracker-layout", { dataset: { pane: "ref" } });
+  const showSheet = (ref) => {
+    const el = sheets.find((o) => Number(o.dataset.ref) === ref);
     if (!el) return;
+    setPane("ref");
+    together = false;
     el.open = true;
-    if (scroll) el.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    el.scrollIntoView({ block: "start", behavior: "smooth" });
   };
+  // Whose turn it is, marked in the reference and nothing more: the DM decides what's open.
+  const markTurn = (ref) => sheets.forEach((el) => el.classList.toggle("current", el.dataset.ref !== undefined && Number(el.dataset.ref) === ref));
   const conditionInfo = new Map();  // combatant key -> the condition whose rules are showing
   const opened = new Set();  // rows opened by a tap, beside the current turn's
   const selected = new Set();  // monsters ticked for one amount of damage or healing at once
@@ -493,18 +525,13 @@ export async function encounterView(slug, id) {
       open && h("div.combatant-controls",
         c && hpControl(x),
         !x.lair && conditionPicker(x),
-        // The stat block comes with the current turn on a phone (below), so a link to it is only for the rest.
-        c && !(current && !wide.matches) && h("button.link.small.sheet-link", { onclick: () => showSheet(x.ref, true) }, "Stat block")),
+        c && !inGroup && h("button.link.small.sheet-link", { onclick: () => showSheet(x.ref) }, "Stat block")),
       conditionRule(x),
       // The lair's options in full on its turn; otherwise just how many, to keep the order short.
       lair && (current
         ? h("div.lair-actions", lair.lair_intro && h("p.small.muted", lair.lair_intro),
           h("ul", (lair.lair_actions || []).map((a) => h("li.small", a))))
-        : h("p.small.muted.lair-actions", `${plural((lair.lair_actions || []).length, "option")}, on this count`)),
-      // On a phone the current monster's stat block comes with its turn, rather than at the page's end.
-      current && !wide.matches && c?.stat_block && !inGroup &&
-        h("details.inline-sheet", { open: true }, h("summary.small", `${c.name} stat block`),
-          statBlockFromData(c.block_from ? c.block_from.name : c.name, { ...c.stat_block, hit_points: c.hp })));
+        : h("p.small.muted.lair-actions", `${plural((lair.lair_actions || []).length, "option")}, on this count`)));
   };
 
   // Several of one kind on one count: a block with its own header (select them all, how many stand).
@@ -519,11 +546,8 @@ export async function encounterView(slug, id) {
         h("strong", `${c.name} ×${members.length}`),
         h("span.small.muted", `AC ${creatureFacts(c).ac ?? "?"} · ${standing} standing`),
         h("span.spacer"),
-        h("button.link.small.sheet-link", { onclick: () => showSheet(members[0].ref, true) }, "Stat block")),
-      members.map((x) => row(x, state.combatants.indexOf(x), false, true)),
-      current && !wide.matches && c?.stat_block &&
-        h("details.inline-sheet", { open: true }, h("summary.small", `${c.name} stat block`),
-          statBlockFromData(c.block_from ? c.block_from.name : c.name, { ...c.stat_block, hit_points: c.hp })));
+        h("button.link.small.sheet-link", { onclick: () => showSheet(members[0].ref) }, "Stat block")),
+      members.map((x) => row(x, state.combatants.indexOf(x), false, true)));
   };
 
   // Ticked monsters take one amount at once: a fireball, with Half for those who saved.
@@ -572,6 +596,7 @@ export async function encounterView(slug, id) {
             if (!confirm("End the fight? The turn order, hit points and conditions are cleared.")) return;
             state = freshState(fight, party);
             undo.length = 0;
+            tracking = false;
             api("PATCH", base, { reset: true }).catch((err) => toast(err.message, true));
             draw();
           },
@@ -579,12 +604,20 @@ export async function encounterView(slug, id) {
     ];
   };
 
+  const turnTab = h("button", { onclick: () => setPane("track") });
+  const refTab = h("button", { onclick: () => setPane("ref") }, "Stat blocks");
+  const setPane = (pane) => {
+    layout.dataset.pane = pane;
+    refTab.classList.toggle("active", pane === "ref");
+    turnTab.classList.toggle("active", pane === "track");
+  };
   const draw = () => {
     body.replaceChildren(...(state.started ? running() : setup()));
-    if (!state.started) return showSheet(-1, false);
-    body.querySelector(".combatant.current")?.scrollIntoView({ block: "nearest", behavior: "smooth" });
-    const now = state.combatants[state.turn];
-    showSheet(now?.ref ?? -1, wide.matches && now?.ref != null);
+    const now = state.started ? state.combatants[state.turn] : null;
+    markTurn(now?.ref ?? -1);
+    turnTab.textContent = state.started ? `Turn order · round ${state.round}` : "Turn order";
+    const shown = wide.matches || layout.dataset.pane === "track";
+    if (shown) body.querySelector(".combatant.current")?.scrollIntoView({ block: "nearest", behavior: "smooth" });
   };
 
   const rename = h("button.icon", {
@@ -617,6 +650,9 @@ export async function encounterView(slug, id) {
       }
     },
   }, "change");
+  if (fight.creatures.length === 1) sheets[0].open = true;  // one kind of creature: its block is the page
+  layout.append(refPane, h("aside.fight-track", body));
+  setPane("ref");
   draw();
   return h("section.page.tracker",
     h("div.page-head", h("a", { href: `#/campaigns/${slug}/encounters` }, "← Encounters")),
@@ -624,5 +660,6 @@ export async function encounterView(slug, id) {
       fight.difficulty && h(`span.difficulty.${fight.difficulty}`, fight.difficulty)),
     h("p.muted.small", difficultyLine(fight), " ", partyButton,
       e.conversation_id ? [" · ", h("a", { href: `#/campaigns/${slug}/ask/${e.conversation_id}` }, "the conversation it came from")] : ""),
-    h("div.tracker-layout", h("div.tracker-main", body), panel));
+    h("div.fight-tabs", refTab, turnTab),
+    layout);
 }

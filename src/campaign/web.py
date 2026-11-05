@@ -1412,6 +1412,14 @@ def create_app(
     def get_inventory(request: Request, inv: Inventory = Depends(inventory_dep), s: Store = Depends(store)) -> dict:
         return inventory_payload(s, request, inv)
 
+    @app.get("/api/campaigns/{slug}/inventory/items/{holding_id}/about")
+    def item_about(holding_id: int, inv: Inventory = Depends(inventory_dep)) -> dict:
+        """What an item is and does: its rules (the SRD's) and what the world knows about it."""
+        try:
+            return inv.about(holding_id)
+        except InventoryError as err:
+            raise HTTPException(404, str(err))
+
     @app.post("/api/campaigns/{slug}/inventory/items")
     def add_item(body: NewHolding, request: Request, inv: Inventory = Depends(inventory_dep),
                  s: Store = Depends(store)) -> dict:

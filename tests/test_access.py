@@ -183,6 +183,8 @@ def test_the_party_inventory_is_the_whole_partys(site):
     seen = alice.get(base).json()["holders"][1]["items"][0]
     assert seen["name"] == "Silver mirror" and seen["bonuses"] == [] and seen["item"]["name"] is None
     assert dm.get(base).json()["holders"][1]["items"][0]["item"]["secret"]
+    assert alice.get(f"{base}/items/{loot}/about").json()["world"] is None
+    assert dm.get(f"{base}/items/{loot}/about").json()["world"]["name"] == "Silver mirror"
     # Outsiders can't see it.
     carol = site.user("carol@example.com")
     assert carol.get(base).status_code == 404
