@@ -14,6 +14,7 @@ from typing import Any, Callable
 from pydantic import ValidationError
 
 from . import dndbeyond, encounters, tables
+from . import rules as srd
 from .charsheet import Bonus, CharacterFile, CharacterSheet, ItemMechanics, merge_patch
 from .db import Campaign, Store
 from .inventory import Inventory, InventoryError
@@ -295,6 +296,24 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
             sb, source = found
             return format_stat_block(f"{view['name']} ({source['name']})", sb)
         return f"{view['name']} has no stat block in the digested material. Try search_reference."
+
+    def rules(name: str) -> str:
+        """The rules for a 5e magic item, spell, weapon, armor or piece of gear, as the SRD 5.1 words them.
+
+        Takes the name the way the table says it: "Potion of Healing", "Scroll of
+        Sending" (the spell, and the scroll's save DC and attack bonus), "+1
+        Arrows", "Ring of Resistance (Fire)", "a fine dagger". Falls back to a
+        search of the rules text ("fire resistance"). The book a campaign is built
+        on can change a thing, so where it says otherwise, the book wins.
+
+        Args:
+            name: The thing's name, or words to search the rules for.
+        """
+        found = srd.about(name) or srd.search(name)
+        if not found:
+            return f"The SRD has nothing called {name!r}. Try lookup or search_reference for the book's own items."
+        return "\n\n".join(f"## {r['name']}\n*{r['subtitle']}*\n" + (f"\n{r['note']}\n" if r.get("note") else "")
+                            + f"\n{r['text']}" for r in found) + f"\n\n({srd.LICENSE})"
 
     def encounter(title: str, creatures: list[encounters.Creature], party_size: int | None = None,
                   party_level: int | None = None) -> str:
@@ -904,6 +923,7 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         find_entities,
         timeline,
         stat_block,
+        rules,
         encounter,
         treasure,
         roll_table,

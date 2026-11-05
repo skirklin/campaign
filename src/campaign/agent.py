@@ -38,7 +38,9 @@ sources:
 - For running the game: encounter to put a whole fight together (every
   creature's stat block, XP and difficulty for the party, in one call; put
   the ```encounter block it returns in your answer and don't reprint the
-  stat blocks), stat_block for one creature's full stats, treasure
+  stat blocks), stat_block for one creature's full stats, rules for
+  what a 5e magic item, spell, weapon or piece of gear does (the SRD's
+  words; the book's own version wins where it differs), treasure
   for what's at a place or on a creature (and what's been taken), and
   roll_table to roll on the book's random encounter, treasure and other
   tables. Keyed areas answer to their map key ("C3").
@@ -554,6 +556,7 @@ _DESCRIBE: dict[str, Callable[[dict[str, Any]], str]] = {
                      + (f" matching “{a['query']}”" if a.get("query") else ""),
     "timeline": lambda a: f"Timeline of “{a.get('name', '')}”",
     "stat_block": lambda a: f"Stat block for “{a.get('name', '')}”",
+    "rules": lambda a: f"Read the rules for “{a.get('name', '')}”",
     "encounter": lambda a: "Put together a fight: " + ", ".join(
         f"{c.get('count', 1)} × {c.get('name', '?')}" for c in a.get("creatures") or []),
     "treasure": lambda a: f"Treasure at “{a.get('place', '')}”",

@@ -1274,3 +1274,20 @@ a.button { display: inline-block; padding: .42rem .85rem; border: 1px solid var(
 .ddb-paste { margin-top: .4rem; }
 .ddb-paste textarea { width: 100%; margin: .3rem 0; font-family: ui-monospace, monospace; font-size: .8rem; }
 .play-block.ddb { margin: .6rem 0; }
+
+/* What an item is, in its sheet: the world's item, then the rules (the SRD's words). */
+.item-about { display: grid; gap: .6rem; margin-bottom: .6rem; }
+.item-about .about-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: .2rem .6rem; }
+.item-about .about-head a { margin-left: auto; }
+.item-world, .item-rules { border-left: 3px solid var(--border); padding-left: .7rem; }
+.item-rules summary { cursor: pointer; list-style-position: outside; }
+.item-rules summary .about-head { display: inline-flex; }
+.item-rules .md p { margin: .35rem 0; }
+.item-rules .md table { font-size: .85rem; }
+.rules-note { font-weight: 600; margin: .3rem 0; }
+.rules-text.clamp { max-height: 15rem; overflow: hidden; }
+.rules-text.clamped { mask-image: linear-gradient(to bottom, #000 70%, transparent); }
+ul.about-facts { margin: .3rem 0; padding-left: 1.1rem; }
+ul.about-facts li { margin: .15rem 0; }
+.about-license { font-size: .72rem; margin: 0; }
+.item-rules > button.link { color: var(--accent); text-decoration: underline; margin-top: .2rem; }

@@ -264,6 +264,20 @@ localhost without it, unless you pass `--no-auth`. With sign-in on:
   use the same list (`inventory`, `add_items`, `give_item`, `change_coin`,
   `define_item`). A character exported as JSON carries their things with
   them, and importing one (or scanning a paper sheet) puts them back.
+
+  **Tapping an item says what it is and does.** First comes what the world
+  knows about its world item (the book's lore, what's happened to it),
+  then the **rules** for it as the SRD 5.1 words them. Those rules come
+  with the app (`rules.py`, built from the SRD's markdown by
+  `scripts/srd_rules.py`), so they work without loading a book. They
+  cover magic items, spells, weapons, armor and adventuring gear, found by
+  the name the table uses: "Potion of Healing", "Scroll of Sending" (the
+  spell, at the scroll's save DC and attack bonus, with how spell scrolls
+  work folded under it), "+1 Arrows" (+1 ammunition, then arrows), "Potion
+  of Thunder Resistance", "Very nice dagger" (a dagger: 1d4 piercing,
+  finesse, light, thrown). Long text is cut short behind **Read it all**.
+  The assistant has the same lookup as the `rules` tool, and the book
+  wins where it says otherwise.
 - **Paper sheets can be scanned in.** On the Party tab, **From a scan or
   PDF…** takes a photo or PDF of a filled-in sheet; Claude reads it into a
   new character (`CAMPAIGN_SHEET_MODEL`, default `CAMPAIGN_MODEL`) and lists
@@ -401,7 +415,8 @@ each.
 
 For running a session, the chat and MCP tools `stat_block`, `treasure`
 (what's at a place, and what the party has already taken) and `roll_table`
-work from these.
+work from these. `rules` gives the SRD's own words for a magic item, spell,
+weapon, armor or piece of gear.
 
 See [How the digest works](#how-the-digest-works) for the caching rules.
 
