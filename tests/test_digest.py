@@ -10,7 +10,9 @@ import pytest
 
 from campaign import digest, library
 from campaign.db import Store
-from campaign.digest import BranchOutput, Entity, LeafOutput, Merge, RollTable, StatBlock, StatBlockOutput, TableRow
+from campaign.digest import (
+    BranchOutput, Entity, LeafOutput, Merge, ReadBlock, RollTable, StatBlock, StatBlockOutput, TableRow,
+)
 from campaign.ingest import parse_pdf
 from campaign.tools import ToolContext, build_tools
 from campaign.world import World
@@ -53,7 +55,7 @@ class FakeDigest:
         kind = {LeafOutput: "leaf", BranchOutput: "branch", StatBlockOutput: "statblock"}[kw["output_format"]]
         if kind == "statblock":
             parsed = fake_stat_block(user)
-            title = parsed.stat_block.name if parsed.stat_block else "?"
+            title = ", ".join(b.stat_block.name if b.stat_block else "?" for b in parsed.blocks)
         self.calls.append((kind, title))
         if self.fail_on and self.fail_on in title and self.fail_kind in (None, kind):
             raise RuntimeError("boom")
@@ -94,33 +96,41 @@ class FakeDigest:
 
 
 def fake_stat_block(text):
-    """The marked stat block in `text`, read the way the prompt asks: its title, its numbers, and its
+    """Each marked stat block in `text`, read the way the prompt asks: its title, its numbers, and its
     entries under their headings (the senses line left out, for the check against the text to put back)."""
-    before, after = text.split(digest.MARK)
-    titles = re.findall(r"^#+ (.+)$", before, re.M)
-    if not titles or "Ship" in titles[-1]:
-        return StatBlockOutput(found=False, stat_block=None)
-    field = lambda label: (re.search(rf"^{label} (.+)$", after, re.M) or [None, None])[1]  # noqa: E731
-    sections, current = {"traits": [], "actions": [], "legendary_actions": []}, "traits"
-    intro = None
-    for line in after.split("Challenge", 1)[1].splitlines()[1:]:
-        if line.startswith("#"):
+    blocks = []
+    for n in range(1, 5):
+        if digest.mark(n) not in text:
             break
-        if line.strip() in ("Actions", "Legendary Actions"):
-            current = line.strip().lower().replace(" ", "_")
-        elif line.strip():
-            if current == "legendary_actions" and "legendary actions" in line:
-                intro = line.strip()
-            else:
-                sections[current].append(line.strip())
-    return StatBlockOutput(found=True, stat_block=StatBlock(
-        name=titles[-1], size_type=(re.findall(r"^_(.+)_$", before, re.M) or [""])[-1], armor_class=re.match(r"Armor Class (.+)", after)[1],
-        hit_points=field("Hit Points"), speed=field("Speed") or "30 ft.", initiative=None,
-        strength=10, dexterity=12, constitution=10, intelligence=10, wisdom=10, charisma=10,
-        saving_throws=None, skills=None, damage_vulnerabilities=None, damage_resistances=None,
-        damage_immunities=field("Damage Immunities"), condition_immunities=None, senses=None, languages=None,
-        challenge=field("Challenge"), bonus_actions=[], reactions=[], legendary_intro=intro, lair_intro=None,
-        lair_actions=[], other=[], **sections))
+        before, after = text.split(digest.mark(n))
+        after = after.split(digest.mark(n + 1))[0]
+        titles = re.findall(r"^#+ (.+)$", before, re.M)
+        if not titles or "Ship" in titles[-1]:
+            blocks.append(ReadBlock(mark=n, stat_block=None))
+            continue
+        field = lambda label: (re.search(rf"^{label} (.+)$", after, re.M) or [None, None])[1]  # noqa: E731
+        sections, current = {"traits": [], "actions": [], "legendary_actions": []}, "traits"
+        intro = None
+        for line in after.split("Challenge", 1)[1].splitlines()[1:]:
+            if line.startswith("#"):
+                break
+            if line.strip() in ("Actions", "Legendary Actions"):
+                current = line.strip().lower().replace(" ", "_")
+            elif line.strip():
+                if current == "legendary_actions" and "legendary actions" in line:
+                    intro = line.strip()
+                else:
+                    sections[current].append(line.strip())
+        blocks.append(ReadBlock(mark=n, stat_block=StatBlock(
+            name=titles[-1], size_type=(re.findall(r"^_(.+)_$", before, re.M) or [""])[-1],
+            armor_class=re.match(r"Armor Class (.+)", after)[1],
+            hit_points=field("Hit Points"), speed=field("Speed") or "30 ft.", initiative=None,
+            strength=10, dexterity=12, constitution=10, intelligence=10, wisdom=10, charisma=10,
+            saving_throws=None, skills=None, damage_vulnerabilities=None, damage_resistances=None,
+            damage_immunities=field("Damage Immunities"), condition_immunities=None, senses=None, languages=None,
+            challenge=field("Challenge"), bonus_actions=[], reactions=[], legendary_intro=intro, lair_intro=None,
+            lair_actions=[], other=[], **sections)))
+    return StatBlockOutput(blocks=blocks)
 
 
 @pytest.fixture
@@ -616,18 +626,18 @@ def test_one_limit_on_calls_in_flight_across_sources(env, monkeypatch):
 
 def test_finding_stat_blocks_in_a_clean_book():
     goblin, ogre = digest.find_stat_blocks([
-        {"page": 4, "heading": "Bestiary > Goblin", "text": "## Goblin\n\n_Small humanoid, neutral evil_\n\n"
+        {"page": None, "heading": "Bestiary > Goblin", "text": "## Goblin\n\n_Small humanoid, neutral evil_\n\n"
          "**Armor Class** 15 (leather armor, shield)\n**Hit Points** 7 (2d6)\n\n***Scimitar.*** Melee Weapon Attack"},
-        {"page": 5, "heading": "Bestiary > Ogre", "text": "## Ogre\n\n_Large giant, chaotic evil_\n\n"
+        {"page": None, "heading": "Bestiary > Ogre", "text": "## Ogre\n\n_Large giant, chaotic evil_\n\n"
          "**AC** 11 **Initiative** -1 (9)\n**Hit Points** 59 (7d10 + 21)\n\n***Greatclub.*** Melee Weapon Attack"},
-        {"page": 6, "heading": "Bestiary > Rules", "text": "A creature's AC is how hard it is to hit."},
+        {"page": None, "heading": "Bestiary > Rules", "text": "A creature's AC is how hard it is to hit."},
     ])
-    assert (goblin.title, goblin.page_start, ogre.title, ogre.page_start) == ("Stat block: Goblin", 4, "Stat block: Ogre", 5)
+    assert (goblin.title, ogre.title) == ("Stat block: Goblin", "Stat block: Ogre")
     # Each from its title to the next block's title, with its own Armor Class line marked.
     assert goblin.text.startswith("Section: Bestiary > Goblin\n\n### Goblin") and "Scimitar" in goblin.text and "Ogre" not in goblin.text
-    assert goblin.text.count(digest.MARK) == 1 and f"{digest.MARK}**Armor Class** 15" in goblin.text
+    assert goblin.text.count("▶") == 1 and f"{digest.mark(1)}**Armor Class** 15" in goblin.text
     assert "Greatclub" in ogre.text and "how hard it is" in ogre.text
-    assert f"{digest.MARK}**AC** 11" in ogre.text
+    assert f"{digest.mark(1)}**AC** 11" in ogre.text
 
 
 def test_a_block_under_a_generic_heading_is_named_by_its_section():
@@ -638,6 +648,43 @@ def test_a_block_under_a_generic_heading_is_named_by_its_section():
     ])
     assert treat.title == "Stat block: Swarm of Trickered Treats"
     assert treat.text.startswith("Section: Monsters > Swarm of Trickered Treats > Attributes\n\n### Attributes")
+
+
+def test_blocks_printed_side_by_side_are_read_together():
+    """p. 396 of Odyssey of the Dragonlords: the great boar and the white stag side by side, their
+    lines alternating, under one outline section named for the stag."""
+    nodes = digest.find_stat_blocks([
+        {"page": 396, "heading": "White Stag > Great Boar",
+         "text": "there is no mistaking the great boar for an earthly creature.\n\nLarge celestial, unaligned"},
+        {"page": 396, "heading": "White Stag > White Stag",
+         "text": "Huge celestial, unaligned\n\nArmor Class 14 (natural armor)\nHit Points 52 (5d10 + 25)\nSpeed 40 ft.\n\n"
+                 "Armor Class 15 (natural armor)\nHit Points 63 (6d12 + 24)\nSpeed 60 ft.\n\n"
+                 "Challenge 3 (700 XP)\n\nChallenge 4 (1,100 XP)\n\nCharge. If the boar moves at least 20 ft."},
+        {"page": 397, "heading": "Wolf", "text": "### Wolf\n\nArmor Class 13\nHit Points 11 (2d8 + 2)\nChallenge 1/4"},
+    ])
+    assert [n.title for n in nodes] == ["Stat blocks: White Stag, White Stag", "Stat block: Wolf"]
+    pair = nodes[0]
+    assert f"{digest.mark(1)}Armor Class 14" in pair.text and f"{digest.mark(2)}Armor Class 15" in pair.text
+    assert "Section: White Stag > Great Boar\n" in pair.text and "great boar" in pair.text  # its name is in view
+    assert digest.stat_lines(pair.text) == {}  # whose lines are whose is the reading's job
+    assert digest.mark(2) not in nodes[1].text
+
+
+def test_stat_blocks_are_read_with_sonnet_at_least(env, monkeypatch):
+    assert digest.statblock_model("claude-haiku-5-5") == "claude-sonnet-5-5"
+    assert digest.statblock_model("claude-opus-5-5") == "claude-opus-5-5"
+    store, camp, db = env
+    r = library.add_reference(store, camp, BESTIARY.encode(), "bestiary.md", title="Bestiary", kind="module")
+    fake = FakeDigest()
+    models = []
+    stream = fake.stream
+    fake.beta.messages.stream = lambda **kw: (models.append((kw["output_format"].__name__, kw["model"])), stream(**kw))[1]
+    digest.run(db, r["id"], client=fake, model="claude-haiku-5-5")
+    assert {m for f, m in models if f == "StatBlockOutput"} == {"claude-sonnet-5-5"}
+    assert {m for f, m in models if f != "StatBlockOutput"} == {"claude-haiku-5-5"}
+    used = {u["model"] for u in store.digest_usage(r["id"])}
+    assert used == {"claude-haiku-5-5", "claude-sonnet-5-5"}  # what each call cost, at its own price
+    assert not digest._unfinished(store, r["id"], "claude-haiku-5-5")  # done, though not all with Haiku
 
 
 def test_a_stat_block_a_pdf_split_and_interleaved_arrives_whole():
@@ -657,9 +704,12 @@ def test_a_stat_block_a_pdf_split_and_interleaved_arrives_whole():
                  "Attack. Sydon makes one attack with his glaive or bolt.\nTremor Strike (Costs 2 Actions). Sydon strikes the"},
     ])
     assert sydon.title == "Stat block: Sydon" and sydon.page_start == 347
-    assert sydon.text.startswith("Section: Sydon, The Lord of Storms > Sydon\n\n### Sydon\n")
-    assert "Lutheria" not in sydon.text
-    assert "Tremor Strike" in sydon.text and f"{digest.MARK}Armor Class 22" in sydon.text
+    # From a PDF, it starts earlier too, and names every section it spans.
+    assert sydon.text.startswith("Section: Sydon, The Lord of Storms > Sydon, The Lord of Storms\n"
+                                 "Section: Sydon, The Lord of Storms > Sydon\n"
+                                 "Section: Sydon, The Lord of Storms > Legendary Actions\n\n")
+    assert "Tremor Strike" in sydon.text and f"{digest.mark(1)}Armor Class 22" in sydon.text
+    assert digest.mark(2) not in sydon.text
     # The labelled lines the reading leaves out are put back from the text; what it gave is kept.
     got = digest.fill_missing_lines({"name": "Sydon", "senses": None, "languages": "all", "skills": None}, sydon.text)
     assert got["senses"] == "truesight 120 ft., passive Perception 16" and got["languages"] == "all"

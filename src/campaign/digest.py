@@ -57,7 +57,7 @@ from .loops import LeasedLoop
 
 LEAF_VERSION = 4  # 2: rollable tables, keyed areas, read-aloud text, treasure; 3: claims, placement, sets; 4: no stat blocks
 BRANCH_VERSION = 2  # 2: stricter merge rules (no merging across kinds, members into groups, shared titles)
-STATBLOCK_VERSION = 1
+STATBLOCK_VERSION = 2  # 2: blocks printed together read together, sidebars left out, Sonnet at least
 MODEL = os.environ.get("CAMPAIGN_DIGEST_MODEL", os.environ.get("CAMPAIGN_MODEL", "claude-opus-5-5"))
 EFFORT = os.environ.get("CAMPAIGN_DIGEST_EFFORT", "medium")
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
@@ -126,9 +126,13 @@ class StatBlock(BaseModel):
     other: list[str]  # anything else under its own heading: "Mythic Actions. …", "Regional Effects. …"
 
 
+class ReadBlock(BaseModel):
+    mark: int  # which marked Armor Class line it is
+    stat_block: StatBlock | None  # None when that line isn't a creature's stat block (a ship, a trap)
+
+
 class StatBlockOutput(BaseModel):
-    found: bool  # False when the marked line isn't a creature's stat block (a ship, a trap)
-    stat_block: StatBlock | None
+    blocks: list[ReadBlock]
 
 
 class Entity(BaseModel):
@@ -265,24 +269,40 @@ Return:
   Leave everything else out.
 """
 
-MARK = "▶ "  # starts the Armor Class line of the stat block a call is about
+def mark(n: int) -> str:
+    """What starts the Armor Class line of the `n`th stat block a call is about."""
+    return f"▶{n} "
 
-STATBLOCK_SYSTEM = f"""\
-You transcribe one creature's stat block from a tabletop RPG book into its
+
+STATBLOCK_SYSTEM = """\
+You transcribe creatures' stat blocks from a tabletop RPG book into their
 parts, for a game master to run at the table from what you return.
 
-The block to transcribe is the one whose Armor Class line starts with
-"{MARK.strip()}". The text around it may hold other stat blocks or prose; ignore
-them. If it came from a PDF, the columns may be interleaved: the block's
-parts can be separated by other text, appear before its Armor Class line,
-or carry on after a page footer. Gather every part that belongs to this
-creature, and only those.
+The blocks to transcribe are the ones whose Armor Class lines start with a
+mark: "▶1", and where a page prints several together, "▶2" and so on.
+Return one entry per mark, with its number. The text around them may hold
+other stat blocks or prose; ignore those.
+
+If the text came from a PDF, its columns may be interleaved: a block's parts
+can be separated by other text, appear before its Armor Class line, or carry
+on after a page footer. Blocks printed side by side often come out with
+their lines alternating, in the order of their marks: both Armor Class
+lines, then both sets of ability scores, then both challenge lines, and so
+on. Tell the blocks' entries apart by what they say ("If the boar fails a
+saving throw", "the stag's"), by the type lines, and by the names and
+headings around them. Gather every part that belongs to each creature, and
+only those.
 
 Copy every entry word for word as printed: every number, DC, die, range,
 duration, condition and rider, and every spell in a spell list. Join lines
 the PDF broke and undo hyphenation across lines, but never summarize,
 shorten, reword or leave anything out. If a sentence is cut off where the
 text ends, keep what's there.
+
+A stat block holds rules. Books print lore beside them, often with bold
+headings that look like trait names ("Constructed Nature. Bronze automatons
+are the ultimate soldiers…"): a paragraph that describes the creature, its
+history or its habits, with no game rule in it, is not part of the block.
 
 - name: the creature's name, as the book titles this stat block.
 - size_type: the size, type and alignment line, as printed.
@@ -305,12 +325,22 @@ text ends, keep what's there.
 - other: anything else printed under a heading of its own (mythic actions,
   regional effects), each as "Heading. text".
 
-The text opens with the heading path of the section the block is in, which
-names the creature when the block's own heading doesn't ("Attributes").
+The text opens with the heading paths of the sections it spans, which name
+the creatures when the blocks' own headings don't ("Attributes").
 
-If the marked line isn't a creature's stat block (a ship, a trap, an
-object), return found false and no stat_block.
+If a marked line isn't a creature's stat block (a ship, a trap, an object),
+return its mark with no stat_block.
 """
+
+# Stat blocks are read with this model at least, whatever cheaper one a source's summaries use:
+# they're the part that has to be exact, and there are few of them.
+STATBLOCK_MODEL = os.environ.get("CAMPAIGN_STATBLOCK_MODEL", "claude-sonnet-5-5")
+
+
+def statblock_model(model: str) -> str:
+    """The model a source digested with `model` reads its stat blocks with."""
+    floor, own = PRICES.get(STATBLOCK_MODEL), PRICES.get(model)
+    return model if own is None or floor is None or own >= floor else STATBLOCK_MODEL
 
 
 # -- the tree ------------------------------------------------------------------
@@ -520,32 +550,63 @@ def _creature(heading: str) -> str:
 
 def find_stat_blocks(chunks: list[dict[str, Any]]) -> list[DNode]:
     """Every stat block in a source, each as the text around it with its Armor Class line marked,
-    after the heading path of the section that line is in.
+    after the heading paths of the sections that text spans. Blocks printed together are one node.
 
     A block runs from its title to the next block's title, so a clean book (Markdown,
     a well-made PDF) gives each call one block. Where nothing marks where blocks
     start, the window reaches further either way and the call is told which one it's
-    about, so a block a PDF split apart or interleaved with other text still arrives whole.
+    about, so a block a PDF split apart or interleaved with other text still arrives
+    whole. In a PDF it also starts earlier, since a block's name and parts can come
+    before its Armor Class line. Two Armor Class lines with no challenge line between
+    them, and no title over the second, are blocks printed together (side by side, their
+    lines alternating), and one call reads them both.
     """
     text, spans = _render_spans(chunks)
+    pdf = any(c["page"] is not None for c in chunks)
     acs = [m.start() for m in _AC_LINE.finditer(text)]
     titles = [_title_start(text, a) for a in acs]
     pages = [(m.start(), int(m.group(1))) for m in re.finditer(r"^\[p\. (\d+)\]$", text, re.MULTILINE)]
-    out = []
+    windows = []
     for i, a in enumerate(acs):
         start = titles[i] if titles[i] is not None else max(0, a - STATBLOCK_LEAD)
+        if pdf:
+            start = min(start, max(0, a - STATBLOCK_LEAD))
         end = min(len(text), a + STATBLOCK_REACH)
         if i + 1 < len(acs) and titles[i + 1] is not None:
             end = min(end, titles[i + 1])
-        page = next((p for pos, p in reversed(pages) if pos < a), None)
         heading = next((hd for pos, hd in reversed(spans) if pos <= a), "")
         name = _title_text(text, titles[i])
-        name = name if name and not _GENERIC.match(name) else _creature(heading)
-        title = f"Stat block: {name}" if name else f"Stat block, p. {page}" if page else "Stat block"
-        window = text[start:a] + MARK + text[a:end]
-        out.append(DNode(title, page, page, text=f"Section: {heading}\n\n{window}" if heading else window,
-                         statblock=True))
+        windows.append({"ac": a, "start": start, "end": end,
+                        "name": name if name and not _GENERIC.match(name) else _creature(heading),
+                        "page": next((p for pos, p in reversed(pages) if pos < a), None)})
+    groups: list[list[dict[str, Any]]] = []
+    for i, w in enumerate(windows):
+        together = (i > 0 and titles[i] is None and len(groups[-1]) < MAX_TOGETHER
+                    and not _CHALLENGE.search(text, acs[i - 1], acs[i]))
+        if together:
+            groups[-1].append(w)
+        else:
+            groups.append([w])
+    out = []
+    for g in groups:
+        start, end = min(w["start"] for w in g), max(w["end"] for w in g)
+        parts, at = [], start
+        for n, w in enumerate(g, 1):
+            parts += [text[at:w["ac"]], mark(n)]
+            at = w["ac"]
+        window = "".join(parts) + text[at:end]
+        first = next((hd for pos, hd in reversed(spans) if pos <= start), "")
+        paths = list(dict.fromkeys(hd for hd in [first, *(hd for pos, hd in spans if start < pos < end)] if hd))
+        names = [w["name"] for w in g if w["name"]]
+        page = g[0]["page"]
+        title = (f"Stat block{'s' if len(g) > 1 else ''}: {', '.join(names)}" if names
+                 else f"Stat block, p. {page}" if page else "Stat block")
+        head = "".join(f"Section: {p}\n" for p in paths)
+        out.append(DNode(title, page, g[-1]["page"], text=f"{head}\n{window}" if head else window, statblock=True))
     return out
+
+
+MAX_TOGETHER = 4  # blocks printed together on one page; more than this is a run of untitled blocks
 
 
 # -- cache keys ------------------------------------------------------------------
@@ -564,7 +625,8 @@ def leaf_key(node: DNode, model: str) -> str:
 
 
 def statblock_key(node: DNode, model: str) -> str:
-    return _h("statblock", str(STATBLOCK_VERSION), model, node.text)
+    """`model` is the source's; the key is under the model the block is read with."""
+    return _h("statblock", str(STATBLOCK_VERSION), statblock_model(model), node.text)
 
 
 def branch_key(node: DNode, model: str) -> str:
@@ -737,9 +799,10 @@ _CHALLENGE = re.compile(r"^\W*(challenge|CR)\b", re.IGNORECASE | re.MULTILINE)
 
 
 def stat_lines(text: str) -> dict[str, str]:
-    """The labelled lines (saves, skills, resistances, senses, languages…) of the marked stat block in
-    `text`, by field: from its marked Armor Class line to its challenge."""
-    start = text.find(MARK)
+    """The labelled lines (saves, skills, resistances, senses, languages…) of the one marked stat block
+    in `text`, by field: from its marked Armor Class line to its challenge. Nothing where several are
+    marked, since their lines alternate and can't be told apart here."""
+    start = text.find(mark(1)) if mark(2) not in text else -1
     end = _CHALLENGE.search(text, start) if start >= 0 else None
     if end is None:
         return {}
@@ -768,9 +831,11 @@ STATBLOCK_EFFORT = "low"  # copying, not judging
 
 def digest_node(client: Any, node: DNode, model: str, effort: str) -> tuple[dict[str, Any], int, int]:
     if node.statblock:
-        parsed, i, o = _call(client, STATBLOCK_SYSTEM, node.text, StatBlockOutput, model, STATBLOCK_EFFORT)
-        sb = parsed.stat_block.model_dump() if parsed.found and parsed.stat_block else None
-        entities = [stat_block_entry(fill_missing_lines(sb, node.text), node.page_start)] if sb else []
+        parsed, i, o = _call(client, STATBLOCK_SYSTEM, node.text, StatBlockOutput, statblock_model(model),
+                             STATBLOCK_EFFORT)
+        marks = sum(1 for n in range(1, MAX_TOGETHER + 1) if mark(n) in node.text)
+        read = {b.mark: b.stat_block.model_dump() for b in parsed.blocks if b.stat_block and 1 <= b.mark <= marks}
+        entities = [stat_block_entry(fill_missing_lines(sb, node.text), node.page_start) for _, sb in sorted(read.items())]
         return {"entities": entities}, i, o
     if node.is_leaf:
         parsed, i, o = _call(client, LEAF_SYSTEM, leaf_prompt(node), LeafOutput, model, effort)
@@ -921,7 +986,8 @@ def estimate(store: Store, root: DNode | None, model: str = MODEL) -> dict[str, 
     history = store.digest_history(model)
     leaves = [h for h in history if h["kind"] == "leaf" and h["chars"]]
     branches = [h for h in history if h["kind"] == "branch"]
-    blocks = [h for h in history if h["kind"] == "statblock" and h["chars"]]
+    block_model = statblock_model(model)
+    blocks = [h for h in store.digest_history(block_model) if h["kind"] == "statblock" and h["chars"]]
     if len(leaves) >= MIN_SAMPLES:
         leaf_in = lambda chars: chars * sum(h["input_tokens"] for h in leaves) / sum(h["chars"] for h in leaves)
         leaf_ratio = sum(h["output_tokens"] for h in leaves) / sum(h["input_tokens"] for h in leaves)
@@ -952,18 +1018,21 @@ def estimate(store: Store, root: DNode | None, model: str = MODEL) -> dict[str, 
         totals["output_tokens"] += o
         return o * VISIBLE_SHARE
 
+    block_totals = {"input_tokens": 0.0, "output_tokens": 0.0}
     if root is not None:
         visible(root)
         for n in root.stat_blocks:
             if n.output is None:
                 i = block_in(len(n.text))
                 totals["calls"] += 1
-                totals["input_tokens"] += i
-                totals["output_tokens"] += i * block_ratio
+                block_totals["input_tokens"] += i
+                block_totals["output_tokens"] += i * block_ratio
     i, o = round(totals["input_tokens"]), round(totals["output_tokens"])
+    bi, bo = round(block_totals["input_tokens"]), round(block_totals["output_tokens"])
+    usd = [cost(model, i, o), cost(block_model, bi, bo)]
     return {
-        "model": model, "calls": totals["calls"], "input_tokens": i, "output_tokens": o,
-        "usd": cost(model, i, o) if totals["calls"] else 0.0,
+        "model": model, "calls": totals["calls"], "input_tokens": i + bi, "output_tokens": o + bo,
+        "usd": (None if None in usd else sum(usd)) if totals["calls"] else 0.0,
         "calibrated_on": len(leaves) if len(leaves) >= MIN_SAMPLES else 0,
     }
 
@@ -1069,7 +1138,7 @@ def run(
                         store.set_digest_node(n.row_id, n.key, n.error)
                         stats["failed"] += 1
                     else:
-                        store.put_digest(n.key, n.kind, output, model, i, o)
+                        store.put_digest(n.key, n.kind, output, statblock_model(model) if n.statblock else model, i, o)
                         store.clear_digest_failures([n.key])
                         store.set_digest_node(n.row_id, n.key)
                         n.output = output
@@ -1203,7 +1272,8 @@ class Reconciler(LeasedLoop):
 def _unfinished(store: Store, source_id: int, model: str) -> bool:
     """Whether a source may still have work: not every saved section is done with this model."""
     row = store.conn.execute(
-        "SELECT count(n.id) AS total, count(d.key) AS done, sum(d.model != ?) AS other"
+        "SELECT count(n.id) AS total, count(d.key) AS done,"
+        " sum(n.kind != 'statblock' AND d.model != ?) AS other"  # stat blocks have a model of their own
         " FROM digest_nodes n LEFT JOIN digests d ON d.key = n.digest_key WHERE n.source_id = ?",
         (model, source_id),
     ).fetchone()

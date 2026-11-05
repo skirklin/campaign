@@ -307,22 +307,37 @@ The digest turns a module into these things the assistant can use:
   that to the stat block, in any loaded book (the SRD's veteran, the
   appendix's Great Boar), and show it under both names ("Corrupted White
   Boar", run as the Great Boar); what the adventure changes stays with the
-  creature.
+  creature. A name a fight gives finds, of everything called that, the
+  creature with a stat block: "Sydon" is a piece of lore about the Titans
+  and the Titan himself, and a fight wants the Titan.
 
 Facts are what the book says is true: what a character claims is kept as
 theirs ("Anni says…"), and where something is keeps the book's whole
 placement (the chest *under the tables*, *beneath the violet fungus*).
 
-Stat blocks are read apart from the rest, one call each. Code finds every
-one by its Armor Class line, wherever the book's outline put it: a PDF
-often splits a block across sections (Sydon's legendary actions sit under
-an outline entry of their own) and interleaves its columns with the text
-around it. Each call gets the text around one block, from its title to the
-next block's, or further either way where nothing marks where blocks
-start. The call also gets the heading path of the section the block is in,
-which names the creature when its own heading doesn't ("Attributes"), and
-the block's Armor Class line is marked so the call knows which one it's
-about. The labelled lines the reading leaves out are put back from the text.
+Stat blocks are read apart from the rest. Code finds every one by its
+Armor Class line, wherever the book's outline put it: a PDF often splits a
+block across sections (Sydon's legendary actions sit under an outline entry
+of their own) and interleaves its columns with the text around it.
+- **The text around each block** goes to a call of its own: from its title
+  to the next block's, or further either way where nothing marks where
+  blocks start, and from a PDF, from further back, since a block's name and
+  parts can come before its Armor Class line. The call also gets the
+  heading paths of the sections that text spans, which name the creature
+  when its own heading doesn't ("Attributes").
+- **Blocks printed together are read together.** Two Armor Class lines with
+  no challenge line between them, and no title over the second, are a page
+  printing blocks side by side, their lines alternating (the great boar
+  and the white stag on p. 396). One call gets both, each Armor Class line
+  marked with its number, and tells their entries apart.
+- **Only rules.** Lore beside a block, even under a bold heading like a
+  trait's ("Constructed Nature. Bronze automatons are the ultimate
+  soldiers…"), is left out.
+- **Read with Sonnet at least** (`CAMPAIGN_STATBLOCK_MODEL`), whatever
+  cheaper model the source's summaries use: stat blocks are the part that
+  has to be exact, and there are few of them.
+- **The labelled lines** a single block's reading leaves out are put back
+  from the text.
 
 For a fight, the `encounter` tool takes the creatures and how many of
 each (with the adventure's changes to any of them, like "45 HP, vulnerable
@@ -512,8 +527,9 @@ that tree bottom-up (`digest.py`):
   description ("the old boar") or a map key ("C3") can belong to several
   things, so it never joins two entries into one. A new version of these
   rules (`world.APPLY_VERSION`), or of the digest, takes effect when a
-  server starts: it plans every source again, digests what changed, and
-  applies cached catalogs again.
+  server starts: it plans every source again (with a digest target or not,
+  so one without shows what's left), digests what changed for those with
+  one, and applies cached catalogs again.
 - **Stat blocks** are read beside the tree, not in it: one call per block,
   on the text around it (see [Digesting reference material](#digesting-reference-material)).
 - **The root's** entities, then the stat blocks read so far, become the
