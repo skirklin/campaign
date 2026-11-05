@@ -47,7 +47,6 @@ const TABS = [
   ["party", "Party"],
   ["reference", "Reference"],
   ["state", "World state"],
-  ["journal", "Journal"],
   ["members", "Members"],  // only with sign-in on
 ];
 
@@ -57,12 +56,13 @@ export async function campaignView(slug, tab, arg) {
   if (!c) throw new Error(`No campaign "${slug}".`);
   const tabs = TABS.filter(([key]) => key !== "members" || !me.local);
   const body = h("div.tab-body", h("p.muted", "Loading…"));
-  const render = { ask: askTab, encounters: encountersTab, ingest: sessionsTab, party: partyTab, reference: referenceTab, state: stateTab, journal: journalTab, members: membersTab }[tab] || sessionsTab;
+  const render = { ask: askTab, encounters: encountersTab, ingest: sessionsTab, party: partyTab, reference: referenceTab, state: stateTab, journal: sessionsTab, members: membersTab }[tab] || sessionsTab;
   render(c, me, arg).then((el) => body.replaceChildren(el), (err) => body.replaceChildren(h("p.empty", err.message)));
   return h("section.page",
-    h("div.page-head", h("h1", c.name), h(`span.badge.${c.role}`, c.role === "dm" ? "DM" : "Player"),
-      !canEdit(c) && h("span.badge", "view only")),
-    h("nav.tabs", tabs.map(([key, label]) => h("a", { href: `#/campaigns/${slug}/${key}`, className: key === tab ? "active" : "" }, label))),
+    h("div.page-head.campaign-head", h("h1", c.name), h(`span.badge.${c.role}`, c.role === "dm" ? "DM" : "Player"),
+      !canEdit(c) && h("span.badge", "view only"), h("span.spacer"), quickFind(c)),
+    h("nav.tabs", tabs.map(([key, label]) => h("a", { href: `#/campaigns/${slug}/${key}`,
+      className: key === tab || (key === "ingest" && tab === "journal") ? "active" : "" }, label))),
     body,
   );
 }
@@ -76,6 +76,7 @@ async function askTab(c, _me, convId) {
   const base = `/api/campaigns/${c.slug}`;
   const askHref = `#/campaigns/${c.slug}/ask`;
   let chats = await api("GET", `${base}/chats`);
+  const home = campaignHome(c);
   let current = null;
   const thread = h("div.chat-thread");
   const head = h("div.chat-head");
@@ -165,7 +166,7 @@ async function askTab(c, _me, convId) {
       }, "Delete"));
   };
   const welcome = () => {
-    thread.replaceChildren(h("div.chat-welcome",
+    thread.replaceChildren(home, h("div.chat-welcome",
       h("p", "Ask anything about this campaign."),
       h("p.muted", c.role === "player"
         ? "It only knows what the party knows."
@@ -268,6 +269,93 @@ async function askTab(c, _me, convId) {
     if (matchMedia("(pointer: fine)").matches) requestAnimationFrame(() => input.focus());
   }
   return h("div.chat", head, thread, form);
+}
+
+// Find anything in the campaign's world by name as you type: a person, a monster, a place, an item.
+// "/" or Ctrl-K gets to it from anywhere on the page.
+function quickFind(c) {
+  const input = h("input.quick-find-input", { type: "search", placeholder: "Find a person, monster, place…",
+    title: "Press / or Ctrl-K to search from anywhere on the page", "aria-label": "Find in this campaign", autocomplete: "off" });
+  const results = h("ol.quick-find-results", { hidden: true });
+  let timer = 0;
+  let hits = [];
+  const go = (e) => { location.hash = `#/campaigns/${c.slug}/entity/${e.id}`; input.value = ""; results.hidden = true; };
+  const show = () => {
+    results.replaceChildren(...hits.slice(0, 8).map((e, i) => h(`li${i === 0 ? ".first" : ""}`,
+      h("a", { href: `#/campaigns/${c.slug}/entity/${e.id}`, onclick: () => { results.hidden = true; } },
+        h("strong", e.name), h("span.badge", e.kind), e.headline && h("span.muted.small", e.headline)))));
+    results.hidden = !hits.length;
+  };
+  input.addEventListener("input", () => {
+    clearTimeout(timer);
+    const q = input.value.trim();
+    if (!q) { hits = []; show(); return; }
+    timer = setTimeout(async () => {
+      try {
+        const found = (await api("GET", `/api/campaigns/${c.slug}/entities?q=${encodeURIComponent(q)}`)).entities;
+        // Names first: what starts with it, then a word that does, then anywhere in a name, then the rest.
+        const needle = q.toLowerCase();
+        const rank = (e) => {
+          const names = [e.name, ...e.aliases].map((x) => x.toLowerCase());
+          if (names[0].startsWith(needle)) return 0;
+          if (names.some((n) => n.split(/[\s,()'-]+/).some((w) => w.startsWith(needle)))) return 1;
+          if (names.some((n) => n.includes(needle))) return 2;
+          return 3;
+        };
+        hits = found.map((e, i) => [rank(e), i, e]).sort((x, y) => x[0] - y[0] || x[1] - y[1]).map((x) => x[2]);
+        if (input.value.trim() === q) show();
+      } catch { /* a failed lookup just shows nothing */ }
+    }, 150);
+  });
+  input.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter" && hits[0]) { ev.preventDefault(); go(hits[0]); }
+    if (ev.key === "Escape") { input.value = ""; hits = []; show(); input.blur(); }
+  });
+  input.addEventListener("blur", () => setTimeout(() => { results.hidden = true; }, 200));
+  input.addEventListener("focus", () => { if (hits.length) results.hidden = false; });
+  if (!quickFind.bound) {  // once for the page: the shortcut finds whichever campaign's box is showing
+    quickFind.bound = true;
+    document.addEventListener("keydown", (ev) => {
+      const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName) || document.activeElement?.isContentEditable;
+      if ((ev.key === "/" && !typing) || (ev.key === "k" && (ev.ctrlKey || ev.metaKey))) {
+        const box = document.querySelector(".quick-find-input");
+        if (box) { ev.preventDefault(); box.focus(); box.select(); }
+      }
+    });
+  }
+  return h("div.quick-find", input, results);
+}
+
+// Where things stand, above a new question: the last session, the quests still open, the party, and
+// the fights ready to run. Filled in as it arrives, so the question box is ready at once.
+const DONE = /^(completed?|done|failed|resolved|abandoned|finished)$/i;
+function campaignHome(c) {
+  const base = `/api/campaigns/${c.slug}`;
+  const el = h("div.campaign-home");
+  Promise.all([
+    api("GET", `${base}/sessions`), api("GET", `${base}/entities?kind=quest`),
+    api("GET", `${base}/characters`), api("GET", `${base}/encounters`).catch(() => []),
+  ]).then(([sessions, quests, party, fights]) => {
+    const last = sessions.sessions[sessions.sessions.length - 1];
+    const open = quests.entities.filter((q) => !DONE.test(q.current.status || "")).slice(0, 6);
+    const ready = fights.slice(0, 3);
+    const link = (href, text) => h("a", { href }, text);
+    const parts = [
+      last && h("div.home-item.home-last", h("span.home-label", "Last time"),
+        h("div", link(`#/campaigns/${c.slug}/ingest`, `#${last.number} ${last.title || "(untitled)"}`),
+          last.summary && h("p.small", last.summary.split(/(?<=[.!?])\s/)[0]))),
+      open.length > 0 && h("div.home-item", h("span.home-label", "Open quests"),
+        h("div", open.map((q, i) => [i ? " · " : "", link(`#/campaigns/${c.slug}/entity/${q.id}`, q.name)]))),
+      party.length > 0 && h("div.home-item", h("span.home-label", "The party"),
+        h("div", party.map((p, i) => [i ? " · " : "", link(`#/characters/${p.id}`, p.name),
+          p.hp ? h("span.muted.small", ` ${p.hp.current}/${p.hp.max} HP`) : ""]))),
+      ready.length > 0 && h("div.home-item", h("span.home-label", "Fights ready"),
+        h("div", ready.map((f, i) => [i ? " · " : "", link(`#/campaigns/${c.slug}/encounters/${f.id}`, f.title),
+          f.state?.started ? h("span.muted.small", ` round ${f.state.round}`) : ""]))),
+    ].filter(Boolean);
+    if (parts.length) el.replaceChildren(h("h3", "Where things stand"), ...parts);
+  }, () => {});
+  return el;
 }
 
 // The question as a title until the server writes a proper one (the same cut it makes).
@@ -374,42 +462,54 @@ function scanForm(c, jobs) {
 
 // -- sessions & ingest ---------------------------------------------------------
 
+// The campaign's timeline: each session, newest first, opening to its recap and what happened in it
+// (the journal), and the sessions' notes waiting for the DM's review.
 async function sessionsTab(c) {
   const base = `/api/campaigns/${c.slug}`;
-  const data = await api("GET", `${base}/sessions`);
+  const [data, events] = await Promise.all([api("GET", `${base}/sessions`), api("GET", `${base}/journal`)]);
   const list = h("div.session-list");
-  const logPanel = h("div.job", { hidden: true });
+  let journal = events;
 
+  const happened = (n) => {
+    const items = journal.filter((e) => e.session === n);
+    return items.length > 0 && h("div.session-events", h("h3", "What happened"), h("ol", items.map((e) => h("li", e.text,
+      e.entities.length > 0 && h("span.event-entities", " — ",
+        e.entities.map((x, i) => [i ? ", " : "", h("a", { href: `#/campaigns/${c.slug}/entity/${x.id}` }, x.name)]))))));
+  };
   const renderSessions = (sessions) => list.replaceChildren(
-    sessions.length === 0 ? h("p.empty", "No sessions yet.") : "",
+    sessions.length === 0 && !journal.length ? h("p.empty", "No sessions yet.") : "",
     ...[...sessions].reverse().map((s) => h("details.card.session",
       h("summary",
-        s.kind === "recap" ? h("span.badge", "Recap") : h("span.session-num", `#${s.number}`),
+        h("span.session-num", `#${s.number}`),
         h("strong", s.title || "(untitled)"),
-        s.kind === "recap" && s.covers && h("span.muted", `about ${s.covers} sessions`),
+        s.kind === "recap" && h("span.muted", s.covers ? `a recap of about ${s.covers} sessions` : "a recap"),
         s.played_on && h("span.muted", s.played_on)),
-      h("div.prose", s.summary ? s.summary.split(/\n\s*\n/).map((p) => h("p", p)) : h("p.muted", "No summary.")),
+      h("div.prose", s.summary ? s.summary.split(/\n\s*\n/).map((p) => h("p", p)) : h("p.muted", "No recap.")),
+      happened(s.number),
       h("div.actions",
-        h("a", { href: `#/campaigns/${c.slug}/journal` }, "Journal"),
         canEdit(c) && h("button.danger", {
           onclick: async () => {
             if (!confirm(`Undo everything the ingest of session ${s.number} recorded?`)) return;
             const r = await api("POST", `${base}/sessions/${s.number}/revert`);
             toast(`Reverted session ${s.number}: ${r.facts} facts and ${r.events} journal entries removed, ${r.reopened} earlier facts reopened`);
-            renderSessions((await api("GET", `${base}/sessions`)).sessions);
+            refresh();
           },
         }, "Revert"),
       ),
     )),
   );
-  renderSessions(data.sessions);
+  // What the book set up before play, if anything was logged for it.
+  const beforePlay = () => happened(0) && h("details.card.session", h("summary", h("span.session-num", "#0"), h("strong", "Before play")), happened(0));
+  const renderAll = (sessions) => { renderSessions(sessions); const b = beforePlay(); if (b) list.append(b); };
+  renderAll(data.sessions);
 
   // Session notes the assistant has read, waiting for the DM: what it would record, to accept, reword
   // or leave out. Nothing in the campaign changes until Apply.
   const reviews = h("div.reviews");
   const refresh = async () => {
-    const fresh = await api("GET", `${base}/sessions`);
-    renderSessions(fresh.sessions);
+    const [fresh, ev] = await Promise.all([api("GET", `${base}/sessions`), api("GET", `${base}/journal`)]);
+    journal = ev;
+    renderAll(fresh.sessions);
     renderReviews(fresh.reviews);
     number.value = fresh.next;
   };
@@ -1175,28 +1275,3 @@ function factSections(c, e, t, isNow) {
   ];
 }
 
-// -- journal ---------------------------------------------------------------------------
-
-async function journalTab(c) {
-  const base = `/api/campaigns/${c.slug}`;
-  const [events, { sessions }] = await Promise.all([api("GET", `${base}/journal`), api("GET", `${base}/sessions`)]);
-  if (!events.length) return h("p.empty", "The journal is empty.");
-  const bySession = Object.fromEntries(sessions.map((s) => [s.number, s]));
-  const heading = (n) => {
-    const s = bySession[n];
-    if (n === 0) return "Before play";
-    if (s?.kind === "recap") return [`Recap: ${s.title}`, s.covers && h("span.muted.as-written", ` · about ${s.covers} sessions`)];
-    return `Session ${n}${s?.title ? ` — ${s.title}` : ""}`;
-  };
-  const groups = new Map();
-  events.forEach((e) => {
-    if (!groups.has(e.session)) groups.set(e.session, []);
-    groups.get(e.session).push(e);
-  });
-  return h("div.journal", [...groups.entries()].reverse().map(([n, items]) => h("section",
-    h("h2.section-title", heading(n)),
-    h("ol", items.map((e) => h("li", e.text,
-      e.entities.length > 0 && h("span.event-entities", " — ",
-        e.entities.map((x, i) => [i ? ", " : "", h("a", { href: `#/campaigns/${c.slug}/entity/${x.id}` }, x.name)]))))),
-  )));
-}

@@ -97,7 +97,9 @@ uv run campaign web            # http://127.0.0.1:8765
   button when it can). Installed, it opens without the browser's bars; in
   a browser tab, the sheet's full-screen button hides them. Either way the
   site's top bar gives way to a ‹ back to the list.
-- **Campaigns**: create DM or player campaigns, then use the tabs:
+- **Campaigns**: create DM or player campaigns. A campaign's header has a
+  search box that finds any person, monster, place or thing by name as you
+  type (**/** or **Ctrl-K** from anywhere). Then the tabs:
   - **Ask**: chat with the campaign assistant. Answers stream in as
     they're written, with the lookups it makes folded into one line
     above them. Answers are Markdown, rendered as it arrives (headings,
@@ -106,7 +108,9 @@ uv run campaign web            # http://127.0.0.1:8765
     or stat block ("3d8+5", "+8 to hit") are buttons that roll. What each
     answer cost is folded away under it (ⓘ): tokens, lookups, seconds and
     dollars, with the breakdown into cached and uncached input on hover.
-    The tab opens ready for a new question. Conversations are kept (per
+    The tab opens ready for a new question, under where things stand:
+    the last session, the quests still open, the party with their HP, and
+    the fights ready to run. Conversations are kept (per
     person): the latest few are listed under the suggestions, the rest
     behind "All N conversations" (an encounter made in one is kept if
     it's deleted), and each has its own link, so a reload or going back
@@ -140,7 +144,10 @@ uv run campaign web            # http://127.0.0.1:8765
     The fight is saved on the server as it goes, so a reload or another
     device carries on, until **End the fight**. Encounters are private to
     whoever they were made for, like conversations.
-  - **Sessions**: what's been played, then **Add session notes**: paste
+  - **Sessions**: the campaign's timeline, newest first: each session
+    (recaps of past play numbered among them) opens to its recap and what
+    happened in it (the journal, linked to the people, places and things
+    involved). Then **Add session notes**: paste
     notes or a transcript, or upload a text file or a recording, to run an
     ingest. A live log shows what the assistant is reading. **Nothing in the
     campaign changes until the DM says so:** the ingest comes back as the
@@ -164,7 +171,6 @@ uv run campaign web            # http://127.0.0.1:8765
     - its events;
     - a synthesized summary;
     - forms to add or end facts by hand, and to merge duplicates.
-  - **Journal**: events by session, linked to the entities involved.
 
 Locally there's no sign-in, the server listens only on this machine, and
 you own everything. To put it on the internet, turn on Google sign-in
