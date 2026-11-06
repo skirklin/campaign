@@ -742,12 +742,12 @@ class World:
         key = self.summary_key(entity_id)
         if cached := self.cached_summary(entity_id):
             return cached
-        import anthropic
+        from . import budget  # the API client, only when a summary is written
 
         v = self.view(entity_id)
         prompt = json.dumps({k: v[k] for k in ("name", "kind", "aliases", "current", "facts", "past", "possible", "events")},
                             ensure_ascii=False, indent=1)
-        client = client or anthropic.Anthropic()
+        client = client or budget.client()
         with client.beta.messages.stream(
             model=SUMMARY_MODEL,
             max_tokens=4000,

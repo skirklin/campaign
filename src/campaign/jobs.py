@@ -26,6 +26,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
+from . import budget
 from .db import Campaign, Store
 from .loops import LeasedLoop
 
@@ -176,6 +177,8 @@ def run_scan(run: Run) -> dict[str, Any]:
         except sheetscan.ScanError as err:
             raise Permanent(str(err)) from err
         except anthropic.BadRequestError as err:  # the same request would be refused again
+            if budget.is_budget_error(err):
+                raise  # out of budget, which passes: the job waits for it
             raise Permanent(f"Claude's API refused the request: {err.message}") from err
         run.save_input(sheet=sheet.model_dump(), unreadable=unreadable)
     sheet = CharacterFile.model_validate(run.input["sheet"])
@@ -282,6 +285,12 @@ class JobLoop(LeasedLoop):
                     s.update_job(job_id, state="wanted", attempts=job["attempts"])  # not this attempt's fault
                 return
             except BaseException as err:  # SystemExit from a missing audio extra too
+                if budget.is_budget_error(err):  # out of API budget: not this job's fault; again once there's some
+                    log.emit("error", budget.MESSAGE)
+                    log.flush()
+                    s.update_job(job_id, state="wanted", attempts=job["attempts"], error=budget.MESSAGE,
+                                 retry_at=int(time.time()) + budget.RECHECK_SECONDS)
+                    return
                 message = str(err) or type(err).__name__
                 log.emit("error", message if isinstance(err, Permanent) else traceback.format_exc(limit=3))
                 log.flush()

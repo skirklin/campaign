@@ -109,12 +109,12 @@ def test_chat_streams_and_is_kept(app, monkeypatch):
     ]
     seen = []
 
-    def make():
+    def make(**_):
         c = clients.pop(0)
         seen.append(c)
         return c
 
-    monkeypatch.setattr(agent_mod.anthropic, "Anthropic", make)
+    monkeypatch.setattr(agent_mod.budget.anthropic, "Anthropic", make)
     chat = client.post("/api/campaigns/strahd/chats").json()
     with client.stream("POST", f"/api/campaigns/strahd/chats/{chat['id']}/messages", json={"text": "What happened?"}) as r:
         got = events(r)
@@ -146,8 +146,8 @@ def test_chat_streams_and_is_kept(app, monkeypatch):
 
 def test_a_conversation_gets_a_short_title_and_can_be_renamed(app, monkeypatch):
     client, _ = app
-    monkeypatch.setattr(agent_mod.anthropic, "Anthropic",
-                        lambda: FakeClient([([BetaTextBlock(type="text", text="Nothing yet.")], "end_turn")]))
+    monkeypatch.setattr(agent_mod.budget.anthropic, "Anthropic",
+                        lambda **_: FakeClient([([BetaTextBlock(type="text", text="Nothing yet.")], "end_turn")]))
     monkeypatch.setattr(agent_mod, "conversation_title", lambda q, a: "Recent events")
     chat = client.post("/api/campaigns/strahd/chats").json()
     with client.stream("POST", f"/api/campaigns/strahd/chats/{chat['id']}/messages",

@@ -287,3 +287,20 @@ export function installBanner() {
   update();
   return el;
 }
+
+// Whether Claude is paused because the app's API spending limit ran out: a banner over every page
+// saying so, until it's back. Checked on load, every few minutes, and when something fails.
+export async function checkClaude() {
+  const el = document.getElementById("claude-status");
+  if (!el) return;
+  try {
+    const { paused } = await api("GET", "/api/claude");
+    el.hidden = !paused;
+    if (paused) {
+      const body = paused.message.replace(/^Claude is paused: /, "");
+      el.replaceChildren(h("strong", "Claude is paused."), " ",
+        h("span", body.charAt(0).toUpperCase() + body.slice(1)),
+        h("span.muted.small", ` Since ${new Date(paused.since * 1000).toLocaleString()}.`));
+    }
+  } catch { /* the banner is a nicety; a failed check leaves it as it was */ }
+}

@@ -22,6 +22,16 @@ uv sync                      # add `--extra audio` for local speech-to-text
 export ANTHROPIC_API_KEY=... # or `ant auth login`
 ```
 
+Everyone's use goes on that one key, so give it a monthly spending limit in
+the Anthropic Console. When the limit is reached, the app says so in plain
+words instead of showing an API error: a banner over every page ("Claude is
+paused", since when, and that raising the limit or waiting for it to reset
+brings it back), the same message in the chat and on jobs. Nothing fails
+for good: a session ingest or sheet scan waits and tries again in half an
+hour, without spending one of its attempts, and the digest stops asking and
+looks again every half hour. The first call that goes through clears it
+(`budget.py`).
+
 ### Where your data lives
 
 Everything is stored in one data directory **outside the code checkout**, so

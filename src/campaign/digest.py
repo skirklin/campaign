@@ -52,6 +52,7 @@ from typing import Any, Callable, Iterator, Literal
 import anthropic
 from pydantic import BaseModel
 
+from . import budget
 from .db import Store
 from .loops import LeasedLoop
 
@@ -82,7 +83,7 @@ _MATERIALIZING = threading.Lock()
 
 
 def _client() -> anthropic.Anthropic:
-    return anthropic.Anthropic(max_retries=RATE_LIMIT_RETRIES)
+    return budget.client(max_retries=RATE_LIMIT_RETRIES)
 
 MAX_LEAF_CHARS = 40_000  # ~10k tokens; longer sections are split into parts
 MIN_LEAF_CHARS = 6_000  # shorter sibling sections are packed into one call
@@ -1086,6 +1087,8 @@ def run(
             return False
 
         client = client or _client()
+        asked = keep_going
+        keep_going = lambda: asked() and not budget.should_wait()  # noqa: E731  out of budget: stop asking
 
         def work(n: DNode) -> tuple[dict[str, Any], int, int]:
             with _IN_FLIGHT:  # shared by every source, so together they stay under the limit
@@ -1131,6 +1134,9 @@ def run(
                         n.error = "stopped"  # not scheduled again this run; still to do next time
                         continue
                     except Exception as err:  # keep going; the rest of the tree is still useful
+                        if budget.is_budget_error(err):  # not this section's fault: still to do once there's budget
+                            n.error = "stopped"
+                            continue
                         n.error = str(err) or type(err).__name__
                         f = store.record_digest_failure(n.key, n.error, int(time.time()), MAX_ATTEMPTS, RETRY_SECONDS)
                         if f["retry_at"] is None:
@@ -1247,6 +1253,8 @@ class Reconciler(LeasedLoop):
 
     def reconcile_once(self) -> bool:
         """One pass over every source with a target. True if it digested anything."""
+        if budget.should_wait():  # out of budget: look again in a while, not every pass
+            return False
         s = Store(self.db)
         try:
             pending = [t for t in s.digest_targets() if _unfinished(s, t["id"], t["model"])]

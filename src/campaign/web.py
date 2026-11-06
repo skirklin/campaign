@@ -32,7 +32,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 
-from . import digest, dndbeyond, encounters, sheetscan
+from . import budget, digest, dndbeyond, encounters, sheetscan
 from .accounts import Accounts, at_least
 from .auth import AuthConfig
 from .auth import install as install_auth
@@ -301,6 +301,13 @@ def create_app(
             return {"local": True}
         user = user_of(request)
         return {"id": user["id"], "email": user["email"], "is_admin": bool(user["is_admin"])}
+
+    @app.get("/api/claude")
+    def claude_status(request: Request) -> dict[str, Any]:
+        """Whether Claude is paused because the API's spending limit ran out (see budget.py), for the banner."""
+        if not local:
+            signed_in(request)
+        return {"paused": budget.status()}
 
     @app.get("/api/me/apps")
     def connected_apps(request: Request, s: Store = Depends(store)) -> list[dict[str, Any]]:
@@ -704,7 +711,7 @@ def create_app(
         try:
             return {"summary": w.synthesize(entity_id)}
         except Exception as err:
-            raise HTTPException(502, f"couldn't write a summary: {err}")
+            raise HTTPException(502, budget.MESSAGE if budget.is_budget_error(err) else f"couldn't write a summary: {err}")
 
     # -- encounters --------------------------------------------------------------------
     # Fights the assistant put together, saved apart from the conversation they were made
@@ -994,7 +1001,7 @@ def create_app(
                 )
                 put(sse("done", {"usage": answer.usage}))
             except Exception as err:
-                put(sse("error", str(err) or type(err).__name__))
+                put(sse("error", budget.explain(err)))
             finally:
                 ts.close()
                 put(None)

@@ -1,7 +1,7 @@
 // Campaign list, and per-campaign tabs for ingesting sessions and reference
 // material and browsing what the assistant has recorded.
 
-import { api, h, toast, enc, whoami, canEdit, live, streamPost, sessionNames } from "./util.js";
+import { api, h, toast, enc, whoami, canEdit, live, streamPost, sessionNames, checkClaude } from "./util.js";
 import { membersTab } from "./people.js";
 import { characterCard, newCharacterForm } from "./sheet.js";
 import { InventoryView } from "./inventory.js";
@@ -223,6 +223,7 @@ async function askTab(c, _me, convId) {
             answer = null;  // text after a tool call starts a new paragraph
           } else if (type === "error") {
             thread.insertBefore(h("div.chat-error", data), typing);
+            checkClaude();
           } else if (type === "done" && data.usage) {
             usage = data.usage;
           }

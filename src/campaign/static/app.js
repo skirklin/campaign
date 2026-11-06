@@ -2,7 +2,7 @@ import { characterList, sheetView } from "./sheet.js";
 import { campaignList, campaignView, entityView, sourceView } from "./campaigns.js";
 import { encounterView } from "./encounter.js";
 import { accountView, adminView } from "./admin.js";
-import { whoami } from "./util.js";
+import { whoami, checkClaude } from "./util.js";
 
 const routes = [
   [/^#\/characters\/(\d+)$/, (m) => sheetView(m[1]), "characters"],
@@ -47,3 +47,7 @@ whoami().then((me) => {
   document.getElementById("account").hidden = false;
   document.getElementById("admin-link").hidden = !me.is_admin;
 }).catch(() => {});
+
+// Out of API budget? Say so on every page, and notice when it's back.
+checkClaude();
+setInterval(checkClaude, 5 * 60 * 1000);
