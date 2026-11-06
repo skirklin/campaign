@@ -64,7 +64,7 @@ def interrupt(loop, at, action):
 def scripted(monkeypatch, *scripts):
     """Each new Agent gets the next script."""
     clients = [FakeClient(sc) for sc in scripts]
-    monkeypatch.setattr(agent_mod.anthropic, "Anthropic", lambda: clients.pop(0))
+    monkeypatch.setattr(agent_mod.budget.anthropic, "Anthropic", lambda **_: clients.pop(0))
 
 
 def facts(s, camp):
@@ -102,7 +102,7 @@ def test_failures_back_off_then_wait_for_a_retry(env, monkeypatch):
     loop = JobLoop(db)
     clock = [time.time()]
     monkeypatch.setattr(jobs.time, "time", lambda: clock[0])
-    monkeypatch.setattr(agent_mod.anthropic, "Anthropic", lambda: (_ for _ in ()).throw(RuntimeError("API down")))
+    monkeypatch.setattr(agent_mod.budget.anthropic, "Anthropic", lambda **_: (_ for _ in ()).throw(RuntimeError("API down")))
     for attempt in range(1, jobs.MAX_ATTEMPTS + 1):
         assert loop.pass_once()
         assert loop.pass_once() is False  # backing off: nothing due yet
@@ -188,7 +188,7 @@ def scan_client(monkeypatch, *script, events=("Looking at the sheet. ", "Wizard 
         return Stream(*script[min(len(calls), len(script)) - 1])
 
     client = NS(beta=NS(messages=NS(stream=stream)))
-    monkeypatch.setattr(agent_mod.anthropic, "Anthropic", lambda: client)
+    monkeypatch.setattr(agent_mod.budget.anthropic, "Anthropic", lambda **_: client)
     return calls
 
 
@@ -288,13 +288,32 @@ def test_a_request_the_api_refuses_fails_at_once(scan_job, monkeypatch):
     response = httpx.Response(400, request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"))
 
     def stream(**kw):
-        raise agent_mod.anthropic.BadRequestError("The compiled grammar is too large", response=response, body=None)
+        raise agent_mod.budget.anthropic.BadRequestError("The compiled grammar is too large", response=response, body=None)
 
-    monkeypatch.setattr(agent_mod.anthropic, "Anthropic", lambda: NS(beta=NS(messages=NS(stream=stream))))
+    monkeypatch.setattr(agent_mod.budget.anthropic, "Anthropic", lambda **_: NS(beta=NS(messages=NS(stream=stream))))
     assert JobLoop(db).pass_once()
     job = s.job(job_id)
     assert job["state"] == "failed" and job["attempts"] == 1 and job["retry_at"] is None
     assert "compiled grammar is too large" in job["error"]
+
+
+@pytest.mark.parametrize("kind", ["scan", "ingest"])
+def test_out_of_api_budget_a_job_waits_and_says_so(kind, request, monkeypatch):
+    s, camp, db, job_id = request.getfixturevalue("scan_job" if kind == "scan" else "env")[:4]
+    response = httpx.Response(400, request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"))
+    body = {"type": "error", "error": {"type": "invalid_request_error",
+                                       "message": "You have reached your specified API usage limits."}}
+
+    def refuse(**kw):
+        raise agent_mod.budget.anthropic.BadRequestError("usage limits", response=response, body=body)
+
+    monkeypatch.setattr(agent_mod.budget.anthropic, "Anthropic",
+                        lambda **_: NS(beta=NS(messages=NS(stream=refuse, create=refuse))))
+    assert JobLoop(db).pass_once()
+    job = s.job(job_id)
+    # Not this job's fault: no attempt spent, back on the list for later, saying why in plain words.
+    assert job["state"] == "wanted" and job["attempts"] == 0 and job["error"] == agent_mod.budget.MESSAGE
+    assert job["retry_at"] >= time.time() + agent_mod.budget.RECHECK_SECONDS - 5
 
 
 def test_scan_failures_that_retrying_cannot_fix_fail_at_once(scan_job, monkeypatch):

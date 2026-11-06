@@ -170,7 +170,7 @@ def test_ask_assistant_runs_the_apps_chat_and_keeps_it(site, api, monkeypatch):
         ]),
         FakeClient([([BetaTextBlock(type="text", text="She bakes pies.")], "end_turn")]),
     ]
-    monkeypatch.setattr(agent_mod.anthropic, "Anthropic", lambda: clients.pop(0))
+    monkeypatch.setattr(agent_mod.budget.anthropic, "Anthropic", lambda **_: clients.pop(0))
     token = connect(site, api, dm, register(api))["access_token"]
 
     got = json.loads(call(api, token, "ask_assistant", campaign="strahd", question="Who is Morgantha?")[0])

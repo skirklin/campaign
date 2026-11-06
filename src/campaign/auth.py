@@ -54,8 +54,9 @@ OPEN_PATHS = ("/auth/", "/invite/", "/healthz", "/static/manifest.webmanifest", 
 # The remote MCP endpoint and its OAuth endpoints check bearer tokens (or a
 # client's own credentials) themselves, and are called by apps from other
 # origins, so they skip both the session check and the same-origin check.
-# The consent page in between is an ordinary signed-in page.
-BEARER_PATHS = {"/mcp", "/mcp/", "/authorize", "/token", "/register", "/revoke"}
+# The consent page in between is an ordinary signed-in page. /backups/latest
+# checks the backup token itself, for a job that copies the newest snapshot away.
+BEARER_PATHS = {"/mcp", "/mcp/", "/authorize", "/token", "/register", "/revoke", "/backups/latest"}
 
 
 @dataclass(frozen=True)

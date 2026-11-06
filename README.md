@@ -22,6 +22,16 @@ uv sync                      # add `--extra audio` for local speech-to-text
 export ANTHROPIC_API_KEY=... # or `ant auth login`
 ```
 
+Everyone's use goes on that one key, so give it a monthly spending limit in
+the Anthropic Console. When the limit is reached, the app says so in plain
+words instead of showing an API error: a banner over every page ("Claude is
+paused", since when, and that raising the limit or waiting for it to reset
+brings it back), the same message in the chat and on jobs. Nothing fails
+for good: a session ingest or sheet scan waits and tries again in half an
+hour, without spending one of its attempts, and the digest stops asking and
+looks again every half hour. The first call that goes through clears it
+(`budget.py`).
+
 ### Where your data lives
 
 Everything is stored in one data directory **outside the code checkout**, so
@@ -31,7 +41,8 @@ pulling, switching branches, reinstalling or re-cloning never touches it:
 ~/.local/share/campaign/        (or $CAMPAIGN_HOME)
   campaign.db                   campaigns, sources, digests, state, characters
   blobs/ab/ab12…                every uploaded original, named by its SHA-256
-  backups/                      a database snapshot before every schema upgrade
+  backups/                      a database snapshot before every schema upgrade,
+                                and one every night (the last seven, gzipped)
 ```
 
 - **Originals are kept.** Each upload is stored once by content hash and can
@@ -44,6 +55,11 @@ pulling, switching branches, reinstalling or re-cloning never touches it:
   when the deployed data is worth keeping, a one-off step for the version
   before goes in `UPGRADES` (it runs after a snapshot to `backups/`) and is
   deleted once it has run. A database at any other version is refused.
+- **Nightly snapshots.** While the server runs it takes a consistent,
+  gzipped copy of the database once a day and keeps the last seven
+  (`backups.py`). The Admin page downloads the newest, and with
+  `CAMPAIGN_BACKUP_TOKEN` set a job can fetch it from `/backups/latest` to
+  keep a copy off the server (docs/deploy.md).
 - `campaign info` and the Campaigns page show where the data is.
 
 ## Web UI

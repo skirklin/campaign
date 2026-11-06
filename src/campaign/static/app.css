@@ -1304,3 +1304,12 @@ ul.about-facts li { margin: .15rem 0; }
   .fight-track .tracker-bar { top: 0; }
   .fight-track .bulk-bar { top: 3.6rem; }
 }
+
+/* Claude paused: the app's API spending limit ran out (budget.py). Over every page until it's back. */
+.claude-status {
+  max-width: 64rem; margin: .8rem auto 0; padding: .7rem .9rem; border-radius: var(--radius);
+  border: 1px solid var(--danger, #b3261e); background: color-mix(in srgb, var(--danger, #b3261e) 9%, var(--surface));
+  display: flex; flex-wrap: wrap; gap: .2rem .5rem; align-items: baseline;
+}
+.claude-status[hidden] { display: none; }
+@media (max-width: 64rem) { .claude-status { margin: .6rem 1rem 0; } }

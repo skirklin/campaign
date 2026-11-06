@@ -9,9 +9,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-import anthropic
 from anthropic import beta_tool
 
+from . import budget
 from .db import Campaign, Store
 from .digest import fallback_params
 from .tools import WRITE_TOOLS, ToolContext, build_tools
@@ -200,7 +200,7 @@ class Agent:
     usage: dict[str, Any] = field(default_factory=dict)  # what the last send() cost; see _new_usage
 
     def __post_init__(self) -> None:
-        self.client = anthropic.Anthropic()
+        self.client = budget.client()
         fns = build_tools(self.ctx, writable=self.writable) + self.extra_tools
         self.tools = {f.__name__: beta_tool(f, eager_input_streaming=True) for f in fns}
 
@@ -434,7 +434,7 @@ def short_title(text: str, limit: int = 60) -> str:
 def conversation_title(question: str, answer: str) -> str | None:
     """A short title for a conversation from its first exchange, or None if one can't be had."""
     try:
-        msg = anthropic.Anthropic().messages.create(
+        msg = budget.client().messages.create(
             model=TITLE_MODEL, max_tokens=2000, system=TITLE_SYSTEM,
             output_config={"effort": "low"},
             messages=[{"role": "user", "content": f"Question: {question[:2000]}\n\nAnswer: {answer[:2000]}"}],

@@ -129,7 +129,7 @@ def test_ingest_job_runs_in_background(client, monkeypatch):
         ([tool_use("t3", "finish_session", title="Blood on the Vine", summary="They met Ismark.")], "tool_use"),
         ([text("All recorded.")], "end_turn"),
     ])
-    monkeypatch.setattr(agent_mod.anthropic, "Anthropic", lambda: fake)
+    monkeypatch.setattr(agent_mod.budget.anthropic, "Anthropic", lambda **_: fake)
     client.post("/api/campaigns", json={"name": "Strahd", "role": "dm"})
     assert client.post("/api/campaigns/strahd/ingest", data={"text": ""}).status_code == 422
 
@@ -181,7 +181,7 @@ def test_a_dm_can_leave_out_what_the_notes_got_wrong_or_all_of_it(client, monkey
             ([text("All recorded.")], "end_turn"),
         ])
     clients = [script(), script()]
-    monkeypatch.setattr(agent_mod.anthropic, "Anthropic", lambda: clients.pop(0))
+    monkeypatch.setattr(agent_mod.budget.anthropic, "Anthropic", lambda **_: clients.pop(0))
     client.post("/api/campaigns", json={"name": "Strahd", "role": "dm"})
     first = wait_for(client, client.post("/api/campaigns/strahd/ingest", data={"text": "notes"}).json()["job"])
     # Only Ismark: Ireena never died.

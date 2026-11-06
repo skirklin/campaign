@@ -59,7 +59,7 @@ def store():
 
 def install(monkeypatch, script):
     client = FakeClient(script)
-    monkeypatch.setattr(agent_mod.anthropic, "Anthropic", lambda: client)
+    monkeypatch.setattr(agent_mod.budget.anthropic, "Anthropic", lambda **_: client)
     return client
 
 
@@ -150,6 +150,6 @@ def test_titles_are_short_and_fall_back_to_the_question(monkeypatch):
 
     monkeypatch.undo()  # the real conversation_title, not conftest's stub
     for reply, want in (('"Running the Boar Fight."', "Running the Boar Fight"), ("", None), ("x" * 200, None)):
-        monkeypatch.setattr(agent_mod.anthropic, "Anthropic", lambda r=reply: Titler(r))
+        monkeypatch.setattr(agent_mod.budget.anthropic, "Anthropic", lambda r=reply, **_: Titler(r))
         assert agent_mod.conversation_title("q", "a") == want
     assert calls[0]["model"] == agent_mod.TITLE_MODEL and calls[0]["max_tokens"] >= 1000

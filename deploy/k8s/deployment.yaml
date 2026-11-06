@@ -52,6 +52,10 @@ spec:
               valueFrom: {secretKeyRef: {name: campaign-secrets, key: GOOGLE_CLIENT_SECRET}}
             - name: CAMPAIGN_SESSION_SECRET
               valueFrom: {secretKeyRef: {name: campaign-secrets, key: CAMPAIGN_SESSION_SECRET}}
+            # Lets a job off this volume fetch the newest nightly snapshot (/backups/latest);
+            # without it, only an admin can, from the Admin page.
+            - name: CAMPAIGN_BACKUP_TOKEN
+              valueFrom: {secretKeyRef: {name: campaign-secrets, key: CAMPAIGN_BACKUP_TOKEN, optional: true}}
           volumeMounts:
             - {name: data, mountPath: /data}
             - {name: tmp, mountPath: /tmp}
