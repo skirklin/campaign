@@ -39,6 +39,8 @@ export async function adminView() {
   };
   await render();
   const invites = pendingInvites("/api/admin/invites", "/api/admin/invites");
+  const snapshots = await api("GET", "/api/admin/backups").catch(() => []);
+  const mb = (n) => `${(n / 1e6).toFixed(1)} MB`;
   return h("section.page",
     h("h1", "Admin"),
     h("h2.section-title", "Users"),
@@ -46,6 +48,13 @@ export async function adminView() {
     h("p.muted.small", "People usually join through a campaign's Members tab. An app invite lets someone in without a campaign, so they can start their own."),
     inviteForm("/api/admin/invites", { onCreated: () => invites.refresh() }),
     invites.el,
+    h("h2.section-title", "Backups"),
+    h("p.muted.small", "A snapshot of the database is taken every night, and the last seven are kept on the server's disk. "
+      + "Download the newest now and then to keep a copy somewhere else too."),
+    snapshots.length === 0 ? h("p.empty", "No nightly snapshot yet: the first is taken within an hour of the server starting.")
+      : h("div",
+        h("a.button", { href: "/api/admin/backups/latest", download: "" }, "Download the newest"),
+        h("ul.small", snapshots.map((b) => h("li", `${new Date(b.taken * 1000).toLocaleString()} · ${mb(b.bytes)}`)))),
   );
 }
 

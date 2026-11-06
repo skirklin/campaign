@@ -18,7 +18,9 @@ A campaign you don't belong to answers 404, as if it didn't exist.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -32,7 +34,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 
-from . import budget, digest, dndbeyond, encounters, sheetscan
+from . import backups, budget, digest, dndbeyond, encounters, sheetscan
 from .accounts import Accounts, at_least
 from .auth import AuthConfig
 from .auth import install as install_auth
@@ -218,11 +220,13 @@ def create_app(
     # whatever the sources' targets say (see digest.Reconciler).
     reconciler = digest.Reconciler(db, **({"client_factory": digest_client} if digest_client else {}))
     job_loop = JobLoop(db)  # likewise session ingests and sheet scans (jobs.py)
+    backup_loop = backups.BackupLoop(db)  # a nightly snapshot of the database (backups.py)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         reconciler.start()
         job_loop.start()
+        backup_loop.start()
         try:
             if mcp is None:
                 yield
@@ -233,6 +237,7 @@ def create_app(
             shutting_down.set()
             reconciler.stop()
             job_loop.stop()
+            backup_loop.stop()
 
     # No interactive API docs: they'd be one more surface to protect.
     app = FastAPI(title="campaign", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
@@ -318,6 +323,32 @@ def create_app(
     def disconnect_app(client_id: str, request: Request, s: Store = Depends(store)) -> None:
         if not s.revoke_oauth_client(signed_in(request)["id"], client_id):
             raise HTTPException(404, "no such connected app")
+
+    # -- backups (backups.py) ------------------------------------------------------
+
+    def newest_snapshot() -> FileResponse:
+        path = backups.latest(db)
+        if path is None:
+            raise HTTPException(404, "no nightly snapshot yet")
+        return FileResponse(path, filename=f"campaign-{path.name.removeprefix('nightly-')}", media_type="application/gzip")
+
+    @app.get("/api/admin/backups")
+    def list_backups(_: Any = Depends(admin)) -> list[dict[str, Any]]:
+        return [{"name": p.name, "bytes": p.stat().st_size, "taken": int(p.stat().st_mtime)}
+                for p in reversed(backups.nightlies(db))]
+
+    @app.get("/api/admin/backups/latest")
+    def download_backup(_: Any = Depends(admin)) -> FileResponse:
+        return newest_snapshot()
+
+    @app.get("/backups/latest", include_in_schema=False)
+    def fetch_backup(request: Request) -> FileResponse:
+        """The newest snapshot, for a job that keeps a copy off this volume: Bearer CAMPAIGN_BACKUP_TOKEN."""
+        token = os.environ.get("CAMPAIGN_BACKUP_TOKEN", "")
+        given = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+        if not token or not hmac.compare_digest(given.encode(), token.encode()):
+            raise HTTPException(404, "not found")
+        return newest_snapshot()
 
     @app.get("/api/info")
     def info(s: Store = Depends(store), _: Any = Depends(admin)) -> dict[str, Any]:

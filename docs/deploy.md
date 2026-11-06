@@ -208,8 +208,29 @@ kubectl -n campaign set image deployment/campaign campaign=ghcr.io/skirklin/camp
 ## Data
 
 - **Where it lives:** everything is on the `campaign-data` volume: the
-  database, original uploads, and the snapshots taken before schema
-  changes. Back up that volume the way the cluster backs up others.
+  database, original uploads, and its snapshots in `backups/`.
+- **Nightly snapshots:** once a day the server takes a consistent copy of
+  the database while it runs, gzipped, as `backups/nightly-<date>.db.gz`,
+  and keeps the last seven (`backups.py`). They undo a mistake or a broken
+  upgrade, but they're on the same volume, so they don't survive losing it.
+  Keep a copy elsewhere:
+  - **By hand:** the Admin page lists them and downloads the newest.
+  - **Automatically:** put a random `CAMPAIGN_BACKUP_TOKEN` in the
+    `campaign-secrets` Secret (`openssl rand -hex 32`, see step 2) and
+    restart. A job anywhere can then fetch the newest snapshot, for
+    example the homelab's nightly off-site sync:
+
+    ```bash
+    curl -sf -H "Authorization: Bearer $CAMPAIGN_BACKUP_TOKEN" \
+      http://campaign.campaign.svc.cluster.local:8000/backups/latest -o campaign-$(date -u +%Y%m%d).db.gz
+    ```
+
+    Without the token set, that address answers 404.
+- **Restoring:** scale the deployment to 0, put the snapshot in place on the
+  volume (`gunzip -c nightly-<date>.db.gz > /data/campaign.db`, from a pod
+  that mounts it), and scale back to 1. The uploaded originals in `blobs/`
+  aren't in the snapshot; the database holds everything the app reads from
+  them.
 - **What redeploys keep:** everything. A schema change upgrades the database
   in place, after a snapshot, when it comes with a step for the deployed
   version (`UPGRADES` in `db.py`); see the README.
