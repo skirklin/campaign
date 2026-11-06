@@ -31,7 +31,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 
 from .accounts import Accounts, at_least
-from .agent import ASK_SYSTEM, _role_parts, overview
+from .agent import ASK_SYSTEM, CLEAN_RECORDS, _role_parts, overview
 from .auth import AuthConfig
 from .db import Campaign, Store
 from .oauth import SCOPE, Provider, user_id_of
@@ -69,7 +69,8 @@ knows.
 To enter a character from a paper sheet, a scan or a photo: read the whole
 document, then call create_character with every field it shows, and tell
 the user anything you couldn't read so they can fix it on the sheet.
-"""
+
+""" + CLEAN_RECORDS + "\n"
 
 CAMPAIGN_ARG = "campaign: The campaign's slug, from list_campaigns."
 # Writes anyone in the campaign may make, like making their own sheet in the web UI.

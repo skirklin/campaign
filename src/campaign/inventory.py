@@ -348,6 +348,8 @@ class Inventory:
         fields = {k: v for k, v in fields.items() if v is not None}
         if fields.get("qty") == 0:
             return self.remove(holding_id, reason)
+        if "notes" in fields:
+            fields["notes"] = str(fields["notes"] or "").strip()  # blank clears them
         if "name" in fields:
             fields["name"] = str(fields["name"]).strip()
             if not fields["name"]:

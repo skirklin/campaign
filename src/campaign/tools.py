@@ -816,6 +816,7 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
 
         Args:
             items: Each {"name", "qty" (default 1), "notes", "value_gp" (each), "world_item" (optional)}.
+                Names and notes say what the thing is, never where the name came from.
             reason: Where it came from, e.g. "looted the ghoul nest".
             holder: "party", or who has them: a character, or anyone else by name.
         """
@@ -839,7 +840,8 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
 
         Args:
             item_id: The item's id from inventory.
-            reason: What happened, e.g. "drank one".
+            reason: What happened, e.g. "drank one". Why a name or note changed goes here, not in the notes.
+            notes: What the item is or does; blank clears them.
         """
         return _attempt(lambda: inv.change(item_id, reason, name=name, qty=qty, notes=notes, value_gp=value_gp,
                                            equipped=equipped, attuned=attuned))
