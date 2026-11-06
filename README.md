@@ -116,7 +116,10 @@ uv run campaign web            # http://127.0.0.1:8765
     it's deleted), and each has its own link, so a reload or going back
     keeps your place. In a player campaign it only knows
     what the party knows. With editor
-    access it can also record what you tell it happened.
+    access it can also record what you tell it happened. What it writes
+    (names, notes, facts, journal entries) reads as the thing itself, with
+    the right spelling and name: why something changed goes in the
+    change's reason, in the log, never into the record.
   - **Encounters**: every fight the assistant has put together for you,
     saved apart from the conversation it came from, with its difficulty
     and how it stands. **Open at the table** opens the fight's page,

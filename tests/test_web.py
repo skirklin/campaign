@@ -324,6 +324,9 @@ def test_party_inventory(client):
     assert about["world"]["name"] == "Shield" and about["rules"][0]["text"].startswith("**AC +2**")
     assert all(f.get("attribute") != "mechanics" for f in about["world"]["facts"])
     assert client.get(f"{base}/items/999/about").status_code == 404
+    # Notes left blank are cleared, not kept as whitespace.
+    inv = client.patch(f"{base}/items/{potion['id']}", json={"notes": "  "}).json()
+    assert next(i for i in inv["holders"][1]["items"] if i["id"] == potion["id"])["notes"] == ""
 
     # Equipping and defining: the sheet follows the definition.
     shield = next(i for i in mine if i["name"] == "Shield")

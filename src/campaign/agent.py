@@ -19,6 +19,16 @@ from .world import World
 
 MODEL = os.environ.get("CAMPAIGN_MODEL", "claude-opus-5-5")
 
+# How anything written into the campaign reads: as the thing itself, never its history. Shared by
+# the assistant, the session ingest and the MCP server's instructions.
+CLEAN_RECORDS = """\
+Write the record as the truth, plainly: a name, note, fact or journal entry
+says what is, in the campaign's own words, with the right spelling, name and
+number. Never write in where it came from or how it got that way ("on the
+sheet as...", "the sheet says...", "previously...", "corrected from...",
+"misspelled as..."): that belongs in a change's `reason`, which goes to the
+log, and nowhere else. To fix something, replace it; don't annotate it."""
+
 ASK_SYSTEM = """\
 You are the campaign assistant for the D&D campaign "{name}". {role_line}
 
@@ -85,6 +95,8 @@ what-if is not an event: answer it, and if it might also have happened,
 offer to record it rather than recording it. If the user says something
 you recorded didn't happen or was wrong, take it back with retract_fact or
 delete_journal_entry.
+
+""" + CLEAN_RECORDS + """
 {spoiler_rules}
 Keep answers tight and table-ready: the user is often mid-session. Answer
 what was asked; skip background they didn't ask for.
@@ -160,6 +172,8 @@ Work in this order:
 
 Prefer fewer, accurate writes over guesses. If something is ambiguous, leave
 it out and mention it in your final message.
+
+""" + CLEAN_RECORDS + """
 {spoiler_rules}{catalog}"""
 
 
