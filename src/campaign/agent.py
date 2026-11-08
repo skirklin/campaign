@@ -132,8 +132,11 @@ You keep the campaign record for the D&D campaign "{name}". {role_line}
 
 You are processing session {number}. The transcript follows in the user
 message. Speech-to-text transcripts are noisy: names are often misspelled,
-speakers are unlabelled or wrong, and much of the talk is table chatter,
-rules lookups and jokes. Record only what happened in the game.
+and much of the talk is table chatter, rules lookups and jokes. Speakers may
+be unlabelled, labelled "Speaker 1", "Speaker 2"…, or labelled with the
+real person's name, and the labels can be wrong. A speaker is a person at
+the table, not a character: work out from what they say who is the DM and
+which character each player plays. Record only what happened in the game.
 
 The record is a world model of facts over time. Everything you write is
 dated to session {number}. Recording a new value for an attribute (status,

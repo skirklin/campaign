@@ -181,6 +181,15 @@ uv run campaign web            # http://127.0.0.1:8765
     journal line, each item) and a draft recap, to untick, reword and
     **Apply**, or **Discard**. Applied, session N is what was accepted,
     replacing an earlier recording of it. Each past session has its recap and a **Revert** button.
+    **From Pixel Recorder** (or any app that shares text): install Campaign on
+    the phone (Chrome ⋮ → Add to Home screen → Install), then in Recorder
+    touch and hold a recording → Share → Transcript (.txt) → Campaign. It
+    opens on the shared transcript: pick the campaign, check the session
+    number and date, trim it if you like, and add it like any session notes.
+    The app's manifest declares a share target (`/share`) and a service
+    worker (`static/sw.js`) holds what's shared on the phone until it's sent,
+    so a sign-in on the way loses nothing. Turn on Recorder's speaker labels
+    and name the speakers: the ingest reads them.
     An ingest is a [job](#background-jobs): it continues with the page
     closed and survives restarts and deploys.
   - **Reference**: the books and notes, then **Add a book or notes** to

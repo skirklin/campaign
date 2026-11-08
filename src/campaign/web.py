@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Iterator
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 
@@ -1555,6 +1555,17 @@ def create_app(
     @app.get("/", include_in_schema=False)
     def index() -> FileResponse:
         return FileResponse(STATIC / "index.html")
+
+    @app.get("/sw.js", include_in_schema=False)
+    def service_worker() -> FileResponse:
+        # From the root, so its scope is the whole app; never cached, so a deploy reaches phones.
+        return FileResponse(STATIC / "sw.js", media_type="text/javascript", headers={"Cache-Control": "no-cache"})
+
+    @app.post("/share", include_in_schema=False)
+    def share_fallback() -> RedirectResponse:
+        """Android's share sheet posts here. The service worker answers it on the device; this only
+        runs when it isn't installed yet, and the share page then says to share again."""
+        return RedirectResponse("/#/share", status_code=303)
 
     if mcp is not None:
         # Last, so it only gets what nothing above matched: /mcp and the OAuth endpoints.
