@@ -667,16 +667,17 @@ def create_app(
 
     @app.post("/api/campaigns/{slug}/ingests/{job_id}/discard", status_code=204)
     def discard_ingest(job_id: int, c: Campaign = Depends(editor), s: Store = Depends(store)) -> None:
-        """None of it: the campaign stays as it was (the notes stay among the sources)."""
+        """None of it: the campaign stays as it was, and the upload isn't kept."""
         job = ingest_to_review(s, c, job_id)
         s.update_job(job_id, result=job["result"] | {"review": "discarded"})
 
-    @app.post("/api/campaigns/{slug}/sessions/{number}/revert")
-    def revert(number: int, c: Campaign = Depends(editor), s: Store = Depends(store)) -> dict[str, int]:
+    @app.post("/api/campaigns/{slug}/uploads/{run_id}/revert")
+    def revert_upload(run_id: int, c: Campaign = Depends(editor), s: Store = Depends(store)) -> dict[str, Any]:
+        """Take back one upload about a session: what it recorded, and its text. The rest of the session stays."""
         try:
-            return World(s, c).revert_session(number)
+            return World(s, c).revert_upload(run_id)
         except KeyError:
-            raise HTTPException(404, f"no session {number}")
+            raise HTTPException(404, "no such upload")
 
     @app.get("/api/campaigns/{slug}/entities")
     def entities(
@@ -842,13 +843,16 @@ def create_app(
         c: Campaign = Depends(editor),
         s: Store = Depends(store),
     ) -> dict[str, Any]:
-        """Session N should be what this transcript (or recording) says."""
+        """Read an upload about a session (a transcript, notes, a recording) into the campaign: session
+        `number` if it's given and recorded already, which it adds to, else a new one."""
         if file is not None and file.filename:
             name, data = file.filename, file.file.read()
         elif text.strip():
-            name, data = "pasted.txt", text.encode("utf-8")
+            name, data = "notes", text.encode("utf-8")
         else:
-            raise HTTPException(422, "paste a transcript or upload a file")
+            raise HTTPException(422, "paste a transcript or notes, or upload a file")
+        if number is not None and number < 1:
+            raise HTTPException(422, "sessions are numbered from 1")
         session = number or s.next_ingest_session(c)
         job_id = add_job(request, s, c, "ingest", {
             "session": session, "blob": s.blobs.put(data), "name": name, "played_on": played_on or None,

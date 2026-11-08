@@ -488,18 +488,23 @@ async function sessionsTab(c) {
         s.played_on && h("span.muted", s.played_on)),
       h("div.prose", s.summary ? s.summary.split(/\n\s*\n/).map((p) => h("p", p)) : h("p.muted", "No recap.")),
       happened(s.number),
-      h("div.actions",
-        canEdit(c) && h("button.danger", {
-          onclick: async () => {
-            if (!confirm(`Undo everything the ingest of session ${s.number} recorded?`)) return;
-            const r = await api("POST", `${base}/sessions/${s.number}/revert`);
-            toast(`Reverted session ${s.number}: ${r.facts} facts and ${r.events} journal entries removed, ${r.reopened} earlier facts reopened`);
-            refresh();
-          },
-        }, "Revert"),
-      ),
+      uploads(s),
     )),
   );
+  // What a session was read from: each upload on its own, to take back without the rest.
+  const uploads = (s) => s.uploads.length > 0 && h("div.session-uploads", h("h3", "Read from"), h("ul", s.uploads.map((u) => h("li",
+    u.source_id ? h("a", { href: `#/campaigns/${c.slug}/source/${u.source_id}` }, u.name) : h("span", u.name),
+    h("span.muted.small", ` · ${u.facts} facts, ${u.events} journal entries`),
+    canEdit(c) && h("button.danger.small", {
+      onclick: async () => {
+        const rest = s.uploads.length > 1 ? " The session's other uploads stay." : "";
+        if (!confirm(`Take back what “${u.name}” recorded about session ${s.number}?${rest}`)) return;
+        const r = await api("POST", `${base}/uploads/${u.id}/revert`);
+        toast(`Took back “${u.name}”: ${r.facts} facts and ${r.events} journal entries removed, ${r.reopened} earlier facts reopened`
+          + (r.session_removed ? `; session ${s.number} had nothing else, so it's gone` : ""));
+        refresh();
+      },
+    }, "Revert")))));
   // What the book set up before play, if anything was logged for it.
   const beforePlay = () => happened(0) && h("details.card.session", h("summary", h("span.session-num", "#0"), h("strong", "Before play")), happened(0));
   const renderAll = (sessions) => { renderSessions(sessions); const b = beforePlay(); if (b) list.append(b); };
@@ -513,7 +518,7 @@ async function sessionsTab(c) {
     journal = ev;
     renderAll(fresh.sessions);
     renderReviews(fresh.reviews);
-    number.value = fresh.next;
+    which.update(fresh.sessions, fresh.next);
   };
   const EDITABLE = { record_fact: "statement", add_journal_entry: "text" };  // the words a DM may want to change
   const reviewCard = (job) => {
@@ -549,16 +554,16 @@ async function sessionsTab(c) {
     }, `Apply ${count()} changes`);
     rows.forEach((x) => x.keep.addEventListener("change", () => { apply.textContent = `Apply ${count()} changes`; }));
     return h("section.card.review",
-      h("h2", `Session ${job.session}: what the notes say`),
-      h("p.muted.small", "The assistant read the notes and would record these. Untick what's wrong, reword what's off, then apply. "
-        + "Nothing has changed yet."),
+      h("h2", r.adding ? `More about session ${job.session}: what ${job.name} adds` : `Session ${job.session}: what ${job.name} says`),
+      h("p.muted.small", `The assistant read it and would record these${r.adding ? ", on top of what the session already has" : ""}. `
+        + "Untick what's wrong, reword what's off, then apply. Nothing has changed yet."),
       h("label.field", h("span", "Title"), title),
       h("label.field", h("span", "Recap"), summary),
       h("h3", `Changes (${rows.length})`),
       h("ol.proposals", rows.map((x) => x.el)),
       h("div.actions", apply, h("button", {
         onclick: async () => {
-          if (!confirm(`Leave out everything from session ${job.session}'s notes? The campaign stays as it is.`)) return;
+          if (!confirm(`Leave out everything from ${job.name}? The campaign stays as it is.`)) return;
           await api("POST", `${base}/ingests/${job.id}/discard`);
           refresh();
         },
@@ -567,11 +572,11 @@ async function sessionsTab(c) {
   const renderReviews = (list) => reviews.replaceChildren(...(canEdit(c) ? list.map(reviewCard) : []));
   renderReviews(data.reviews || []);
 
-  const number = h("input", { type: "number", min: 1, value: data.next, "aria-label": "Session number" });
-  const date = h("input", { type: "date", value: new Date().toISOString().slice(0, 10), "aria-label": "Date played" });
-  const text = h("textarea", { rows: 8, placeholder: "Paste a transcript or your session notes…", "aria-label": "Transcript" });
-  const file = h("input", { type: "file", accept: ".txt,.md,.mp3,.m4a,.wav,.ogg,.flac,.opus,.webm", "aria-label": "Transcript or recording file" });
-  const submit = h("button.primary", { type: "submit" }, "Add session notes");
+  const which = sessionChoice();
+  which.update(data.sessions, data.next);
+  const text = h("textarea", { rows: 8, placeholder: "Paste a transcript, your notes, a recap…", "aria-label": "Transcript or notes" });
+  const file = h("input", { type: "file", accept: ".txt,.md,.mp3,.m4a,.wav,.ogg,.flac,.opus,.webm", "aria-label": "Transcript, notes or recording file" });
+  const submit = h("button.primary", { type: "submit" }, "Add to the campaign");
 
   // Ingests are jobs the server works through in the background: they carry on
   // whether or not this page is open, and survive restarts.
@@ -582,7 +587,7 @@ async function sessionsTab(c) {
       h("p.muted", job.result.review === "pending" ? `Read: ${job.result.proposals.length} changes for you to review, above.`
         : job.result.review === "discarded" ? "Left out." : `${job.result.facts} facts and ${job.result.journal_entries} journal entries recorded.`)),
     onFinish: async (job) => {
-      toast(`Session ${job.result.session}'s notes are read: review what they'd change`);
+      toast(`${job.name} is read: review what it would change`);
       refresh();
     },
   });
@@ -593,31 +598,66 @@ async function sessionsTab(c) {
       const fd = new FormData();
       if (file.files[0]) fd.append("file", file.files[0]);
       fd.append("text", text.value);
-      if (number.value) fd.append("number", number.value);
-      fd.append("played_on", date.value);
+      which.append(fd);
       try {
         const r = await api("POST", `${base}/ingest`, fd);
         text.value = "";
         file.value = "";
-        number.value = r.session + 1;
+        if (which.isNew()) which.update(which.sessions, r.session + 1);
         jobs.watch({ id: r.job });
       } catch (err) {
         toast(err.message, true);
       }
     },
   },
-    h("h2", "Add session notes"),
-    h("div.identity", h("label.field", h("span", "Session #"), number), h("label.field", h("span", "Played on"), date)),
+    h("h2", "Add to a session"),
+    which.el,
     text,
-    h("div.file-row", h("span.muted", "or upload a transcript or recording:"), file),
+    h("div.file-row", h("span.muted", "or upload a transcript, notes or a recording:"), file),
     h("div.actions", submit, h("span.muted.small",
-      "The assistant reads them, updates NPCs, quests and the journal, and writes a recap. Takes a few minutes, "
-      + "and carries on in the background: you can close this page. A session can be reverted if it gets things wrong.")),
+      "Anything about what happened in a session: a transcript, your notes, a player's recap. The assistant reads it, "
+      + "works out what it changes about NPCs, quests and the journal, and brings that back for you to review. "
+      + "Takes a few minutes, and carries on in the background: you can close this page.")),
+    h("p.muted.small", "Background, lore or plans for later aren't something that happened in a session: add those under ",
+      h("a", { href: `#/campaigns/${c.slug}/reference` }, "Reference"), "."),
   );
 
   // What's been played first; adding to it folds away beneath, open when there's nothing yet.
   return h("div", reviews, h("h2.section-title", "Sessions"), list, jobs.el,
-    canEdit(c) && h("details.add-panel", { open: !data.sessions.length }, h("summary", "+ Add session notes"), form));
+    canEdit(c) && h("details.add-panel", { open: !data.sessions.length }, h("summary", "+ Add to a session"), form));
+}
+
+// Which session an upload is about: a new one (with the date it was played), or one already
+// recorded, which it adds to. update() fills it from GET /sessions; append() puts it in a form.
+export function sessionChoice() {
+  const pick = h("select", { "aria-label": "Session" });
+  const date = h("input", { type: "date", value: new Date().toISOString().slice(0, 10), "aria-label": "Date played" });
+  const dateField = h("label.field", h("span", "Played on"), date);
+  const choice = {
+    sessions: [],
+    el: h("div.identity", h("label.field", h("span", "Session"), pick), dateField),
+    isNew: () => pick.value === "new",
+    update(sessions, next) {
+      const was = pick.value;
+      choice.sessions = sessions;
+      choice.next = next;
+      pick.replaceChildren(h("option", { value: "new" }, `New: session ${next}`),
+        ...[...sessions].reverse().map((s) => h("option", { value: s.number },
+          `Add to #${s.number}${s.title ? `: ${shortTitle(s.title, 40)}` : ""}`)));
+      if ([...pick.options].some((o) => o.value === was)) pick.value = was;
+      dateField.hidden = !choice.isNew();
+    },
+    append(fd) {
+      if (choice.isNew()) {
+        fd.append("number", choice.next);
+        fd.append("played_on", date.value);
+      } else {
+        fd.append("number", pick.value);
+      }
+    },
+  };
+  pick.addEventListener("change", () => { dateField.hidden = !choice.isNew(); });
+  return choice;
 }
 
 // -- jobs ------------------------------------------------------------------------

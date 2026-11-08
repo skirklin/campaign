@@ -173,19 +173,28 @@ uv run campaign web            # http://127.0.0.1:8765
   - **Sessions**: the campaign's timeline, newest first: each session
     (recaps of past play numbered among them) opens to its recap and what
     happened in it (the journal, linked to the people, places and things
-    involved). Then **Add session notes**: paste
-    notes or a transcript, or upload a text file or a recording, to run an
-    ingest. A live log shows what the assistant is reading. **Nothing in the
-    campaign changes until the DM says so:** the ingest comes back as the
-    changes it would make (each fact with whose it is and what it sets, each
-    journal line, each item) and a draft recap, to untick, reword and
-    **Apply**, or **Discard**. Applied, session N is what was accepted,
-    replacing an earlier recording of it. Each past session has its recap and a **Revert** button.
+    involved). Then **Add to a session**: paste or upload anything about
+    what happened in one (a transcript, your notes, a player's recap, a
+    recording) and say which session: a new one, with the date it was
+    played, or one already recorded, which it **adds to**. The assistant
+    reads it for what it is; adding to a session, it reads what the session
+    has first, records only what's new or corrects what's wrong, and rewrites
+    the recap to cover the whole evening. A live log shows what it's
+    reading. **Nothing in the campaign changes until the DM says so:** the
+    ingest comes back as the changes it would make (each fact with whose it
+    is and what it sets, each journal line, each item) and a draft recap, to
+    untick, reword and **Apply**, or **Discard**. Each session lists the
+    uploads it was **read from**, each with its own **Revert**: that takes
+    back what the upload recorded, and its text, and leaves the session's
+    other uploads alone (the recap goes back to what it was, if it was the
+    latest). Background, lore and plans aren't something that happened in a
+    session: they go under Reference.
     **From Pixel Recorder** (or any app that shares text): install Campaign on
     the phone (Chrome ⋮ → Add to Home screen → Install), then in Recorder
     touch and hold a recording → Share → Transcript (.txt) → Campaign. It
-    opens on the shared transcript: pick the campaign, check the session
-    number and date, trim it if you like, and add it like any session notes.
+    opens on the shared transcript: pick the campaign and the session (the
+    next one, or one it adds to), trim it if you like, and add it like
+    anything else about a session.
     The app's manifest declares a share target (`/share`) and a service
     worker (`static/sw.js`) holds what's shared on the phone until it's sent,
     so a sign-in on the way loses nothing. Turn on Recorder's speaker labels
@@ -345,9 +354,11 @@ uv run campaign chat          # conversation; tell it what happened and it recor
 
 # after a session
 uv run campaign ingest session-07.txt --date 2026-10-25   # or a .m4a/.mp3 with the audio extra
+uv run campaign ingest my-notes.md --number 7             # more about session 7: adds to it
 uv run campaign journal
 uv run campaign state --kind quest --status active
-uv run campaign revert 7      # undo what that ingest wrote, if it got things wrong
+uv run campaign sessions      # each session and the uploads it was read from
+uv run campaign revert 12     # take back upload 12 (what it wrote, and its text)
 
 # character sheets (each belongs to a campaign: -c picks it)
 uv run campaign char import examples/character.json -c curse-of-strahd
@@ -463,8 +474,8 @@ stores the upload and adds a row to `jobs` saying what's wanted; a loop in
 the server (`jobs.JobLoop`) works through them oldest first. The row is
 the whole truth, so it doesn't matter whether the page stays open, and a
 job interrupted by a restart or a deploy is simply run again from its
-input: each kind is safe to redo (an ingest replaces the session's earlier
-recording; a scan recognises the character its own earlier try made), and
+input: each kind is safe to redo (an ingest changes nothing until the DM
+applies it; a scan recognises the character its own earlier try made), and
 keeps what it has already paid for (a transcription, the read sheet) in
 its input so a redo doesn't buy it twice. Progress is written to
 `job_log`, which the page shows live. Failures retry after 1 and 4
@@ -557,10 +568,14 @@ Add `--read-only` to expose only the lookup tools.
   reads the full chunk or page before quoting numbers. Proper nouns and game
   terms dominate D&D questions, and keyword search handles those well.
   Embeddings can be added later if fuzzy questions turn out to miss.
-- **Ingest** (`agent.py`): the transcript is stored as a searchable source.
-  Claude then reads the current state, matches mangled speech-to-text names
-  to known entities, records what changed, and writes a recap. Sheets are
-  updated only when the transcript states a change outright.
+- **Ingest** (`agent.py`): an upload is material about one session: a
+  transcript, notes, a recap. Claude reads the current state (and, for a
+  session already recorded, what it has), matches mangled speech-to-text
+  names to known entities, records what changed, and writes the session's
+  recap. Applied, the upload is an ingest run with its text as a searchable
+  source; a session is built from as many as it was given, and reverting one
+  deletes its run. Sheets are updated only when the material states a change
+  outright.
 - **Spoiler safety** is enforced in the database layer, not just in the
   prompt. In player campaigns, `dm_only` sources are hidden, and so is every
   fact the party hadn't learned by the session in question.
@@ -687,8 +702,6 @@ here). Likely next steps:
 - **Ask from the web UI**: a chat box on the campaign page, using the same
   agent as `campaign chat`.
 - **In-game dates** as a finer clock than session numbers.
-- **Review before commit** for ingest: show proposed changes and approve
-  them, as an alternative to ingest-then-revert.
 - **Scanned PDFs** need OCR. Text-layer PDFs work as they are.
 - **Batch API for digests**: leaves don't need to finish quickly, and the
   Message Batches API costs half as much.

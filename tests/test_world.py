@@ -61,7 +61,7 @@ def test_book_is_the_starting_state_and_play_supersedes_it():
     assert hag["name"] == "Morgantha" and "stat_block" not in hag["current"]
 
 
-def test_revert_undoes_exactly_one_session():
+def test_revert_undoes_exactly_one_upload():
     store, _, w, _ = setup()
     ireena = w.resolve("Ireena")["id"]
     r2 = play(store, w, 2)
@@ -74,11 +74,15 @@ def test_revert_undoes_exactly_one_session():
     villain = w.ensure_entity("Izek Strazni", "npc")
     w.record(villain["id"], "Izek took her", r3, 3)
 
-    assert w.revert_session(3) == {"facts": 2, "reopened": 2, "events": 0, "entities_removed": 1}
+    assert w.revert_upload(r3) == {"facts": 2, "reopened": 2, "events": 0, "entities_removed": 1,
+                                   "session": 3, "session_removed": True}
     assert w.view(ireena)["current"] == {"location": "Vallaki"}
     assert lives["statement"] in [f["statement"] for f in w.view(ireena)["facts"]]
     assert w.resolve("Izek Strazni") is None
     assert len(w.events()) == 1
+    assert [x["number"] for x in store.sessions(w.campaign)] == [2]  # nothing else was in session 3
+    with pytest.raises(KeyError):
+        w.revert_upload(r3)
 
 
 def test_reapplying_the_book_is_idempotent_and_keeps_table_history():
@@ -395,15 +399,32 @@ def test_the_schema_is_made_whole_and_the_deployed_database_brought_up_to_it(tmp
          "chars": 9, "key": "k-leaf"},
     ])
     conv = s.create_conversation(camp, None, "Prep")
-    # The deployment as it stands: version 20, before encounters were saved.
-    s.conn.executescript("DROP TABLE encounters; PRAGMA user_version = 20;")
+    # The deployment as it stands: version 21, when a session had one source.
+    s.conn.executescript("""
+        ALTER TABLE runs DROP COLUMN recap_before;
+        ALTER TABLE sessions ADD COLUMN source_id INTEGER REFERENCES sources(id) ON DELETE SET NULL;
+    """)
+    t1 = s.add_source(camp, "Session 1 transcript", "transcript", [{"heading": "", "text": "Night one.", "page": 1}])
+    t2 = s.add_source(camp, "Session 2 transcript", "transcript", [{"heading": "", "text": "Quiet.", "page": 1}])
+    waiting = s.add_source(camp, "Session 3 transcript", "transcript", [{"heading": "", "text": "Three.", "page": 1}])
+    s.conn.executescript(f"""
+        INSERT INTO sessions (campaign_id, number, title, summary, source_id)
+        VALUES ({camp.id}, 1, 'Night', 'They met Ismark.', {t1}), ({camp.id}, 2, 'Quiet', '', {t2});
+        INSERT INTO runs (campaign_id, kind, session, created_at) VALUES ({camp.id}, 'ingest', 1, '2026-11-01');
+        PRAGMA user_version = 21;
+    """)
+    pending = s.add_job(camp, "ingest", {"session": 3, "blob": "b", "name": "s3.txt", "played_on": None}, None)
+    s.update_job(pending, state="done", result={"session": 3, "review": "pending", "proposals": [], "source_id": waiting})
     s.close()
     s = Store(db)
     assert s.schema_version == SCHEMA_VERSION
     assert s.digest_status(src)["done"] == 2 and s.conversation(conv)["title"] == "Prep"  # what was there stays
-    e = s.create_encounter(camp, None, conv, "Boar hunt", {"creatures": [{"name": "Great Boar"}]})
-    s.delete_conversation(conv)
-    assert s.encounter(e)["conversation_id"] is None  # an encounter outlives the chat it was made in
+    sessions = s.sessions(camp)
+    assert [(x["number"], x["title"], [(u["session"], u["source_id"]) for u in x["uploads"]]) for x in sessions] == [
+        (1, "Night", [(1, t1)]), (2, "Quiet", [(2, t2)])]  # session 2's transcript recorded nothing, and is still listed
+    review = s.job(pending)["result"]
+    assert "source_id" not in review and review["name"] == "s3.txt" and review["blob"]
+    assert waiting not in [x["id"] for x in s.sources(camp)]  # it becomes an upload when applied
     assert list((tmp_path / "backups").glob(f"campaign-*-pre-v{SCHEMA_VERSION}.db"))
     s.close()
     assert Store(db).schema_version == SCHEMA_VERSION  # reopening changes nothing

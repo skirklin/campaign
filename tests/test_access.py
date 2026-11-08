@@ -89,7 +89,7 @@ def test_players_see_the_spoiler_filtered_world_and_cannot_change_it(site):
     # Viewers can't change anything.
     assert player.post(f"/api/campaigns/strahd/entities/{ent}/facts", json={"statement": "x"}).status_code == 403
     assert player.post("/api/campaigns/strahd/ingest", data={"text": "x"}).status_code == 403
-    assert player.post("/api/campaigns/strahd/sessions/1/revert").status_code == 403
+    assert player.post("/api/campaigns/strahd/uploads/1/revert").status_code == 403
     assert player.post("/api/campaigns/strahd/invites", json={}).status_code == 403
     assert player.get("/api/campaigns/strahd/invites").status_code == 403
 

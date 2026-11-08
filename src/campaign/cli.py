@@ -234,11 +234,12 @@ def chat(campaign: CampaignOpt = None) -> None:
 def ingest(
     path: Path,
     campaign: CampaignOpt = None,
-    number: Annotated[Optional[int], typer.Option(help="Session number. Defaults to the next one.")] = None,
+    number: Annotated[Optional[int], typer.Option(
+        help="The session it's about: a recorded one is added to. Defaults to a new session.")] = None,
     date: Annotated[Optional[str], typer.Option(help="Date played, YYYY-MM-DD.")] = None,
     whisper_model: str = "small",
 ) -> None:
-    """Fold a session transcript (or audio recording) into the campaign state."""
+    """Read a session's transcript, notes or audio recording into the campaign."""
     from .agent import ingest_session
 
     s = store()
@@ -254,22 +255,22 @@ def ingest(
     else:
         transcript = path.read_text(encoding="utf-8")
     result = ingest_session(
-        s, c.slug, transcript, number=number, played_on=date,
+        s, c.slug, transcript, number=number, played_on=date, name=path.name,
         on_tool=_progress, on_text=lambda t: sys.stderr.write(t),
     )
     typer.echo(f"\nSession {result['session']}: {result.get('title', '(untitled)')}")
     typer.echo(result.get("summary", ""))
     typer.echo(f"\n{result['facts']} facts and {result['journal_entries']} journal entries recorded."
-               f" Undo with: campaign revert {result['session']}")
+               f" Undo with: campaign revert {result['upload']}")
 
 
 @app.command()
-def revert(number: int, campaign: CampaignOpt = None) -> None:
-    """Undo what the ingest of one session recorded."""
+def revert(upload: int, campaign: CampaignOpt = None) -> None:
+    """Take back one upload about a session (`campaign sessions` lists them): what it recorded, and its text."""
     from .world import World
 
     s = store()
-    show(World(s, pick(s, campaign)).revert_session(number))
+    show(World(s, pick(s, campaign)).revert_upload(upload))
 
 
 @app.command()
@@ -315,6 +316,17 @@ def journal(campaign: CampaignOpt = None, session: Optional[int] = None) -> None
             current = e["session"]
             typer.secho(f"Session {current}: {titles.get(current, '')}", bold=True)
         typer.echo(f"  {e['text']}")
+
+
+@app.command()
+def sessions(campaign: CampaignOpt = None) -> None:
+    """List the sessions, each with the uploads it was read from (the ids `campaign revert` takes)."""
+    s = store()
+    for x in s.sessions(pick(s, campaign)):
+        typer.secho(f"Session {x['number']}: {x['title'] or '(untitled)'}" + (f"  ({x['played_on']})" if x["played_on"] else ""),
+                    bold=True)
+        for u in x["uploads"]:
+            typer.echo(f"  upload {u['id']}: {u['name']}, {u['facts']} facts, {u['events']} journal entries")
 
 
 @app.command()

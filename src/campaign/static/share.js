@@ -4,6 +4,7 @@
 // starts the ingest, the same job "Add session notes" runs.
 
 import { api, h, toast, canEdit } from "./util.js";
+import { sessionChoice } from "./campaigns.js";
 
 const SHARE_CACHE = "campaign-share";
 const PENDING = "/share/pending";
@@ -58,22 +59,23 @@ export async function shareView() {
   const last = remembered();
   const campaign = h("select", { "aria-label": "Campaign" },
     campaigns.map((c) => h("option", { value: c.slug, selected: c.slug === last }, c.name)));
-  const number = h("input", { type: "number", min: 1, required: true, "aria-label": "Session number" });
-  const date = h("input", { type: "date", value: new Date().toISOString().slice(0, 10), "aria-label": "Date played" });
-  const text = h("textarea", { rows: 14, "aria-label": "Transcript", value: shared.text });
-  const submit = h("button.primary", { type: "submit" }, "Add session notes");
+  const which = sessionChoice();
+  const text = h("textarea", { rows: 14, "aria-label": "Transcript or notes", value: shared.text });
+  const submit = h("button.primary", { type: "submit", disabled: true }, "Add to the campaign");
 
-  // The next session to record, for whichever campaign is picked.
-  const nextSession = async () => {
-    number.value = "";
+  // The campaign's sessions, to add to one or start the next, for whichever campaign is picked.
+  const loadSessions = async () => {
+    submit.disabled = true;
     try {
-      number.value = (await api("GET", `/api/campaigns/${campaign.value}/sessions`)).next;
+      const data = await api("GET", `/api/campaigns/${campaign.value}/sessions`);
+      which.update(data.sessions, data.next);
+      submit.disabled = false;
     } catch (err) {
       toast(err.message, true);
     }
   };
-  campaign.addEventListener("change", nextSession);
-  nextSession();
+  campaign.addEventListener("change", loadSessions);
+  loadSessions();
 
   const lines = shared.text.split("\n").filter((l) => l.trim()).length;
   const name = shared.name || `${shared.title || "Shared transcript"}.txt`;
@@ -87,14 +89,13 @@ export async function shareView() {
         const slug = campaign.value;
         const fd = new FormData();
         fd.append("file", new Blob([text.value], { type: "text/plain" }), name);
-        fd.append("number", number.value);
-        fd.append("played_on", date.value);
+        which.append(fd);
         submit.disabled = true;
         try {
           const r = await api("POST", `/api/campaigns/${slug}/ingest`, fd);
           await forgetShare();
           remember(slug);
-          toast(`Reading session ${r.session}'s transcript`);
+          toast(`Reading ${name} for session ${r.session}`);
           location.hash = `#/campaigns/${slug}/ingest`;
         } catch (err) {
           submit.disabled = false;
@@ -102,13 +103,12 @@ export async function shareView() {
         }
       },
     },
-      h("div.identity",
-        h("label.field", h("span", "Campaign"), campaign),
-        h("label.field", h("span", "Session #"), number),
-        h("label.field", h("span", "Played on"), date)),
+      h("div.identity", h("label.field", h("span", "Campaign"), campaign)),
+      which.el,
       text,
       h("div.actions", submit, discard, h("span.muted.small",
-        "Trim anything that isn't the session if you like. The assistant reads it in the background and "
-        + "brings back what it would change, for you to review before anything is recorded."))),
+        "A new session, or one already recorded, which this adds to. Trim anything that isn't the game if you like. "
+        + "The assistant reads it in the background and brings back what it would change, for you to review "
+        + "before anything is recorded."))),
   );
 }

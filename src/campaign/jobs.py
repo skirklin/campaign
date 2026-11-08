@@ -109,12 +109,12 @@ class Run:
 
 
 def run_ingest(run: Run) -> dict[str, Any]:
-    """What session N's notes say, as changes for the DM to review (agent.apply_ingest makes the ones they
+    """What an upload about session N says (new, or more about one recorded), as changes for the DM to review (agent.apply_ingest makes the ones they
     accept). Nothing in the campaign changes until then, so redoing it, or cancelling it, is safe."""
     from .agent import describe_tool_call, ingest_session
 
     transcript = _transcript(run)
-    run.log.emit("status", "Reading the transcript and updating the campaign…")
+    run.log.emit("status", "Reading it and working out what it changes…")
 
     def on_tool(name: str, args: dict[str, Any]) -> None:
         run.check()
@@ -122,7 +122,7 @@ def run_ingest(run: Run) -> dict[str, Any]:
 
     return ingest_session(
         run.store, run.campaign, transcript, number=run.input["session"], played_on=run.input["played_on"],
-        on_text=lambda t: run.log.emit("text", t), on_tool=on_tool, review=True,
+        name=run.input["name"], on_text=lambda t: run.log.emit("text", t), on_tool=on_tool, review=True,
     )
 
 

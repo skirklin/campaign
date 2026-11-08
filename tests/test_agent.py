@@ -90,7 +90,8 @@ def test_ingest_records_state_and_finishes(store, monkeypatch):
     world = World(store, c)
     assert world.lookup("Ireena Kolyana")[0]["current"] == {"status": "alive"}
     assert result["facts"] == 1
-    assert world.revert_session(1)["entities_removed"] == 1
+    assert [u["id"] for u in store.sessions(c)[0]["uploads"]] == [result["upload"]]
+    assert world.revert_upload(result["upload"])["entities_removed"] == 1
     assert world.lookup("Ireena Kolyana") == []
 
     # all three results go back in one user message; the bad input is an error result
@@ -98,7 +99,8 @@ def test_ingest_records_state_and_finishes(store, monkeypatch):
     assert [r["tool_use_id"] for r in results] == ["t2", "t3", "t4"]
     assert [r["is_error"] for r in results] == [False, False, True]
     assert client.requests[0]["fallbacks"] == "default"
-    assert "<transcript" in client.requests[0]["messages"][0]["content"][0]["text"]
+    assert "<material" in client.requests[0]["messages"][0]["content"][0]["text"]
+    assert "already recorded" not in client.requests[0]["system"][0]["text"]
 
 
 def test_chat_keeps_history_and_recovers_from_refusal(store, monkeypatch):
