@@ -137,26 +137,42 @@ class World:
         counts["entities_removed"] = self._remove_orphans()
         return counts
 
-    def revert_session(self, number: int) -> dict[str, int]:
-        """Undo every ingest of session `number`, and clear its recap."""
-        runs = self.conn.execute(
-            "SELECT id FROM runs WHERE campaign_id = ? AND kind = 'ingest' AND session = ? ORDER BY id DESC",
+    def revert_upload(self, run_id: int) -> dict[str, Any]:
+        """Take back one upload about a session (an ingest run): what it recorded, and its text.
+
+        The session's other uploads stay. If it was the session's latest, the title and recap go
+        back to what they were before it; a session nothing is left in goes away, and its number
+        with it."""
+        run = self.conn.execute(
+            "SELECT id, session, source_id, recap_before FROM runs WHERE id = ? AND campaign_id = ? AND kind = 'ingest'",
+            (run_id, self.campaign.id),
+        ).fetchone()
+        if run is None:
+            raise KeyError(f"no upload {run_id}")
+        number = run["session"]
+        latest = self.conn.execute(
+            "SELECT max(id) FROM runs WHERE campaign_id = ? AND kind = 'ingest' AND session = ?",
             (self.campaign.id, number),
-        ).fetchall()
-        if not runs and not self.conn.execute(
-            "SELECT 1 FROM sessions WHERE campaign_id = ? AND number = ?", (self.campaign.id, number)
-        ).fetchone():
-            raise KeyError(f"no session {number}")
-        total = {"facts": 0, "reopened": 0, "events": 0, "entities_removed": 0}
-        for r in runs:
-            for k, v in self.revert_run(r["id"]).items():
-                total[k] += v
+        ).fetchone()[0] == run_id
+        counts: dict[str, Any] = self.revert_run(run_id)
         with self.conn:
-            self.conn.execute(
-                "UPDATE sessions SET title = '', summary = '' WHERE campaign_id = ? AND number = ?",
-                (self.campaign.id, number),
-            )
-        return total
+            if run["source_id"] is not None:
+                self.conn.execute("DELETE FROM sources WHERE id = ? AND campaign_id = ?", (run["source_id"], self.campaign.id))
+            if latest and run["recap_before"]:
+                before = json.loads(run["recap_before"])
+                self.conn.execute(
+                    "UPDATE sessions SET title = ?, summary = ? WHERE campaign_id = ? AND number = ?",
+                    (before["title"], before["summary"], self.campaign.id, number),
+                )
+            # Nothing else written at that session (no uploads, no chat): there was no such session.
+            gone = self.conn.execute(
+                "DELETE FROM sessions WHERE campaign_id = ? AND number = ? AND kind = 'played'"
+                " AND NOT EXISTS (SELECT 1 FROM runs WHERE campaign_id = ? AND session = ?)",
+                (self.campaign.id, number, self.campaign.id, number),
+            ).rowcount
+        counts["session"] = number
+        counts["session_removed"] = bool(gone)
+        return counts
 
     def _remove_orphans(self) -> int:
         with self.conn:

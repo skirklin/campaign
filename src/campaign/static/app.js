@@ -2,12 +2,14 @@ import { characterList, sheetView } from "./sheet.js";
 import { campaignList, campaignView, entityView, sourceView } from "./campaigns.js";
 import { encounterView } from "./encounter.js";
 import { accountView, adminView } from "./admin.js";
-import { whoami, checkClaude } from "./util.js";
+import { shareView, pendingShare } from "./share.js";
+import { whoami, checkClaude, toast } from "./util.js";
 
 const routes = [
   [/^#\/characters\/(\d+)$/, (m) => sheetView(m[1]), "characters"],
   [/^#\/admin$/, () => adminView(), "admin"],
   [/^#\/account$/, () => accountView(), "account"],
+  [/^#\/share$/, () => shareView(), "campaigns"],
   [/^#\/campaigns\/([^/]+)\/source\/(\d+)$/, (m) => sourceView(m[1], m[2]), "campaigns"],
   [/^#\/campaigns\/([^/]+)\/entity\/(\d+)$/, (m) => entityView(m[1], m[2]), "campaigns"],
   [/^#\/campaigns\/([^/]+)\/encounters\/(\d+)$/, (m) => encounterView(m[1], m[2]), "campaigns"],
@@ -39,6 +41,15 @@ async function route() {
 
 window.addEventListener("hashchange", route);
 route();
+
+// The service worker receives what other apps share to Campaign (share.js).
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
+
+// A transcript shared before a sign-in got in the way is still waiting: offer it.
+if (location.hash !== "#/share") {
+  pendingShare().then((shared) => shared && toast("A shared transcript is waiting", false,
+    { label: "Open", run: () => { location.hash = "#/share"; } }));
+}
 
 // With sign-in on, show who's signed in, and the admin page to admins.
 whoami().then((me) => {

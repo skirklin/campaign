@@ -49,8 +49,12 @@ GOOGLE_ISSUERS = {"accounts.google.com", "https://accounts.google.com"}
 SESSION_DAYS = 30
 FLOW_MINUTES = 10
 # The app's manifest and icons are open too: browsers fetch the manifest without the
-# session cookie, and can only offer to install the app if they can read it.
+# session cookie, and can only offer to install the app if they can read it. So is the
+# service worker, which a browser re-fetches to update and can't follow to a sign-in, and
+# /share, where Android posts what's shared to the app (from no origin of ours): it only
+# redirects into the app, which reads the share on the device.
 OPEN_PATHS = ("/auth/", "/invite/", "/healthz", "/static/manifest.webmanifest", "/static/icons/")
+OPEN_EXACT = ("/sw.js", "/share")
 # The remote MCP endpoint and its OAuth endpoints check bearer tokens (or a
 # client's own credentials) themselves, and are called by apps from other
 # origins, so they skip both the session check and the same-origin check.
@@ -298,7 +302,7 @@ def install(
     @app.middleware("http")
     async def require_login(request: Request, call_next: Callable) -> Response:
         path = request.url.path
-        if path in BEARER_PATHS or path.startswith("/.well-known/oauth-"):
+        if path in BEARER_PATHS or path in OPEN_EXACT or path.startswith("/.well-known/oauth-"):
             return await call_next(request)
         if request.method not in ("GET", "HEAD", "OPTIONS"):
             origin = request.headers.get("origin")

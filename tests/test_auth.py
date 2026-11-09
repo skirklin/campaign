@@ -26,6 +26,14 @@ def test_everything_but_sign_in_and_health_is_closed(site):
     for icon in manifest.json()["icons"]:
         assert b.get(icon["src"]).status_code == 200, icon["src"]
     assert b.get("/static/icons/%2e%2e/app.js").status_code != 200  # no way out of the open folders
+    # So is the service worker (a browser updates it signed in or not), and the share target, which
+    # Android posts to from no origin of ours; it only sends the phone into the app.
+    sw = b.get("/sw.js")
+    assert sw.status_code == 200 and "javascript" in sw.headers["content-type"] and sw.headers["cache-control"] == "no-cache"
+    target = manifest.json()["share_target"]
+    r = b.post(target["action"], files={"file": ("Recording.txt", b"Speaker 1\nhello")}, headers={"origin": "null"})
+    assert r.status_code == 303 and r.headers["location"] == "/#/share"
+    assert b.get("/sw.js/../static/app.js").status_code != 200
 
 
 def test_sign_in_is_invite_only(site):

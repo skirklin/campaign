@@ -166,8 +166,67 @@ def test_ingest_job_runs_in_background(client, monkeypatch):
     assert detail["events"] == [{"session": 1, "text": "Met Ismark at the Blood on the Vine."}]
 
     assert client.get("/api/campaigns/strahd/journal").json()[0]["session"] == 1
-    assert client.post("/api/campaigns/strahd/sessions/1/revert").json()["entities_removed"] == 1
+    [upload] = sessions["sessions"][0]["uploads"]
+    assert upload["name"] == "s1.txt" and upload["facts"] == 1 and upload["events"] == 1
+    assert client.get(f"/api/campaigns/strahd/sources/{upload['source_id']}/original").content == b"DM: A man in a cloak..."
+    r = client.post(f"/api/campaigns/strahd/uploads/{upload['id']}/revert").json()
+    assert r["entities_removed"] == 1 and r["session_removed"]
     assert client.get("/api/campaigns/strahd/entities").json()["entities"] == []
+    assert client.get("/api/campaigns/strahd/sessions").json()["sessions"] == []
+    assert client.post(f"/api/campaigns/strahd/uploads/{upload['id']}/revert").status_code == 404
+
+
+def test_more_about_a_session_adds_to_it_and_comes_back_out_alone(client, monkeypatch):
+    clients = [
+        FakeClient([
+            ([tool_use("t1", "record_fact", entity="Ismark", kind="npc", statement="Ismark is alive",
+                       attribute="status", value="alive")], "tool_use"),
+            ([tool_use("t2", "add_journal_entry", text="Met Ismark at the tavern.", entities=["Ismark"])], "tool_use"),
+            ([tool_use("t3", "finish_session", title="Night", summary="They met Ismark.")], "tool_use"),
+            ([text("Done.")], "end_turn"),
+        ]),
+        FakeClient([
+            ([tool_use("t1", "record_fact", entity="Ireena", kind="npc", statement="Ireena is Ismark's sister")], "tool_use"),
+            ([tool_use("t2", "finish_session", title="Night",
+                       summary="They met Ismark, and learned of his sister Ireena.")], "tool_use"),
+            ([text("Added Ireena.")], "end_turn"),
+        ]),
+    ]
+    used = []
+    monkeypatch.setattr(agent_mod.budget.anthropic, "Anthropic", lambda **_: used.append(clients.pop(0)) or used[-1])
+    client.post("/api/campaigns", json={"name": "Strahd", "role": "dm"})
+    first = wait_for(client, client.post("/api/campaigns/strahd/ingest", files={"file": ("night.txt", b"DM: ...")},
+                                         data={"played_on": "2026-10-25"}).json()["job"])
+    assert not first["result"]["adding"]
+    client.post(f"/api/campaigns/strahd/ingests/{first['id']}/apply", json={"accepted": [0, 1]})
+
+    # The DM's notes on the same evening, afterwards: they're about session 1, and add to it.
+    r = client.post("/api/campaigns/strahd/ingest", data={"text": "Ireena is his sister.", "number": "1",
+                                                          "played_on": "2026-11-01"})
+    assert r.json()["session"] == 1
+    second = wait_for(client, r.json()["job"])
+    assert second["result"]["adding"] and second["name"] == "notes"
+    system = used[1].requests[0]["system"][0]["text"]
+    assert "Session 1 is already recorded, from night.txt" in system and "They met Ismark." in system
+    client.post(f"/api/campaigns/strahd/ingests/{second['id']}/apply", json={"accepted": [0]})
+
+    [session] = client.get("/api/campaigns/strahd/sessions").json()["sessions"]
+    assert session["played_on"] == "2026-10-25"  # when it was played doesn't move
+    assert session["summary"] == "They met Ismark, and learned of his sister Ireena."
+    assert [(u["name"], u["facts"]) for u in session["uploads"]] == [("night.txt", 1), ("notes", 1)]
+    names = lambda: sorted(e["name"] for e in client.get("/api/campaigns/strahd/entities").json()["entities"])
+    assert names() == ["Ireena", "Ismark"]
+    titles = [x["title"] for x in client.get("/api/campaigns/strahd/sources").json()]
+    assert titles == ["Session 1: night.txt", "Session 1: notes"]
+
+    # Taking the notes back leaves the transcript's record, and the recap as it was before them.
+    r = client.post(f"/api/campaigns/strahd/uploads/{session['uploads'][1]['id']}/revert").json()
+    assert r["facts"] == 1 and not r["session_removed"]
+    [session] = client.get("/api/campaigns/strahd/sessions").json()["sessions"]
+    assert session["summary"] == "They met Ismark." and [u["name"] for u in session["uploads"]] == ["night.txt"]
+    assert names() == ["Ismark"]
+    assert [x["title"] for x in client.get("/api/campaigns/strahd/sources").json()] == ["Session 1: night.txt"]
+    assert client.post("/api/campaigns/strahd/ingest", data={"text": "x", "number": "0"}).status_code == 422
 
 
 def test_a_dm_can_leave_out_what_the_notes_got_wrong_or_all_of_it(client, monkeypatch):

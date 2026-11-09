@@ -130,11 +130,18 @@ the party hasn't uncovered.
 INGEST_SYSTEM = """\
 You keep the campaign record for the D&D campaign "{name}". {role_line}
 
-You are processing session {number}. The transcript follows in the user
-message. Speech-to-text transcripts are noisy: names are often misspelled,
-speakers are unlabelled or wrong, and much of the talk is table chatter,
-rules lookups and jokes. Record only what happened in the game.
-
+The user message is material about session {number}: whatever the DM had,
+such as a recording's transcript, their own notes, a player's recap, or a
+few lines about what happened. Read it for what it is. A speech-to-text
+transcript is noisy: names are often misspelled, and much of the talk is
+table chatter, rules lookups and jokes. Speakers may be unlabelled, labelled
+"Speaker 1", "Speaker 2"…, or labelled with the real person's name, and the
+labels can be wrong. A speaker is a person at the table, not a character:
+work out from what they say who is the DM and which character each player
+plays. Notes are terse and assume you know the campaign. Record only what
+happened in the game, and only as much as the material says: short notes
+make a short record.
+{existing}
 The record is a world model of facts over time. Everything you write is
 dated to session {number}. Recording a new value for an attribute (status,
 location, holder, disposition, leader, allegiance, condition) automatically
@@ -144,7 +151,7 @@ rewrite the past. The book's facts are the world before play (session 0).
 Work in this order:
 1. Get your bearings: list_sessions, recent_journal, and find_entities with
    in_play_only for what the table has already touched.
-2. Read the whole transcript.
+2. Read all of the material.
 3. Resolve every name to an existing entity: the names list below, lookup
    and find_entities. "Strad", "Straud" and "the count" are all "Strahd von
    Zarovich". Use the existing name, and add new nicknames with `aliases`.
@@ -159,22 +166,39 @@ Work in this order:
    - party_learned when the party uncovers something the book already says
      (look up the fact id first);
    - modality "rumor" for claims the party heard but hasn't confirmed.
-5. Log the session's key events with add_journal_entry, in order, roughly
-   5-20 entries, naming the entities involved.
-6. Update a character sheet only if it already exists and the transcript
+5. Log the session's key events with add_journal_entry, in order, naming the
+   entities involved: as many as the material has, up to about 20.
+6. Update a character sheet only if it already exists and the material
    states the change outright (a level up, HP). Say in `reason` where it
    came from. Loot, purchases and coin go in the party's inventory: read it
    first (inventory), then add_items (held by the party unless someone
    claimed it), give_item when something changes hands, change_coin for
    gold found or spent.
 7. Finish by calling finish_session exactly once with a short title and a
-   recap a player could read before the next session.
+   recap of the whole session a player could read before the next one.
 
 Prefer fewer, accurate writes over guesses. If something is ambiguous, leave
 it out and mention it in your final message.
 
 """ + CLEAN_RECORDS + """
 {spoiler_rules}{catalog}"""
+
+NEW_SESSION = ""
+
+ADDING_TO_SESSION = """
+Session {number} is already recorded, from {uploads}. This adds to it; what's
+recorded stays. First read what the session has: its recap is below, and
+recent_journal with session={number} gives its journal. Then record only
+what this material adds or corrects: don't repeat a fact or journal entry
+that's already there. When it contradicts the record, the record was
+probably misheard: record the correction (a new attribute value, or end_fact
+on a statement that was wrong). Finish with the recap rewritten to cover the
+whole session, what was there and what this adds, keeping the title unless
+this material shows it's wrong.
+
+Session {number} so far: "{title}"
+{summary}
+"""
 
 
 @dataclass
@@ -449,38 +473,34 @@ def conversation_title(question: str, answer: str) -> str | None:
 def ingest_session(
     store: Store,
     campaign_slug: str | Campaign,
-    transcript: str,
+    text: str,
     number: int | None = None,
     played_on: str | None = None,
-    source_title: str | None = None,
+    name: str = "",
     review: bool = False,
     **kw: Any,
 ) -> dict[str, Any]:
-    """Store a transcript as a source, then have Claude fold it into the campaign state.
+    """Have Claude read material about a session into the campaign: a new session, or more about
+    one already recorded (`number`), which it adds to.
 
     Pass a Campaign rather than a slug to ingest as a particular viewer: a
     player's ingest only sees what players may see.
 
-    With `review`, nothing in the campaign changes: what the assistant would
-    record comes back as `proposals` (and the recap as `title` and `summary`),
-    for the DM to accept, edit or leave out, and `apply_ingest` makes the ones
-    they accept. Without it (the command line), the changes are made as it goes.
+    With `review`, nothing changes at all: what the assistant would record
+    comes back as `proposals` (and the recap as `title` and `summary`), for the
+    DM to accept, edit or leave out, and `apply_ingest` makes the upload and
+    the changes they accept. Without it (the command line), the upload is made
+    first and the changes as it goes.
     """
-    from .ingest import parse_markdown
-
     campaign = store.campaign(campaign_slug) if isinstance(campaign_slug, str) else campaign_slug
     number = number or store.next_session_number(campaign)
-    title = source_title or f"Session {number} transcript"
-    blob = store.blobs.put(transcript.encode("utf-8"))
-    source_id = store.add_source(
-        campaign, title, "transcript", parse_markdown(transcript),
-        blob=blob, filename=f"session-{number}.txt",
-    )
-    world = World(store, campaign)
-    if not review:
-        _replace_session(store, campaign, number, played_on, source_id)
+    name = (name or "notes").replace('"', "'")
+    blob = store.blobs.put(text.encode("utf-8"))
+    session = next((x for x in store.sessions(campaign) if x["number"] == number), None)
     ctx = ToolContext(store, campaign, session=number, run_kind="ingest")
-    result: dict[str, Any] = {"session": number}
+    if not review:
+        ctx.run_id = _record_upload(store, campaign, number, blob, name, played_on)
+    result: dict[str, Any] = {"session": number, "adding": session is not None}
     proposals: list[dict[str, Any]] | None = [] if review else None
 
     def finish_session(title: str, summary: str) -> str:
@@ -488,58 +508,67 @@ def ingest_session(
 
         Args:
             title: Short evocative title, e.g. "Death House".
-            summary: 1-4 paragraph recap of what the party did, found and decided.
+            summary: 1-4 paragraph recap of the whole session: what the party did, found and decided.
         """
         if not review:
             store.upsert_session(campaign, number, title=title, summary=summary)
         result.update(title=title, summary=summary)
         return "Session saved." if not review else "Recap noted for the DM to review."
 
+    existing = NEW_SESSION if session is None else ADDING_TO_SESSION.format(
+        number=number, title=session["title"] or "(untitled)", summary=session["summary"] or "(no recap yet)",
+        uploads=", ".join(u["name"] for u in session["uploads"]) or "material entered by hand",
+    )
     system = INGEST_SYSTEM.format(
-        name=campaign.name, number=number, catalog=catalog(store, campaign), **_role_parts(campaign)
+        name=campaign.name, number=number, existing=existing, catalog=catalog(store, campaign),
+        **_role_parts(campaign),
     )
     agent = Agent(
         store=store, ctx=ctx, system=system, effort=kw.pop("effort", "high"),
         extra_tools=[finish_session], proposals=proposals, **kw,
     )
     result["notes"] = agent.send(
-        [
-            {
-                "type": "text",
-                "text": f"<transcript session=\"{number}\">\n{transcript}\n</transcript>",
-            }
-        ]
+        [{"type": "text", "text": f"<material session=\"{number}\" name=\"{name}\">\n{text}\n</material>"}]
     )
     if review:
-        return result | {"review": "pending", "proposals": proposals, "source_id": source_id, "played_on": played_on}
-    result["journal_entries"] = len(world.events(session=number))
-    result["facts"] = store.conn.execute(
-        "SELECT count(*) FROM facts WHERE run_id = ?", (ctx.run_id,)
-    ).fetchone()[0] if ctx.run_id else 0
+        return result | {"review": "pending", "proposals": proposals, "blob": blob, "name": name,
+                         "played_on": played_on}
+    result["upload"] = ctx.run_id
+    result["journal_entries"] = len(World(store, campaign).events(session=number))
+    result["facts"] = store.conn.execute("SELECT count(*) FROM facts WHERE run_id = ?", (ctx.run_id,)).fetchone()[0]
     return result
 
 
-def _replace_session(store: Store, campaign: Campaign, number: int, played_on: str | None, source_id: int) -> None:
-    """Session `number` is to be what this source says: what an earlier recording of it wrote is taken back."""
-    try:
-        World(store, campaign).revert_session(number)
-    except KeyError:
-        pass
-    store.upsert_session(campaign, number, played_on=played_on, source_id=source_id)
+def _record_upload(store: Store, campaign: Campaign, number: int, blob: str, name: str, played_on: str | None) -> int:
+    """Make the upload: the session if it's new, the text as a searchable source, and the run that
+    what it records belongs to (which remembers the recap it may rewrite)."""
+    from .ingest import parse_markdown
+
+    session = next((x for x in store.sessions(campaign) if x["number"] == number), None)
+    store.upsert_session(campaign, number, played_on=played_on if session is None or not session["played_on"] else None)
+    taken = {x["title"] for x in store.sources(campaign)}
+    title = f"Session {number}: {name}"
+    title = next(t for n in range(1, len(taken) + 2) if (t := title if n == 1 else f"{title} ({n})") not in taken)
+    text = store.blobs.get(blob).decode("utf-8", errors="replace")
+    source_id = store.add_source(campaign, title, "transcript", parse_markdown(text), blob=blob, filename=name)
+    run_id = World(store, campaign).start_run("ingest", session=number, source_id=source_id, label=name)
+    before = {"title": session["title"], "summary": session["summary"]} if session else {"title": "", "summary": ""}
+    with store.conn:
+        store.conn.execute("UPDATE runs SET recap_before = ? WHERE id = ?", (json.dumps(before), run_id))
+    return run_id
 
 
 def apply_ingest(
     store: Store, campaign: Campaign, review: dict[str, Any], accepted: list[int],
     edits: dict[int, dict[str, Any]] | None = None, title: str | None = None, summary: str | None = None,
 ) -> dict[str, Any]:
-    """Make the changes the DM accepted from an ingest's review, in the order the assistant proposed them,
-    with their edits, and the recap as they left it. Session N then is what they accepted, replacing what
-    an earlier recording of it wrote."""
+    """Make the upload and the changes the DM accepted from its review, in the order the assistant
+    proposed them, with their edits, and the recap as they left it. What the session already had stays."""
     from anthropic import beta_tool
 
     number = review["session"]
-    _replace_session(store, campaign, number, review.get("played_on"), review["source_id"])
-    ctx = ToolContext(store, campaign, session=number, run_kind="ingest")
+    run_id = _record_upload(store, campaign, number, review["blob"], review["name"], review.get("played_on"))
+    ctx = ToolContext(store, campaign, session=number, run_kind="ingest", run_id=run_id)
     tools = {f.__name__: beta_tool(f) for f in build_tools(ctx)}
     proposals = review["proposals"]
     made, problems = 0, []
@@ -559,8 +588,9 @@ def apply_ingest(
     store.upsert_session(campaign, number, title=(title if title is not None else review.get("title")) or "",
                          summary=(summary if summary is not None else review.get("summary")) or "")
     world = World(store, campaign)
-    facts = store.conn.execute("SELECT count(*) FROM facts WHERE run_id = ?", (ctx.run_id,)).fetchone()[0] if ctx.run_id else 0
-    return {"made": made, "problems": problems, "facts": facts, "journal_entries": len(world.events(session=number))}
+    facts = store.conn.execute("SELECT count(*) FROM facts WHERE run_id = ?", (run_id,)).fetchone()[0]
+    return {"made": made, "problems": problems, "facts": facts, "upload": run_id,
+            "journal_entries": len(world.events(session=number))}
 
 
 _DESCRIBE: dict[str, Callable[[dict[str, Any]], str]] = {

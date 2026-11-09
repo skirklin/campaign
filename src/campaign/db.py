@@ -118,7 +118,8 @@ CREATE INDEX digest_nodes_source ON digest_nodes(source_id, seq);
 -- Sessions are the world's clock: facts are true from one session number
 -- to another. Session 0 is the state of the world before play begins. A
 -- recap stands for a stretch of play written up afterwards (from memory, from
--- notes) rather than one evening's transcript, on the same clock.
+-- notes) rather than one evening's transcript, on the same clock. What a
+-- played session was read from are its uploads: its ingest runs, below.
 CREATE TABLE sessions (
     id           INTEGER PRIMARY KEY,
     campaign_id  INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
@@ -126,7 +127,6 @@ CREATE TABLE sessions (
     played_on    TEXT,
     title        TEXT NOT NULL DEFAULT '',
     summary      TEXT NOT NULL DEFAULT '',
-    source_id    INTEGER REFERENCES sources(id) ON DELETE SET NULL,
     kind         TEXT NOT NULL DEFAULT 'played' CHECK (kind IN ('played', 'recap')),
     covers       INTEGER,                -- a recap: about how many sessions of play it stands for
     UNIQUE (campaign_id, number)
@@ -134,7 +134,10 @@ CREATE TABLE sessions (
 
 -- Everything that writes to the world model does so as a run: a digest
 -- being applied, a session ingest, a chat, a manual edit. Deleting a run
--- undoes it (see the triggers and cascades below).
+-- undoes it (see the triggers and cascades below). An ingest run is one
+-- upload about a session (a transcript, notes, a recap): `source_id` is the
+-- text, and `recap_before` the session's title and recap as they were before
+-- it, so reverting the latest upload puts them back.
 CREATE TABLE runs (
     id           INTEGER PRIMARY KEY,
     campaign_id  INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
@@ -143,6 +146,7 @@ CREATE TABLE runs (
     source_id    INTEGER REFERENCES sources(id) ON DELETE CASCADE,
     input_key    TEXT,                     -- for book runs: the digest that was applied
     label        TEXT NOT NULL DEFAULT '',
+    recap_before TEXT,                     -- for ingest runs: {"title", "summary"} JSON
     created_at   TEXT NOT NULL
 );
 
@@ -456,32 +460,52 @@ CREATE INDEX inventory_log_campaign ON inventory_log(campaign_id, id);
 # While this is a prototype there are no migrations: a schema change edits
 # SCHEMA and bumps the version, and if the data in the one deployment is worth
 # keeping, a step from the version before goes in UPGRADES until it has run.
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 22
 
 # Steps that bring the deployed database up to SCHEMA_VERSION, keyed by the
 # version they start from. Delete each once the deployment has taken it.
 # They run with foreign keys off, so a table can be rebuilt without its
 # dependents cascading away; references are checked afterwards.
 UPGRADES: dict[int, str] = {
-    # 20: encounters, saved apart from the conversations they were made in.
-    20: """
--- Fights put together for a campaign (by the assistant's encounter tool), each private to
--- the person it was made for, like their conversations, and kept apart from them: deleting
--- the conversation an encounter was made in keeps the encounter. `spec` is what's in the
--- fight (encounters.Spec); `state` is the fight being run (turn order, hit points,
--- conditions), NULL until it starts.
-CREATE TABLE encounters (
-    id               INTEGER PRIMARY KEY,
-    campaign_id      INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
-    user_id          INTEGER REFERENCES users(id) ON DELETE CASCADE,
-    conversation_id  INTEGER REFERENCES conversations(id) ON DELETE SET NULL,
-    title            TEXT NOT NULL,
-    spec             TEXT NOT NULL,
-    state            TEXT,
-    created_at       TEXT NOT NULL,
-    updated_at       TEXT NOT NULL
+    # 21: a session has as many uploads as it was given (its ingest runs), not one source.
+    21: """
+ALTER TABLE runs ADD COLUMN recap_before TEXT;
+UPDATE runs SET source_id = (SELECT s.source_id FROM sessions s
+                             WHERE s.campaign_id = runs.campaign_id AND s.number = runs.session)
+ WHERE kind = 'ingest' AND source_id IS NULL;
+-- A session read from a transcript that recorded nothing still lists it.
+INSERT INTO runs (campaign_id, kind, session, source_id, label, created_at)
+SELECT s.campaign_id, 'ingest', s.number, s.source_id, coalesce(src.filename, src.title), src.created_at
+  FROM sessions s JOIN sources src ON src.id = s.source_id
+ WHERE NOT EXISTS (SELECT 1 FROM runs r WHERE r.kind = 'ingest' AND r.source_id = s.source_id);
+-- A session's uploads are made when it's applied now: one waiting for review keeps its text
+-- (blob) and name, and no source of its own. Transcripts no session was built from go.
+UPDATE jobs SET result = json_remove(json_set(result,
+       '$.blob', coalesce((SELECT blob FROM sources WHERE id = json_extract(jobs.result, '$.source_id')),
+                          json_extract(input, '$.transcript_blob'), json_extract(input, '$.blob')),
+       '$.name', coalesce(json_extract(input, '$.name'), 'notes')), '$.source_id')
+ WHERE kind = 'ingest' AND json_extract(result, '$.review') = 'pending';
+CREATE TEMP TABLE unused AS SELECT id FROM sources WHERE kind = 'transcript'
+   AND id NOT IN (SELECT source_id FROM runs WHERE source_id IS NOT NULL);
+DELETE FROM chunks WHERE source_id IN (SELECT id FROM unused);
+DELETE FROM nodes WHERE source_id IN (SELECT id FROM unused);
+DELETE FROM digest_nodes WHERE source_id IN (SELECT id FROM unused);
+DELETE FROM sources WHERE id IN (SELECT id FROM unused);
+DROP TABLE unused;
+CREATE TABLE sessions_new (
+    id           INTEGER PRIMARY KEY,
+    campaign_id  INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    number       INTEGER NOT NULL,
+    played_on    TEXT,
+    title        TEXT NOT NULL DEFAULT '',
+    summary      TEXT NOT NULL DEFAULT '',
+    kind         TEXT NOT NULL DEFAULT 'played' CHECK (kind IN ('played', 'recap')),
+    covers       INTEGER,
+    UNIQUE (campaign_id, number)
 );
-CREATE INDEX encounters_campaign ON encounters(campaign_id, user_id, updated_at);
+INSERT INTO sessions_new SELECT id, campaign_id, number, played_on, title, summary, kind, covers FROM sessions;
+DROP TABLE sessions;
+ALTER TABLE sessions_new RENAME TO sessions;
 """,
 }
 
@@ -1240,7 +1264,6 @@ class Store:
         played_on: str | None = None,
         title: str | None = None,
         summary: str | None = None,
-        source_id: int | None = None,
         kind: str | None = None,
         covers: int | None = None,
     ) -> int:
@@ -1256,7 +1279,6 @@ class Store:
                 ("played_on", played_on),
                 ("title", title),
                 ("summary", summary),
-                ("source_id", source_id),
                 ("kind", kind),
                 ("covers", covers),
             ):
@@ -1271,10 +1293,26 @@ class Store:
         return row["id"]
 
     def sessions(self, campaign: Campaign) -> list[dict[str, Any]]:
+        """The sessions, oldest first, each with its uploads (what it was read from), oldest first."""
+        uploads: dict[int, list[dict[str, Any]]] = {}
+        for u in self.uploads(campaign):
+            uploads.setdefault(u["session"], []).append(u)
         rows = self.conn.execute(
             "SELECT id, number, played_on, title, summary, kind, covers FROM sessions"
             " WHERE campaign_id = ? ORDER BY number",
             (campaign.id,),
+        )
+        return [dict(r) | {"uploads": uploads.get(r["number"], [])} for r in rows]
+
+    def uploads(self, campaign: Campaign, session: int | None = None) -> list[dict[str, Any]]:
+        """What sessions were read from: one row per ingest run, with its source and what it recorded."""
+        rows = self.conn.execute(
+            "SELECT r.id, r.session, r.label AS name, r.source_id, r.created_at,"
+            " (SELECT count(*) FROM facts f WHERE f.run_id = r.id) AS facts,"
+            " (SELECT count(*) FROM events e WHERE e.run_id = r.id) AS events"
+            " FROM runs r WHERE r.campaign_id = ? AND r.kind = 'ingest' AND (? IS NULL OR r.session = ?)"
+            " ORDER BY r.id",
+            (campaign.id, session, session),
         )
         return [dict(r) for r in rows]
 
