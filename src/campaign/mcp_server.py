@@ -61,8 +61,9 @@ journal, and the party's character sheets.
 
 Start with list_campaigns. Every other tool takes `campaign`, the slug it
 returns. Before answering about a campaign, call campaign_overview once: it
-says how that campaign's material is organized and, where the user is a
-player, what must not be revealed. Spoilers are also filtered on the
+says how that campaign's material is organized and what must not be
+revealed: to a player, what their party hasn't learned; for a DM, how to
+keep secrets out of what players read (names and aliases included). Spoilers are also filtered on the
 server, so in a player's campaign the tools only return what the party
 knows.
 

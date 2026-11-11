@@ -103,15 +103,14 @@ class World:
 
     @property
     def _alias_filter(self) -> str:
-        """SQL condition on an aliases row: in a player's view, hide names that came from DM-only material.
+        """SQL condition on an aliases row: in a player's view, only names the party knows.
 
-        "The windmill hag" from the module would give away who the kindly
-        baker is, as surely as a fact would.
+        "The windmill hag" would give away who the kindly baker is, and a
+        disguise's true name who the stranger is, as surely as a fact would.
         """
         if not self.campaign.spoiler_safe:
             return ""
-        return (" AND run_id NOT IN (SELECT r.id FROM runs r JOIN sources s ON s.id = r.source_id"
-                " WHERE r.kind = 'book' AND s.dm_only = 1)")
+        return f" AND party_knows_from IS NOT NULL AND party_knows_from <= {int(self.now)}"
 
     @property
     def now(self) -> int:
@@ -197,8 +196,12 @@ class World:
         if row is None:
             return None
         e = dict(row)
-        e["aliases"] = [r["alias"] for r in self.conn.execute(
-            f"SELECT alias FROM aliases WHERE entity_id = ?{self._alias_filter} ORDER BY id", (entity_id,))]
+        names = self.conn.execute(
+            f"SELECT alias, party_knows_from FROM aliases WHERE entity_id = ?{self._alias_filter} ORDER BY id",
+            (entity_id,)).fetchall()
+        e["aliases"] = [r["alias"] for r in names]
+        if secret := [r["alias"] for r in names if r["party_knows_from"] is None]:
+            e["secret_aliases"] = secret  # the DM's view: names the players don't see
         return e
 
     def resolve(self, name: str, kind: str | None = None, every_alias: bool = False) -> dict[str, Any] | None:
@@ -276,15 +279,79 @@ class World:
             return
         self.add_alias(entity_id, e["name"], run)
 
-    def add_alias(self, entity_id: int, alias: str, run_id: int) -> None:
+    def add_alias(self, entity_id: int, alias: str, run_id: int, known_from: int | None = 0) -> None:
+        """Another name the entity answers to, known to the party from session `known_from` (None: a
+        name they don't know). A name it already has keeps the earlier of the two times it was known."""
         alias = alias.strip()
         e = self.entity(entity_id)
         if not alias or not e or alias.lower() == e["name"].lower():
             return
         with self.conn:
             self.conn.execute(
-                "INSERT OR IGNORE INTO aliases (entity_id, alias, run_id) VALUES (?, ?, ?)", (entity_id, alias, run_id)
+                "INSERT INTO aliases (entity_id, alias, run_id, party_knows_from) VALUES (?, ?, ?, ?)"
+                " ON CONFLICT (entity_id, alias) DO UPDATE SET party_knows_from = CASE"
+                "  WHEN aliases.party_knows_from IS NULL THEN excluded.party_knows_from"
+                "  WHEN excluded.party_knows_from IS NULL THEN aliases.party_knows_from"
+                "  ELSE min(aliases.party_knows_from, excluded.party_knows_from) END",
+                (entity_id, alias, run_id, known_from),
             )
+
+    def alias_known(self, entity_id: int, alias: str, known_from: int | None) -> bool:
+        """Say whether, and since when, the party knows the entity by this name. False if it has no such alias."""
+        with self.conn:
+            return self.conn.execute(
+                "UPDATE aliases SET party_knows_from = ? WHERE entity_id = ? AND alias = ?",
+                (known_from, entity_id, alias.strip()),
+            ).rowcount > 0
+
+    def remove_alias(self, entity_id: int, alias: str) -> bool:
+        """The entity no longer answers to this name. False if it had no such alias."""
+        with self.conn:
+            gone = self.conn.execute(
+                "DELETE FROM aliases WHERE entity_id = ? AND alias = ?", (entity_id, alias.strip())).rowcount > 0
+        if gone:
+            self._remove_orphans()
+        return gone
+
+    def rename(self, entity_id: int, name: str) -> dict[str, Any]:
+        """Give an entity a different name. One of its aliases that is the new name stops being one;
+        the old name isn't kept (add it as an alias for that). ValueError if another has the name."""
+        e = self.entity(entity_id)
+        name = name.strip()
+        if e is None or not name:
+            raise ValueError("no such entity, or no name")
+        try:
+            with self.conn:
+                self.conn.execute("UPDATE entities SET name = ? WHERE id = ?", (name, entity_id))
+                self.conn.execute("DELETE FROM aliases WHERE entity_id = ? AND alias = ?", (entity_id, name))
+        except sqlite3.IntegrityError:
+            raise ValueError(f"another {e['kind']} is already called {name!r}") from None
+        return self.entity(entity_id)
+
+    def deletable(self, entity_id: int) -> str | None:
+        """Why an entity can't be deleted outright, or None if it can: it's from the reference material,
+        or is a character or holds or is something in the party's inventory."""
+        checks = (
+            ("the reference material describes it", "SELECT 1 FROM facts f JOIN runs r ON r.id = f.run_id"
+             " WHERE f.entity_id = :id AND r.kind = 'book' UNION SELECT 1 FROM aliases a JOIN runs r ON r.id = a.run_id"
+             " WHERE a.entity_id = :id AND r.kind = 'book'"),
+            ("it's a character in the party", "SELECT 1 FROM characters WHERE entity_id = :id"),
+            ("it's in the party's inventory", "SELECT 1 FROM holdings WHERE :id IN (holder_id, item_id)"
+             " UNION SELECT 1 FROM purses WHERE holder_id = :id"),
+        )
+        for why, sql in checks:
+            if self.conn.execute(sql, {"id": entity_id}).fetchone():
+                return why
+        return None
+
+    def delete_entity(self, entity_id: int) -> bool:
+        """Delete an entity that shouldn't exist, and everything recorded about it (see deletable).
+        Journal entries stay, without it among who was involved."""
+        if self.entity(entity_id) is None or self.deletable(entity_id):
+            return False
+        with self.conn:
+            self.conn.execute("DELETE FROM entities WHERE id = ? AND campaign_id = ?", (entity_id, self.campaign.id))
+        return True
 
     def merge(self, keep_id: int, other_id: int) -> dict[str, Any]:
         """Fold `other` into `keep`: its facts, aliases and events move over and its name becomes an alias."""
@@ -379,7 +446,19 @@ class World:
             ).lastrowid
         return {"id": fact_id, "ended": closed}
 
+    # What was written about play (from a session's material, in chat, by hand) can be corrected or taken
+    # back; what the reference material says is changed by digesting it again, not piecemeal.
+    _FROM_PLAY = "SELECT id FROM runs WHERE campaign_id = ? AND kind != 'book'"
+
+    def _fact(self, fact_id: int, from_play: bool = False) -> sqlite3.Row | None:
+        """A fact of this campaign, and with `from_play`, one written about play."""
+        play = f" AND run_id IN ({self._FROM_PLAY})" if from_play else ""
+        return self.conn.execute(f"SELECT * FROM facts WHERE id = ? AND campaign_id = ?{play}",
+                                 [fact_id, self.campaign.id, *([self.campaign.id] if from_play else [])]).fetchone()
+
     def end_fact(self, fact_id: int, run_id: int, session: int) -> bool:
+        if self._fact(fact_id) is None:
+            return False
         with self.conn:
             return self.conn.execute(
                 "UPDATE facts SET valid_to = ?, closed_by_run = ?"
@@ -387,16 +466,9 @@ class World:
                 (session, run_id, fact_id, self.campaign.id),
             ).rowcount > 0
 
-    # Writes a person made (in chat or by hand) can be taken back; what came from a book or a session
-    # transcript is changed by re-running that, not piecemeal.
-    _RETRACTABLE = "SELECT id FROM runs WHERE campaign_id = ? AND kind IN ('chat', 'manual')"
-
     def retract_fact(self, fact_id: int) -> bool:
         """Delete a fact recorded by mistake, reopening the value it replaced. False if it isn't one."""
-        f = self.conn.execute(
-            f"SELECT * FROM facts WHERE id = ? AND campaign_id = ? AND run_id IN ({self._RETRACTABLE})",
-            (fact_id, self.campaign.id, self.campaign.id),
-        ).fetchone()
+        f = self._fact(fact_id, from_play=True)
         if f is None:
             return False
         with self.conn:
@@ -410,18 +482,52 @@ class World:
         self._remove_orphans()
         return True
 
+    def edit_fact(self, fact_id: int, statement: str | None = None, value: str | None = None) -> bool:
+        """Reword a fact about play, or change its attribute's value; its dates stay. False if it isn't one."""
+        f = self._fact(fact_id, from_play=True)
+        if f is None:
+            return False
+        statement = statement.strip() if statement and statement.strip() else f["statement"]
+        with self.conn:
+            self.conn.execute("UPDATE facts SET statement = ?, value = ? WHERE id = ?",
+                              (statement, f["value"] if value is None else value, fact_id))
+            # The search index follows the text (facts_fts has no update trigger).
+            self.conn.execute("INSERT INTO facts_fts(facts_fts, rowid, statement) VALUES ('delete', ?, ?)",
+                              (fact_id, f["statement"]))
+            self.conn.execute("INSERT INTO facts_fts(rowid, statement) VALUES (?, ?)", (fact_id, statement))
+        return True
+
+    def keep_from_party(self, fact_id: int) -> bool:
+        """The party doesn't know this fact after all (it was recorded as known by mistake)."""
+        if self._fact(fact_id) is None:
+            return False
+        with self.conn:
+            return self.conn.execute(
+                "UPDATE facts SET party_knows_from = NULL WHERE id = ? AND campaign_id = ? AND party_knows_from IS NOT NULL",
+                (fact_id, self.campaign.id),
+            ).rowcount > 0
+
     def delete_event(self, event_id: int) -> bool:
-        """Delete a journal entry recorded by mistake. False if it isn't one."""
+        """Delete a journal entry recorded by mistake. False if there's no such entry."""
         with self.conn:
             gone = self.conn.execute(
-                f"DELETE FROM events WHERE id = ? AND campaign_id = ? AND run_id IN ({self._RETRACTABLE})",
-                (event_id, self.campaign.id, self.campaign.id),
-            ).rowcount > 0
+                "DELETE FROM events WHERE id = ? AND campaign_id = ?", (event_id, self.campaign.id)).rowcount > 0
         if gone:
             self._remove_orphans()
         return gone
 
+    def edit_event(self, event_id: int, text: str) -> bool:
+        """Reword a journal entry. False if there's no such entry."""
+        if not text.strip():
+            return False
+        with self.conn:
+            return self.conn.execute(
+                "UPDATE events SET text = ? WHERE id = ? AND campaign_id = ?",
+                (text.strip(), event_id, self.campaign.id)).rowcount > 0
+
     def party_learned(self, fact_id: int, session: int) -> bool:
+        if self._fact(fact_id) is None:
+            return False
         with self.conn:
             return self.conn.execute(
                 "UPDATE facts SET party_knows_from = ? WHERE id = ? AND campaign_id = ?"
@@ -653,6 +759,14 @@ class World:
                 (source_id,),
             )
         }
+        # Whether the party knows the book's names, as play left it: learned, or kept from them.
+        names_known = {
+            (r["name"].lower(), r["alias"].lower()): r["party_knows_from"]
+            for r in self.conn.execute(
+                "SELECT e.name, a.alias, a.party_knows_from FROM aliases a JOIN entities e ON e.id = a.entity_id"
+                " JOIN runs r ON r.id = a.run_id WHERE r.kind = 'book' AND r.source_id = ?", (source_id,),
+            )
+        }
         src = self.store.source(source_id)
         with self.conn:
             self.conn.execute("DELETE FROM runs WHERE kind = 'book' AND source_id = ?", (source_id,))
@@ -666,7 +780,8 @@ class World:
             e = self._match_book_entry(item) or self._new_entity(item["name"], item["kind"])
             key_alias = [item["area_key"]] if item.get("area_key") else []
             for alias in (item["name"], *item.get("aliases", []), *key_alias):
-                self.add_alias(e["id"], alias, run)
+                self.add_alias(e["id"], alias, run, names_known.get((e["name"].lower(), alias.strip().lower()),
+                                                                    0 if known else None))
             pages = item.get("pages", [])
             statements = ([item["summary"]] if item.get("summary") else []) + list(item.get("facts", []))
             statements += [f"{TREASURE}{t}" for t in item.get("treasure") or []]
@@ -746,7 +861,8 @@ class World:
             for f in self.facts(entity_id)
         ]
         events = [(ev["session"], ev["text"]) for ev in self.events(entity_id=entity_id)]
-        blob = json.dumps([SUMMARY_VERSION, e["name"], facts, events], ensure_ascii=False)
+        # The names it goes by are in the summary's prompt: a name the party doesn't know mustn't reach theirs.
+        blob = json.dumps([SUMMARY_VERSION, e["name"], e["aliases"], facts, events], ensure_ascii=False)
         return hashlib.sha256(blob.encode()).hexdigest()
 
     def cached_summary(self, entity_id: int) -> str | None:

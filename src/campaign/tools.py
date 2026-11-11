@@ -439,31 +439,48 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
             return session
         return f"There's no session {session}; list_sessions shows them, and add_recap adds one for past play."
 
-    def add_recap(title: str, summary: str, covers: int | None = None, played: str = "",
-                  number: int | None = None) -> str:
+    def add_recap(title: str, summary: str, covers: int | None = None, played: str = "") -> str:
         """Write up a stretch of past play that has no transcript (the campaign before the app, or
         sessions nobody recorded) as a recap: a session record on the same timeline as played
         sessions, so what happened in it is dated and found like everything else.
 
         Add recaps oldest first; each comes after every session so far. Then date what happened in
         it to its number: record_fact, end_fact, party_learned and add_journal_entry take session.
-        With number, rewrites that recap's title, summary or covers instead.
+        To rewrite a recap, use edit_session.
 
         Args:
             title: A few words, e.g. "Estoria and the Great Labors".
             summary: The recap a player could read: what happened, in order.
             covers: About how many sessions of play it stands for.
             played: When, roughly, e.g. "2024".
-            number: An existing recap to rewrite.
         """
-        if number is not None:
-            if not any(s["number"] == number and s["kind"] == "recap" for s in store.sessions(campaign)):
-                return f"Session {number} isn't a recap."
-        else:
-            number = store.next_ingest_session(campaign)
+        number = store.next_ingest_session(campaign)
         store.upsert_session(campaign, number, played_on=played or None, title=title.strip(),
                              summary=summary.strip(), kind="recap", covers=covers)
         return f"Recap {number}: {title.strip()}" + (f" (about {covers} sessions)" if covers else "") + "."
+
+    def edit_session(number: int, title: str | None = None, summary: str | None = None,
+                     covers: int | None = None, played: str | None = None) -> str:
+        """Rewrite a session's title or recap (a played session's or a recap's), e.g. to correct it or to
+        take out something the players mustn't read. Everyone in the campaign reads these. Only what's
+        given changes; read the session first (list_sessions) and send the whole new recap.
+
+        Args:
+            number: The session, from list_sessions.
+            title: Its new title.
+            summary: Its new recap.
+            covers: For a recap: about how many sessions of play it stands for.
+            played: When it was played, e.g. "2026-11-08" or "2024".
+        """
+        session = next((x for x in store.sessions(campaign) if x["number"] == number), None)
+        if session is None:
+            return f"There's no session {number}; list_sessions shows them."
+        if covers is not None and session["kind"] != "recap":
+            return f"Session {number} was played, not a recap: covers is only for recaps."
+        store.upsert_session(campaign, number, played_on=played.strip() if played is not None else None,
+                             title=title.strip() if title is not None else None,
+                             summary=summary.strip() if summary is not None else None, covers=covers)
+        return f"Session {number} rewritten."
 
     def recent_journal(session: int | None = None, limit: int = 40) -> str:
         """Read the campaign journal: the ordered log of what happened.
@@ -503,8 +520,9 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
             kind: npc, pc, monster, location, item, quest, faction or lore. Needed only for new entities.
             attribute: Single-valued property this sets, if any.
             value: Short value for the attribute, e.g. "dead" or "Vallaki".
-            aliases: Other names this entity goes by, to remember.
-            party_knows: False if this is true but the party hasn't learned it.
+            aliases: Other names this entity goes by. The party knows them exactly when it knows this fact:
+                a name that gives a secret away goes with a fact the party doesn't know, or in set_alias.
+            party_knows: False if this is true but the party hasn't learned it (and the aliases with it).
             modality: "fact", or "rumor" for unconfirmed claims, or "possible" for plans and threats that haven't happened.
             session: When it became true, if earlier than the latest session (a recap's number, writing up the past).
         """
@@ -515,12 +533,12 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
             e = world.ensure_entity(entity, kind)
         if modality not in ("fact", "rumor", "possible"):
             return "modality must be fact, rumor or possible."
-        run = ctx.run()
-        for alias in aliases or []:
-            world.add_alias(e["id"], alias, run)
         when = _when(session)
         if isinstance(when, str):
             return when
+        run = ctx.run()
+        for alias in aliases or []:
+            world.add_alias(e["id"], alias, run, when if party_knows else None)
         r = world.record(e["id"], statement, run, when, attribute=attribute, value=value,
                          modality=modality, party_knows=party_knows)
         ended = f"; ended the previous {attribute}" if r["ended"] else ""
@@ -542,25 +560,158 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
     def retract_fact(fact_id: int) -> str:
         """Delete a fact that was recorded by mistake (it never was true), as if it had never been
         recorded; a value it replaced is current again. For something that was true and stopped
-        being true, use end_fact instead. Only facts recorded in chat or by hand.
+        being true, use end_fact instead. Any fact about play (from a session, a recap, chat);
+        what the reference material says can't be deleted, only kept from the party
+        (keep_from_party) or ended.
 
         Args:
             fact_id: The fact_id shown by lookup.
         """
         if world.retract_fact(fact_id):
             return f"Deleted fact {fact_id}."
-        return f"No fact {fact_id} recorded in chat or by hand (book and session facts can't be deleted here)."
+        return (f"No fact {fact_id} about play. The reference material's facts can't be deleted:"
+                " keep_from_party hides one from the players, end_fact ends it.")
+
+    def edit_fact(fact_id: int, statement: str | None = None, value: str | None = None) -> str:
+        """Reword a fact about play, or correct its attribute's value, keeping when it was true. For a
+        wrong name, number or spelling, or wording that says more than the party should read.
+
+        Args:
+            fact_id: The fact_id shown by lookup.
+            statement: The fact as it should read.
+            value: The attribute's correct value, if it has an attribute.
+        """
+        if world.edit_fact(fact_id, statement, value):
+            return f"Fact {fact_id} rewritten."
+        return f"No fact {fact_id} about play (the reference material's facts can't be reworded)."
+
+    def keep_from_party(fact_id: int) -> str:
+        """Hide a fact from the players: the party doesn't know it (yet), though it was recorded as
+        known. Any fact, the reference material's too. party_learned undoes it when they find out.
+
+        Args:
+            fact_id: The fact_id shown by lookup.
+        """
+        if world.keep_from_party(fact_id):
+            return f"Fact {fact_id} is kept from the party."
+        return f"No fact {fact_id} the party knows."
 
     def delete_journal_entry(event_id: int) -> str:
-        """Delete a journal entry that was recorded by mistake (it didn't happen). Only entries added in
-        chat or by hand.
+        """Delete a journal entry that was recorded by mistake (it didn't happen), from any session.
 
         Args:
             event_id: The entry's id, from recent_journal.
         """
         if world.delete_event(event_id):
             return f"Deleted journal entry {event_id}."
-        return f"No journal entry {event_id} added in chat or by hand."
+        return f"No journal entry {event_id}."
+
+    def edit_journal_entry(event_id: int, text: str) -> str:
+        """Reword a journal entry, from any session: to correct it, or to take out what the players
+        mustn't read (everyone in the campaign reads the journal).
+
+        Args:
+            event_id: The entry's id, from recent_journal.
+            text: The entry as it should read.
+        """
+        if world.edit_event(event_id, text):
+            return f"Journal entry {event_id} rewritten."
+        return f"No journal entry {event_id}." if text.strip() else "An entry needs text; delete_journal_entry removes one."
+
+    # -- names ---------------------------------------------------------------
+
+    def _entity(name: str) -> dict[str, Any] | str:
+        e = world.resolve(name)
+        return e if e else f"No entity called {name!r}. Try find_entities."
+
+    def set_alias(entity: str, alias: str, party_knows: bool = True, session: int | None = None) -> str:
+        """Give an entity another name it goes by, or change whether the party knows it by that name.
+
+        Players see every alias the party knows beside the entity's name, so a
+        name that gives a secret away (a disguise's true name, "the windmill
+        hag" for the kindly baker) needs party_knows false until they find out;
+        then set it again with party_knows true.
+
+        Args:
+            entity: The entity, by its name or an alias.
+            alias: The other name.
+            party_knows: Whether the party knows it by this name.
+            session: When they learned it, if earlier than the latest session.
+        """
+        e = _entity(entity)
+        if isinstance(e, str):
+            return e
+        if alias.strip().lower() == e["name"].lower():
+            return f"{alias!r} is {e['name']}'s own name, not an alias; rename_entity changes that."
+        when = _when(session)
+        if isinstance(when, str):
+            return when
+        known = when if party_knows else None
+        if not world.alias_known(e["id"], alias, known):
+            world.add_alias(e["id"], alias, ctx.run(), known)
+        return f"{e['name']} goes by {alias.strip()!r}" + (
+            f", known to the party from session {known}." if known is not None else "; the party doesn't know it.")
+
+    def remove_alias(entity: str, alias: str) -> str:
+        """Take a name away from an entity: it never went by it, or it's a name players mustn't see and
+        the DM doesn't need (set_alias with party_knows false hides one instead).
+
+        Args:
+            entity: The entity, by its name or another alias.
+            alias: The name to remove.
+        """
+        e = _entity(entity)
+        if isinstance(e, str):
+            return e
+        if world.remove_alias(e["id"], alias):
+            return f"{e['name']} no longer goes by {alias.strip()!r}."
+        return f"{e['name']} has no alias {alias!r}; its aliases are: {'; '.join(e['aliases']) or 'none'}."
+
+    def rename_entity(entity: str, name: str, keep_old_name: bool = False) -> str:
+        """Change an entity's own name: misspelled, or the wrong one. Players see the name of anything
+        the party knows about, so a secret identity is never an entity's name: give the persona its
+        own entity under the name the party knows.
+
+        Args:
+            entity: The entity, by its name or an alias.
+            name: Its name as it should be.
+            keep_old_name: Keep the old name as an alias the party knows (when it's still a name it goes by).
+        """
+        e = _entity(entity)
+        if isinstance(e, str):
+            return e
+        if (linked := store.character_for_entity(e["id"])) is not None:
+            try:
+                store.update_character_details(linked["id"], name=name, reason=f"renamed from {e['name']}")
+            except ValueError as err:
+                return str(err)
+            if not keep_old_name:
+                world.remove_alias(e["id"], e["name"])
+            return f"Renamed {e['name']} to {name.strip()}, sheet and all."
+        try:
+            world.rename(e["id"], name)
+        except ValueError as err:
+            return f"Not renamed: {err}."
+        if keep_old_name:
+            world.add_alias(e["id"], e["name"], ctx.run(), ctx.clock)
+        return f"Renamed {e['name']} to {name.strip()}."
+
+    def delete_entity(entity: str) -> str:
+        """Delete an entity that shouldn't exist (a duplicate, a misheard name, one made to hold a
+        secret wrongly), with everything recorded about it. Journal entries stay, without it. Not for
+        something the reference material describes, a character, or what's in the party's inventory;
+        for a duplicate with its own history, merging (in the app) keeps both.
+
+        Args:
+            entity: The entity, by its name or an alias.
+        """
+        e = _entity(entity)
+        if isinstance(e, str):
+            return e
+        if why := world.deletable(e["id"]):
+            return f"{e['name']} can't be deleted: {why}."
+        world.delete_entity(e["id"])
+        return f"Deleted {e['name']}."
 
     def party_learned(fact_id: int, session: int | None = None) -> str:
         """Note that the party has now learned an existing fact (for example a secret from the book).
@@ -937,8 +1088,9 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
         get_character,
         inventory,
     ]
-    writers = [add_recap, record_fact, end_fact, retract_fact, party_learned, add_journal_entry, delete_journal_entry,
-               update_character, create_character, add_party_member, refresh_from_dndbeyond, add_items, change_item, give_item, link_item, change_coin,
+    writers = [add_recap, edit_session, record_fact, end_fact, retract_fact, edit_fact, party_learned, keep_from_party,
+               add_journal_entry, delete_journal_entry, edit_journal_entry, set_alias, remove_alias, rename_entity,
+               delete_entity, update_character, create_character, add_party_member, refresh_from_dndbeyond, add_items, change_item, give_item, link_item, change_coin,
                split_party_coin, define_item]
     assert {f.__name__ for f in writers} == set(WRITE_TOOLS), "WRITE_TOOLS names the tools that change things"
     return readers + (writers if writable else [])
@@ -946,7 +1098,9 @@ def build_tools(ctx: ToolContext, writable: bool = True) -> list[Callable[..., s
 
 # The tools that change the campaign: left out for a viewer, and only proposed during an ingest the DM reviews.
 WRITE_TOOLS = (
-    "add_recap", "record_fact", "end_fact", "retract_fact", "party_learned", "add_journal_entry", "delete_journal_entry",
+    "add_recap", "edit_session", "record_fact", "end_fact", "retract_fact", "edit_fact", "party_learned",
+    "keep_from_party", "add_journal_entry", "delete_journal_entry", "edit_journal_entry", "set_alias", "remove_alias",
+    "rename_entity", "delete_entity",
     "update_character", "create_character", "add_party_member", "refresh_from_dndbeyond", "add_items", "change_item",
     "give_item", "link_item", "change_coin", "split_party_coin", "define_item",
 )

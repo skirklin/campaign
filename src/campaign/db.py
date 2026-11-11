@@ -161,11 +161,15 @@ CREATE TABLE entities (
     UNIQUE (campaign_id, kind, name)
 );
 
+-- Other names an entity answers to. A name can give a secret away as surely
+-- as a fact ("the windmill hag" for the kindly baker, a disguise's true name),
+-- so like a fact it's known to the party from a session, or not at all.
 CREATE TABLE aliases (
-    id         INTEGER PRIMARY KEY,
-    entity_id  INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
-    alias      TEXT NOT NULL COLLATE NOCASE,
-    run_id     INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    id                INTEGER PRIMARY KEY,
+    entity_id         INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    alias             TEXT NOT NULL COLLATE NOCASE,
+    run_id            INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    party_knows_from  INTEGER,               -- session the party learned this name; NULL = they don't know it
     UNIQUE (entity_id, alias)
 );
 
@@ -460,13 +464,23 @@ CREATE INDEX inventory_log_campaign ON inventory_log(campaign_id, id);
 # While this is a prototype there are no migrations: a schema change edits
 # SCHEMA and bumps the version, and if the data in the one deployment is worth
 # keeping, a step from the version before goes in UPGRADES until it has run.
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 
 # Steps that bring the deployed database up to SCHEMA_VERSION, keyed by the
 # version they start from. Delete each once the deployment has taken it.
 # They run with foreign keys off, so a table can be rebuilt without its
 # dependents cascading away; references are checked afterwards.
+# 22: an alias is known to the party from a session, or not at all, like a fact. Names from a
+# DM-only book weren't shown to players; every other was, from the session it was written at.
+_ALIASES_KNOWN = """
+ALTER TABLE aliases ADD COLUMN party_knows_from INTEGER;
+UPDATE aliases SET party_knows_from = coalesce((SELECT r.session FROM runs r WHERE r.id = aliases.run_id), 0)
+ WHERE run_id NOT IN (SELECT r.id FROM runs r JOIN sources s ON s.id = r.source_id
+                      WHERE r.kind = 'book' AND s.dm_only = 1);
+"""
+
 UPGRADES: dict[int, str] = {
+    22: _ALIASES_KNOWN,
     # 21: a session has as many uploads as it was given (its ingest runs), not one source.
     21: """
 ALTER TABLE runs ADD COLUMN recap_before TEXT;
@@ -506,7 +520,7 @@ CREATE TABLE sessions_new (
 INSERT INTO sessions_new SELECT id, campaign_id, number, played_on, title, summary, kind, covers FROM sessions;
 DROP TABLE sessions;
 ALTER TABLE sessions_new RENAME TO sessions;
-""",
+""" + _ALIASES_KNOWN,
 }
 
 
@@ -770,22 +784,23 @@ class Store:
         return cur.rowcount > 0
 
     def set_source_dm_only(self, source_id: int, dm_only: bool) -> None:
-        """Make a source DM-only or visible to players, its world facts included.
+        """Make a source DM-only or visible to players, its world facts and names included.
 
         A book's facts are applied as known to the party (from session 0) when
         the book is visible to players, and unknown when it's DM-only. Changing
         the setting changes those facts to match. A fact the party learned in
         play (from a later session) keeps that.
         """
-        book_facts = ("run_id IN (SELECT id FROM runs WHERE kind = 'book' AND source_id = ?)")
+        from_book = ("run_id IN (SELECT id FROM runs WHERE kind = 'book' AND source_id = ?)")
         with self.conn:
             self.conn.execute("UPDATE sources SET dm_only = ? WHERE id = ?", (int(dm_only), source_id))
-            if dm_only:
-                self.conn.execute(
-                    f"UPDATE facts SET party_knows_from = NULL WHERE {book_facts} AND party_knows_from = 0", (source_id,))
-            else:
-                self.conn.execute(
-                    f"UPDATE facts SET party_knows_from = 0 WHERE {book_facts} AND party_knows_from IS NULL", (source_id,))
+            for table in ("facts", "aliases"):
+                if dm_only:
+                    self.conn.execute(f"UPDATE {table} SET party_knows_from = NULL"
+                                      f" WHERE {from_book} AND party_knows_from = 0", (source_id,))
+                else:
+                    self.conn.execute(f"UPDATE {table} SET party_knows_from = 0"
+                                      f" WHERE {from_book} AND party_knows_from IS NULL", (source_id,))
 
     def _visible_sources_clause(self, campaign: Campaign) -> str:
         return "s.campaign_id = ?" + (" AND s.dm_only = 0" if campaign.spoiler_safe else "")

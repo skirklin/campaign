@@ -1220,7 +1220,8 @@ export async function entityView(slug, id) {
     h("div.page-head", h("h1", e.name), h("span.badge", e.kind),
       e.character && h("a", { href: `#/characters/${e.character.id}` }, "Character sheet →"),
       h("span.spacer"), !e.summary && summary),
-    e.aliases.length > 0 && h("p.muted", "Also known as ", e.aliases.join(" · ")),
+    e.aliases.length > 0 && h("p.muted", "Also known as ", e.aliases.map((a) =>
+      (e.secret_aliases || []).includes(a) ? `${a} (party doesn't know)` : a).join(" · ")),
     e.summary && summary,
     now > 0 && h("label.as-of", h("span.as-of-title", "Show it as it was "), sliderLabel, slider),
     body,
