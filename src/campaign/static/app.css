@@ -413,17 +413,27 @@ mark { background: color-mix(in srgb, var(--warn) 30%, transparent); color: inhe
 
 a.card.entity { color: inherit; text-decoration: none; display: block; }
 a.card.entity:hover { border-color: var(--accent); }
-.as-of { display: flex; align-items: center; gap: .8rem; }
-.as-of input { flex: 1; accent-color: var(--accent); }
+.as-of { display: flex; align-items: center; gap: .3rem .8rem; flex-wrap: wrap; }
+.as-of input { flex: 1 1 12rem; accent-color: var(--accent); }
 .as-of-label { font-weight: 600; min-width: 11rem; white-space: nowrap; }
 .entity-body { display: flex; flex-direction: column; gap: .8rem; }
 .summary p { margin: 0 0 .4rem; }
 ul.facts { list-style: none; padding: 0; margin: .2rem 0; }
-li.fact { display: grid; grid-template-columns: 1fr auto; gap: .1rem .6rem; padding: .35rem 0; border-bottom: 1px dotted var(--border); }
-li.fact > .fact-meta { grid-column: 1; }
-li.fact > button { grid-column: 2; grid-row: 1 / span 2; align-self: center; }
 .fact-meta { font-size: .78rem; color: var(--muted); }
-ul.facts.past li.fact > span:first-child { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--border); }
+/* Notes read as a list a person wrote: where each came from is in its tooltip. */
+ul.notes { margin: .2rem 0; padding-left: 1.1rem; }
+li.note { padding: .18rem 0; line-height: 1.45; }
+li.note > .badge, li.note > button { margin-left: .4rem; vertical-align: baseline; }
+li.note.ended > span:first-child { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--border); }
+.badge.secret { color: var(--warn); border-color: currentColor; font-size: .7rem; }
+.history-session + .history-session { margin-top: .5rem; }
+.history-session h3 { font: 600 .95rem var(--serif); color: var(--accent); margin: .2rem 0 0; }
+.book-notes h2 .pages { font-weight: 400; font-family: inherit; }
+dl.now-values { display: grid; grid-template-columns: auto 1fr; gap: .3rem .9rem; margin: .2rem 0 0; }
+dl.now-values dt { color: var(--muted); }
+dl.now-values dd { margin: 0; }
+.entity p.latest { font-size: .87rem; color: var(--muted); border-top: 1px dotted var(--border); padding-top: .35rem; }
+.latest-when { font-weight: 600; color: var(--accent); }
 ol.events { margin: .2rem 0; padding-left: 0; list-style: none; }
 ol.events li { padding: .2rem 0; }
 .add-fact input { margin-top: .4rem; }
@@ -603,7 +613,8 @@ button.send { width: 2.3rem; height: 2.3rem; padding: 0; border-radius: 50%; fon
 .read-aloud { margin: 0; }
 .read-aloud figcaption { font-size: .75rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-bottom: -.4rem; }
 .card.treasure { border-left: 4px solid var(--warn); }
-.card.treasure li.fact > span:first-child::before { content: "◆ "; color: var(--warn); }
+.card.treasure ul.notes { list-style: none; padding-left: 0; }
+.card.treasure li.note > span:first-child::before { content: "◆ "; color: var(--warn); }
 
 /* Numbers made of parts: click (or hover) one to see what it adds up from. */
 .derived.explained { cursor: help; text-decoration: underline dotted var(--border); text-underline-offset: 3px; }

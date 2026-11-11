@@ -472,11 +472,15 @@ SCHEMA_VERSION = 23
 # dependents cascading away; references are checked afterwards.
 # 22: an alias is known to the party from a session, or not at all, like a fact. Names from a
 # DM-only book weren't shown to players; every other was, from the session it was written at.
+# And references titled by their file's name get a title with spaces.
 _ALIASES_KNOWN = """
 ALTER TABLE aliases ADD COLUMN party_knows_from INTEGER;
 UPDATE aliases SET party_knows_from = coalesce((SELECT r.session FROM runs r WHERE r.id = aliases.run_id), 0)
  WHERE run_id NOT IN (SELECT r.id FROM runs r JOIN sources s ON s.id = r.source_id
                       WHERE r.kind = 'book' AND s.dm_only = 1);
+-- A reference's title, when it was its file's name, reads like a title.
+UPDATE sources SET title = trim(replace(title, '_', ' '))
+ WHERE kind != 'transcript' AND filename IS NOT NULL AND title || '.' = substr(filename, 1, length(title) + 1);
 """
 
 UPGRADES: dict[int, str] = {

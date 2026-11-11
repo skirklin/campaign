@@ -651,7 +651,8 @@ class World:
         return None
 
     def list(self, kind: str | None = None, q: str | None = None, in_play: bool = False) -> list[dict[str, Any]]:
-        """Entities with their current attributes and fact counts.
+        """Entities with their current attributes and fact counts, what each is (`description`) and
+        the last thing that happened to it in play (`latest`: {session, text}).
 
         `in_play` keeps only those the table has touched (any fact or event
         that didn't come from the book).
@@ -667,11 +668,22 @@ class World:
             f" (SELECT json_group_object(f.attribute, f.value) FROM facts f WHERE f.entity_id = e.id"
             f"  AND f.valid_to IS NULL AND f.attribute IS NOT NULL AND f.attribute NOT IN {tuple(BULKY)}"
             f"  AND f.modality = 'fact'{clause}) AS attrs,"
-            f" (SELECT f.statement FROM facts f WHERE f.entity_id = e.id AND f.valid_to IS NULL"
-            f"  AND f.attribute IS NULL AND f.modality = 'fact'{clause} ORDER BY f.valid_from DESC, f.id LIMIT 1) AS headline"
+            # What it is: the book's description of it (the first thing the book says), else the first
+            # thing play said about it.
+            f" (SELECT f.statement FROM facts f JOIN runs r ON r.id = f.run_id WHERE f.entity_id = e.id"
+            f"  AND f.valid_to IS NULL AND f.attribute IS NULL AND f.modality = 'fact'"
+            f"  AND f.statement NOT LIKE '{TREASURE}%'{clause}"
+            "  ORDER BY r.kind = 'book' DESC, f.valid_from, f.id LIMIT 1) AS description,"
+            # The last thing that happened to it in play: a journal entry it's in, or something recorded.
+            " (SELECT json_object('session', n, 'text', t) FROM ("
+            "   SELECT ev.session AS n, ev.created_at AS at, ev.text AS t FROM events ev"
+            "    JOIN event_entities x ON x.event_id = ev.id WHERE x.entity_id = e.id"
+            "   UNION ALL SELECT f.valid_from, f.created_at, f.statement FROM facts f JOIN runs r ON r.id = f.run_id"
+            f"   WHERE f.entity_id = e.id AND r.kind != 'book' AND coalesce(f.attribute, '') NOT IN {tuple(BULKY)}{clause}"
+            "  ) ORDER BY n DESC, at DESC LIMIT 1) AS latest"
             " FROM entities e WHERE e.campaign_id = ?"
         )
-        args = params * 4 + [self.campaign.id]  # one per {clause} above
+        args = params * 5 + [self.campaign.id]  # one per {clause} above
         if kind:
             sql += " AND e.kind = ?"
             args.append(kind)
@@ -691,6 +703,7 @@ class World:
                 continue
             d["aliases"] = d["aliases"].split("; ") if d["aliases"] else []
             d["current"] = json.loads(d.pop("attrs") or "{}")
+            d["latest"] = json.loads(d["latest"]) if d["latest"] else None
             out.append(d)
         return out
 

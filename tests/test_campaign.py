@@ -458,3 +458,10 @@ def test_the_dndbeyond_tool(store, monkeypatch):
     assert out["level"] == 5 and out["carrying_differs"]["coin"]["gp"]["dndbeyond"] == 120
     got = json.loads(t["get_character"](name="Agrippa"))
     assert got["sheet_from"].startswith("D&D Beyond") and got["derived"]["ac"]["total"] == 19
+
+
+def test_a_reference_titled_by_its_file_reads_like_a_title():
+    from campaign.library import source_title
+
+    assert source_title("Players_Guide_to_Odyssey_v1.pdf") == "Players Guide to Odyssey v1"
+    assert source_title("Curse of Strahd.md") == "Curse of Strahd"

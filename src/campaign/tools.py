@@ -82,15 +82,21 @@ def _capped(view: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _clip(text: str, most: int = 200) -> str:
+    return text if len(text) <= most else text[:most - 3] + "…"
+
+
 def _brief_entity(r: dict[str, Any]) -> dict[str, Any]:
     aliases = r["aliases"]
-    headline = r["headline"] or ""
-    return {
+    out = {
         "kind": r["kind"], "name": r["name"],
         "aliases": "; ".join(aliases[:5]) + (f" (+{len(aliases) - 5} more)" if len(aliases) > 5 else ""),
         "current": r["current"],
-        "headline": headline if len(headline) <= 200 else headline[:197] + "…",
+        "about": _clip(r["description"] or ""),
     }
+    if (latest := r["latest"]) and latest["text"] != r["description"]:
+        out["latest"] = f"session {latest['session']}: {_clip(latest['text'])}"
+    return out
 
 
 def _brief_holding(h: dict[str, Any]) -> dict[str, Any]:

@@ -275,6 +275,21 @@ def test_whatever_play_wrote_can_be_renamed_rewritten_or_deleted():
     assert store.character(cid)["name"] == "Bram the Bold" and w.resolve("Bram") is None
 
 
+def test_a_card_says_what_a_thing_is_and_what_last_happened_to_it():
+    store, _, w, _ = setup(role="dm", dm_only=False)
+    ireena = w.resolve("Ireena")["id"]
+    card = lambda: next(e for e in w.list() if e["id"] == ireena)  # noqa: E731
+    assert card()["description"] == "Adopted daughter of the burgomaster." and card()["latest"] is None
+    run = play(store, w, 2)
+    w.add_event("The party met Ireena at her father's wake.", 2, run, [ireena])
+    w.record(ireena, "Ireena is in Vallaki", play(store, w, 3), 3, attribute="location", value="Vallaki")
+    assert card()["latest"] == {"session": 3, "text": "Ireena is in Vallaki"}
+    assert card()["description"] == "Adopted daughter of the burgomaster."  # still what she is, not the news
+    bram = w.ensure_entity("Bram", "npc")["id"]
+    w.record(bram, "Bram runs the ferry.", run, 2)
+    assert next(e for e in w.list() if e["id"] == bram)["description"] == "Bram runs the ferry."
+
+
 def test_search_doesnt_reveal_hidden_facts():
     store, camp, w, _ = setup(role="dm", dm_only=True)
     w.record(w.resolve("Morgantha")["id"], "Morgantha sells pies to the party", play(store, w, 1), 1)
@@ -536,6 +551,7 @@ def test_the_schema_is_made_whole_and_the_deployed_database_brought_up_to_it(tmp
     run = s.conn.execute("INSERT INTO runs (campaign_id, kind, session, created_at) VALUES (?, 'chat', 3, 'x')",
                          (camp.id,)).lastrowid
     s.conn.executescript(f"""
+        UPDATE sources SET title = 'Players_Guide_to_Odyssey_v1', filename = 'Players_Guide_to_Odyssey_v1.pdf';
         INSERT INTO aliases (entity_id, alias, run_id) VALUES ({hag}, 'the baker', {run});
         ALTER TABLE aliases DROP COLUMN party_knows_from;
         PRAGMA user_version = 22;
@@ -543,6 +559,7 @@ def test_the_schema_is_made_whole_and_the_deployed_database_brought_up_to_it(tmp
     s.close()
     known = dict(Store(path).conn.execute("SELECT alias, party_knows_from FROM aliases WHERE entity_id = ?", (hag,)).fetchall())
     assert known == {"the windmill hag": None, "the baker": 3}
+    assert [x["title"] for x in Store(path).sources(camp)] == ["Players Guide to Odyssey v1"]
 
     # A database from a version with no way forward is refused, not guessed at.
     old = tmp_path / "old.db"
