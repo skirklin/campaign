@@ -7,6 +7,7 @@ import { characterCard, newCharacterForm } from "./sheet.js";
 import { InventoryView } from "./inventory.js";
 import { renderMarkdown, inline, statBlockFromData } from "./markdown.js";
 import { encounterFence, encountersTab } from "./encounter.js";
+import { nameLinks } from "./wiki.js";
 
 export async function campaignList() {
   const [campaigns, info, me] = await Promise.all([
@@ -230,6 +231,7 @@ async function askTab(c, _me, convId) {
         });
         if (frame) { cancelAnimationFrame(frame); paint(); }
         if (usage && answer) answer.el.append(costLine(usage));
+        (await nameLinks(c.slug)).link(thread);
         typing.remove();
         chats = await api("GET", `${base}/chats`);
         fillHead();
@@ -259,6 +261,7 @@ async function askTab(c, _me, convId) {
     current = conv.id;
     fillHead();
     thread.replaceChildren(...turnsEls(conv.turns));
+    nameLinks(c.slug).then((wiki) => wiki.link(thread));
     requestAnimationFrame(() => thread.lastElementChild?.scrollIntoView({ block: "end" }));
   } else {
     if (convId) {  // deleted, or someone else's: start a new one instead
@@ -284,7 +287,7 @@ function quickFind(c) {
   const show = () => {
     results.replaceChildren(...hits.slice(0, 8).map((e, i) => h(`li${i === 0 ? ".first" : ""}`,
       h("a", { href: `#/campaigns/${c.slug}/entity/${e.id}`, onclick: () => { results.hidden = true; } },
-        h("strong", e.name), h("span.badge", e.kind), e.headline && h("span.muted.small", e.headline)))));
+        h("strong", e.name), h("span.badge", kindName(e.kind)), e.description && h("span.muted.small", e.description)))));
     results.hidden = !hits.length;
   };
   input.addEventListener("input", () => {
@@ -344,7 +347,7 @@ function campaignHome(c) {
     const link = (href, text) => h("a", { href }, text);
     const parts = [
       last && h("div.home-item.home-last", h("span.home-label", "Last time"),
-        h("div", link(`#/campaigns/${c.slug}/ingest`, `#${last.number} ${last.title || "(untitled)"}`),
+        h("div", link(`#/campaigns/${c.slug}/session/${last.number}`, `#${last.number} ${last.title || "(untitled)"}`),
           last.summary && h("p.small", last.summary.split(/(?<=[.!?])\s/)[0]))),
       open.length > 0 && h("div.home-item", h("span.home-label", "Quests under way"),
         h("div", open.map((q, i) => [i ? " · " : "", link(`#/campaigns/${c.slug}/entity/${q.id}`, q.name)]))),
@@ -356,6 +359,7 @@ function campaignHome(c) {
           f.state?.started ? h("span.muted.small", ` round ${f.state.round}`) : ""]))),
     ].filter(Boolean);
     if (parts.length) el.replaceChildren(h("h3", "Where things stand"), ...parts);
+    nameLinks(c.slug).then((wiki) => el.querySelectorAll(".home-last p").forEach((p) => wiki.link(p)));
   }, () => {});
   return el;
 }
@@ -462,21 +466,77 @@ function scanForm(c, jobs) {
       + "correct; it takes a minute or two and carries on if you leave the page."));
 }
 
+// -- sessions as pages -------------------------------------------------------------
+
+// A journal entry with the names in it linked, followed by whoever it's about that it doesn't name.
+function journalEntry(c, e, wiki) {
+  const text = h("span", inline(e.text));
+  const linked = wiki.link(text);
+  const rest = e.entities.filter((x) => !linked.has(x.id) && !linked.has(String(x.id)));
+  return h("li", text, rest.length > 0 && h("span.event-entities", " — ",
+    rest.map((x, i) => [i ? ", " : "", h("a", { href: `#/campaigns/${c.slug}/entity/${x.id}` }, x.name)])));
+}
+
+function recap(s, wiki) {
+  const el = h("div.prose", s.summary ? s.summary.split(/\n\s*\n/).map((p) => h("p", inline(p))) : h("p.muted", "No recap."));
+  wiki.link(el);
+  return el;
+}
+
+// One session as a page, like a wiki's recent changes: its recap, its journal, and what it changed
+// in the world, thing by thing, as this reader may see it.
+export async function sessionView(slug, number) {
+  const base = `/api/campaigns/${slug}`;
+  const [campaigns, d, name, wiki] = await Promise.all([
+    api("GET", "/api/campaigns"), api("GET", `${base}/sessions/${number}`), sessionNames(slug), nameLinks(slug)]);
+  const c = campaigns.find((x) => x.slug === slug);
+  const s = d.session;
+  const page = (n, label) => n !== null && h("a", { href: `#/campaigns/${slug}/session/${n}` }, label);
+  const fact = (f, lead = "", cls = "") => h(`li.note${cls}`, lead && h("span.muted", lead), h("span", inline(f.statement)),
+    !f.party_knows && h("span.badge.secret", { title: "The party doesn't know this" }, "secret"));
+  const changes = d.changes.map((x) => {
+    const notes = h("ul.notes",
+      x.began.map((f) => fact(f, f.modality === "rumor" ? "Rumor: " : f.modality === "possible" ? "Possible: " : "",
+        f.ended_too ? ".ended" : "")),
+      x.learned.map((f) => fact(f, "The party learned: ")),
+      x.ended.map((f) => fact(f, "No longer: ", ".ended")));
+    wiki.link(notes, { self: x.id });
+    return h("div.change", h("h3", h("a", { href: `#/campaigns/${slug}/entity/${x.id}` }, x.name),
+      h("span.badge", kindName(x.kind))), notes);
+  });
+  const journal = d.events.length > 0 && h("section.card", h("h2", "What happened"),
+    h("ol.journal", d.events.map((e) => journalEntry(c, e, wiki))));
+  const inventory = d.inventory.length > 0 && h("section.card", h("h2", "The party's inventory"),
+    h("ul.notes", d.inventory.map((t) => h("li.note", t))));
+  if (inventory) wiki.link(inventory);
+  return h("section.page.session-page",
+    h("div.page-head", h("a", { href: `#/campaigns/${slug}/ingest` }, `← ${c.name}: sessions`), h("span.spacer"),
+      h("span.session-nav", page(d.previous, `← ${name.heading(d.previous)}`), page(d.next, `${name.heading(d.next)} →`))),
+    h("h1", s.kind === "recap" ? s.title || `Recap ${s.number}` : name.heading(s.number)),
+    (s.kind === "recap" || s.played_on) && h("p.muted", [s.kind === "recap"
+      ? (s.covers ? `A recap of about ${s.covers} sessions` : "A recap") : "", s.played_on ? `played ${s.played_on}` : ""]
+      .filter(Boolean).join(" · ")),
+    h("section.card", h("h2", "Recap"), recap(s, wiki)),
+    journal,
+    changes.length > 0 && h("section.card.changes", h("h2", "What changed"), changes),
+    inventory,
+    !journal && !changes.length && !inventory && h("p.empty", "Nothing was recorded about this session beyond its recap."),
+  );
+}
+
 // -- sessions & ingest ---------------------------------------------------------
 
 // The campaign's timeline: each session, newest first, opening to its recap and what happened in it
 // (the journal), and the sessions' notes waiting for the DM's review.
 async function sessionsTab(c) {
   const base = `/api/campaigns/${c.slug}`;
-  const [data, events] = await Promise.all([api("GET", `${base}/sessions`), api("GET", `${base}/journal`)]);
+  const [data, events, wiki] = await Promise.all([api("GET", `${base}/sessions`), api("GET", `${base}/journal`), nameLinks(c.slug)]);
   const list = h("div.session-list");
   let journal = events;
 
   const happened = (n) => {
     const items = journal.filter((e) => e.session === n);
-    return items.length > 0 && h("div.session-events", h("h3", "What happened"), h("ol", items.map((e) => h("li", e.text,
-      e.entities.length > 0 && h("span.event-entities", " — ",
-        e.entities.map((x, i) => [i ? ", " : "", h("a", { href: `#/campaigns/${c.slug}/entity/${x.id}` }, x.name)]))))));
+    return items.length > 0 && h("div.session-events", h("h3", "What happened"), h("ol", items.map((e) => journalEntry(c, e, wiki))));
   };
   const renderSessions = (sessions) => list.replaceChildren(
     sessions.length === 0 && !journal.length ? h("p.empty", "No sessions yet.") : "",
@@ -486,7 +546,8 @@ async function sessionsTab(c) {
         h("strong", s.title || "(untitled)"),
         s.kind === "recap" && h("span.muted", s.covers ? `a recap of about ${s.covers} sessions` : "a recap"),
         s.played_on && h("span.muted", s.played_on)),
-      h("div.prose", s.summary ? s.summary.split(/\n\s*\n/).map((p) => h("p", p)) : h("p.muted", "No recap.")),
+      recap(s, wiki),
+      h("p.small", h("a", { href: `#/campaigns/${c.slug}/session/${s.number}` }, "The session's page, with what it changed →")),
       happened(s.number),
       uploads(s),
     )),
@@ -1086,9 +1147,17 @@ function highlight(snippet) {
 }
 
 // -- world state ---------------------------------------------------------------------
+// The world record is written for the assistant: short notes, many from the book, each with its
+// sessions and source. These pages read it back for people: what a thing is, where it stands now,
+// what has happened to it session by session, and what the book says, with where each note came
+// from kept to a tooltip.
 
 const KIND_LABELS = { npc: "NPCs", pc: "Player characters", lore: "Lore" };
 const kindLabel = (k) => KIND_LABELS[k] || `${k.charAt(0).toUpperCase()}${k.slice(1)}s`;
+const KIND_NAMES = { npc: "NPC", pc: "Player character", lore: "Lore" };
+export const kindName = (k) => KIND_NAMES[k] || `${k.charAt(0).toUpperCase()}${k.slice(1)}`;
+const capitalize = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+const clip = (s, most) => (s.length <= most ? s : `${s.slice(0, most - 1).trimEnd()}…`);
 // `name` names a session (sessionNames): recaps by their title.
 // Nothing for what's been true from the start and still is (the book's facts): the source says enough.
 const range = (f, name) => (f.valid_to === null ? (f.valid_from === 0 ? "" : `since ${name(f.valid_from)}`)
@@ -1096,50 +1165,80 @@ const range = (f, name) => (f.valid_to === null ? (f.valid_from === 0 ? "" : `si
 const ORIGINS = { ingest: (f, name) => name(f.run_session), chat: () => "chat", manual: () => "edited by hand" };
 const sourceLabel = (f, name) => (f.origin === "book" || !ORIGINS[f.origin] ? f.source || f.origin : ORIGINS[f.origin](f, name))
   + (f.pages?.length ? ` p. ${f.pages.join(", ")}` : "");
+// Where a note came from and when it held, for its tooltip.
+const provenance = (f, name) => [range(f, name), sourceLabel(f, name),
+  f.party_knows_from === null ? "the party doesn't know this" : ""].filter(Boolean).join(" · ");
+// Values that are for running the game, not for reading: the stat block a creature uses is shown as one.
+const NOT_READ = ["uses_stat_block", "stat_block", "read_aloud", "mechanics"];
+const statusBadge = (v) => v && h(`span.badge.status-${v.replace(/\W+/g, "-")}`, v);
+
+// Page numbers as a reader cites them: [5, 6, 7, 10, 11, 16] is "pp. 5–7, 10–11, 16".
+export function pageRange(pages) {
+  const sorted = [...new Set(pages)].sort((a, b) => a - b);
+  const runs = [];
+  for (const p of sorted) {
+    const last = runs[runs.length - 1];
+    if (last && p === last[1] + 1) last[1] = p; else runs.push([p, p]);
+  }
+  const shown = runs.slice(0, 6).map(([a, b]) => (a === b ? `${a}` : `${a}–${b}`)).join(", ");
+  return sorted.length ? `${sorted.length > 1 ? "pp." : "p."} ${shown}${runs.length > 6 ? ", …" : ""}` : "";
+}
+
+// The book's notes without the ones another says in full: "Ruled by King Acastus" goes when
+// "Ruled by King Acastus, one of the last descendants of the Dragonlords" is there too.
+export function withoutRepeats(notes, text = (n) => n.statement) {
+  const key = (s) => ` ${s.toLowerCase().replace(/[^\w\s]/g, " ").split(/\s+/).filter(Boolean)
+    .join(" ").replace(/^(the|a|an) /, "")} `;
+  const keys = notes.map((n) => key(text(n)));
+  return notes.filter((_, i) => !keys.some((k, j) => j !== i && k.includes(keys[i])
+    && (k.length > keys[i].length || j < i)));
+}
 
 async function stateTab(c) {
   const base = `/api/campaigns/${c.slug}`;
-  const inPlay = h("input", { type: "checkbox" });
-  const kind = h("select", { "aria-label": "Kind" }, h("option", { value: "" }, "All kinds"));
-  const status = h("select", { "aria-label": "Status" }, h("option", { value: "" }, "Any status"));
-  const q = h("input", { type: "search", placeholder: "Filter by name, alias or fact…", "aria-label": "Filter" });
+  const everything = h("input", { type: "checkbox" });
+  const kind = h("select", { "aria-label": "Kind" });
+  const status = h("select", { "aria-label": "Status" });
+  const q = h("input", { type: "search", placeholder: "Find by name or anything said about it…", "aria-label": "Filter" });
+  const intro = h("p.muted.small");
   const out = h("div");
-  let all = [];
+  const [{ entities: all }, name] = await Promise.all([api("GET", `${base}/entities`), sessionNames(c.slug)]);
+  const fill = (sel, values, label, show = (v) => v) => sel.replaceChildren(
+    h("option", { value: "" }, label), ...values.map((v) => h("option", { value: v }, show(v))));
+  fill(kind, [...new Set(all.map((e) => e.kind))].sort((a, b) => kindRank(a) - kindRank(b)), "All kinds", kindLabel);
+  fill(status, [...new Set(all.map((e) => e.current.status).filter(Boolean))].sort(), "Any status");
 
-  const load = async () => {
-    all = (await api("GET", `${base}/entities${inPlay.checked ? "?in_play=true" : ""}`)).entities;
-    const fill = (sel, values, label) => {
-      const keep = sel.value;
-      sel.replaceChildren(h("option", { value: "" }, label), ...values.map((v) => h("option", { value: v }, v)));
-      sel.value = values.includes(keep) ? keep : "";
-    };
-    fill(kind, [...new Set(all.map((e) => e.kind))].sort(), "All kinds");
-    fill(status, [...new Set(all.map((e) => e.current.status).filter(Boolean))].sort(), "Any status");
-    render();
-  };
   const render = () => {
-    const needle = q.value.toLowerCase();
-    const shown = all.filter((e) =>
-      (!kind.value || e.kind === kind.value) && (!status.value || e.current.status === status.value) &&
-      (!needle || [e.name, ...e.aliases, e.headline || ""].some((x) => x.toLowerCase().includes(needle))));
+    const needle = q.value.trim().toLowerCase();
+    // What the table has met is the world as people know it; asking for anything else (a kind, a
+    // search, the box) opens up everything the reference material describes.
+    const browsing = everything.checked || !!needle || !!kind.value || !!status.value;
+    const shown = all.filter((e) => (browsing || e.table_activity > 0 || e.kind === "pc")
+      && (!kind.value || e.kind === kind.value) && (!status.value || e.current.status === status.value)
+      && (!needle || [e.name, ...e.aliases, e.description || "", e.latest?.text || ""]
+        .some((x) => x.toLowerCase().includes(needle))));
+    intro.textContent = browsing
+      ? `${shown.length} of ${all.length} people, places and things.`
+      : "Who and what the party has met, and what happened to them. Search, or pick a kind, to look through everything the reference material describes.";
     const groups = {};
     shown.forEach((e) => (groups[e.kind] ||= []).push(e));
     out.replaceChildren(
-      all.length === 0 ? h("p.empty", inPlay.checked
-        ? "Nothing in play yet. Add session notes, or tell the assistant what happened."
-        : "The world is empty. Have the assistant read a book, or add session notes.") : "",
+      all.length === 0 ? h("p.empty", "The world is empty. Have the assistant read a book, or add session notes.")
+        : shown.length === 0 ? h("p.empty", browsing ? "Nothing matches."
+          : "Nothing has happened in play yet. Tell the assistant what happened, or add session notes.") : "",
       ...Object.entries(groups).sort(([a], [b]) => kindRank(a) - kindRank(b)).map(([k, items]) => h("div",
         h("h2.section-title", `${kindLabel(k)} (${items.length})`),
-        h("div.entity-grid", items.map((e) => worldCard(c, e))))),
+        h("div.entity-grid", items.map((e) => worldCard(c, e, name, browsing))))),
     );
   };
-  inPlay.addEventListener("change", load);
+  everything.addEventListener("change", render);
   [kind, status].forEach((el) => el.addEventListener("change", render));
   q.addEventListener("input", render);
-  await load();
+  render();
   return h("div",
     h("div.filters", kind, status, q),
-    h("label.check", inPlay, " Only what the table has interacted with"),
+    h("label.check", everything, " Everything from the reference material"),
+    intro,
     out);
 }
 
@@ -1151,34 +1250,56 @@ const kindRank = (k) => (KIND_ORDER.includes(k) ? KIND_ORDER.indexOf(k) : KIND_O
 const ATTRIBUTE_LABELS = { uses_stat_block: "Stat block" };
 export const attributeLabel = (k) => ATTRIBUTE_LABELS[k] || (k.charAt(0).toUpperCase() + k.slice(1)).replace(/_/g, " ");
 
-function worldCard(c, e) {
-  const attrs = Object.entries(e.current).filter(([k]) => k !== "status");
+// One thing in the world: what it is, where it stands, and the last thing that happened to it.
+function worldCard(c, e, name, browsing) {
+  const attrs = Object.entries(e.current).filter(([k]) => k !== "status" && !NOT_READ.includes(k));
+  const latest = e.latest && e.latest.text !== e.description && e.latest;
   return h("a.card.entity", { href: `#/campaigns/${c.slug}/entity/${e.id}` },
-    h("div.entity-head", h("strong", e.name),
-      e.current.status && h(`span.badge.status-${e.current.status.replace(/\W+/g, "-")}`, e.current.status),
-      e.table_activity > 0 && h("span.badge.in-play", { title: "Something has happened to it in play" }, "in play")),
-    e.aliases.length > 0 && h("p.muted.small", "aka ", e.aliases.slice(0, 4).join(" · ")),
+    h("div.entity-head", h("strong", e.name), statusBadge(e.current.status),
+      browsing && e.table_activity > 0 && h("span.badge.in-play", { title: "Something has happened to it in play" }, "in play")),
+    e.description && h("p", clip(e.description, 220)),
     attrs.length > 0 && h("dl", attrs.flatMap(([k, v]) => [h("dt", attributeLabel(k)), h("dd", v)])),
-    e.headline && h("p", e.headline),
+    latest && h("p.latest", h("span.latest-when", `${capitalize(name(latest.session))}: `), clip(latest.text, 200)),
   );
 }
 
 export async function entityView(slug, id) {
   const base = `/api/campaigns/${slug}`;
-  const [campaigns, e, list, name] = await Promise.all([
+  const [campaigns, e, list, name, wiki] = await Promise.all([
     api("GET", "/api/campaigns"), api("GET", `${base}/entities/${id}`), api("GET", `${base}/entities`), sessionNames(slug),
+    nameLinks(slug),
   ]);
   const c = campaigns.find((x) => x.slug === slug);
   e.sessionName = name;
   const now = e.as_of;
   const body = h("div.entity-body");
+  let editing = false;
 
   const slider = h("input", { type: "range", min: 0, max: Math.max(now, 0), value: now, "aria-label": "As of session" });
   const sliderLabel = h("span.as-of-label");
+  const others = list.entities.filter((x) => x.id !== e.id);
+  const mergeInput = h("input", { list: "merge-options", placeholder: "Another entry's name", "aria-label": "Entry to merge" });
+  const merge = h("details.card", h("summary", "Merge with another entry…"),
+    h("p.muted.small", "For two entries that are the same thing: both histories are kept, and the other name becomes another name for this one."),
+    h("form.inline-form", {
+      onsubmit: async (ev) => {
+        ev.preventDefault();
+        const other = others.find((x) => x.name === mergeInput.value);
+        if (!other) return toast("Pick an entry from the list", true);
+        if (!confirm(`Merge ${other.name} into ${e.name}? Its notes, names and history move here.`)) return;
+        await api("POST", `${base}/entities/${id}/merge`, { other_id: other.id });
+        location.reload();
+      },
+    }, mergeInput, h("datalist", { id: "merge-options" }, others.map((x) => h("option", { value: x.name }, kindName(x.kind)))),
+      h("button", { type: "submit" }, "Merge into this")));
+  const editButton = canEdit(c) && h("button.link.small", {
+    onclick: () => { editing = !editing; editButton.textContent = editing ? "Done" : "Edit"; renderAt(); },
+  }, "Edit");
   const renderAt = () => {
     const t = Number(slider.value);
     sliderLabel.textContent = t === now ? `now (after ${name(now)})` : `after ${name(t)}`;
-    body.replaceChildren(...factSections(c, e, t, t === now).filter(Boolean));
+    body.replaceChildren(...factSections(c, e, t, t === now, editing).filter(Boolean), mentions(c, e), editing ? merge : "");
+    wiki.link(body, { self: e.id });
   };
   slider.addEventListener("input", renderAt);
 
@@ -1191,7 +1312,9 @@ export async function entityView(slug, id) {
       ev.target.textContent = "Writing a summary…";
       try {
         const r = await api("POST", `${base}/entities/${id}/summary`);
-        ev.target.replaceWith(h("div.card.summary", h("p", r.summary)));
+        const card = h("div.card.summary", h("p", r.summary));
+        wiki.link(card, { self: e.id });
+        ev.target.replaceWith(card);
       } catch (err) {
         toast(err.message, true);
         ev.target.disabled = false;
@@ -1200,68 +1323,89 @@ export async function entityView(slug, id) {
     },
   }, "Summarize");
 
-  const others = list.entities.filter((x) => x.id !== e.id);
-  const mergeInput = h("input", { list: "merge-options", placeholder: "Another entity's name", "aria-label": "Entity to merge" });
-  const merge = h("form.inline-form", {
-    onsubmit: async (ev) => {
-      ev.preventDefault();
-      const other = others.find((x) => x.name === mergeInput.value);
-      if (!other) return toast("Pick an entity from the list", true);
-      if (!confirm(`Merge ${other.name} into ${e.name}? Its facts, aliases and events move here.`)) return;
-      await api("POST", `${base}/entities/${id}/merge`, { other_id: other.id });
-      location.reload();
-    },
-  }, mergeInput, h("datalist", { id: "merge-options" }, others.map((x) => h("option", { value: x.name }, x.kind))),
-    h("button", { type: "submit" }, "Merge into this"));
-
+  const secret = new Set(e.secret_aliases || []);
+  if (e.summary) wiki.link(summary, { self: e.id });
   renderAt();
   return h("section.page",
     h("div.page-head", h("a", { href: `#/campaigns/${slug}/state` }, `← ${c.name}`)),
-    h("div.page-head", h("h1", e.name), h("span.badge", e.kind),
+    h("div.page-head", h("h1", e.name), h("span.badge", kindName(e.kind)), statusBadge(e.current.status),
       e.character && h("a", { href: `#/characters/${e.character.id}` }, "Character sheet →"),
-      h("span.spacer"), !e.summary && summary),
-    e.aliases.length > 0 && h("p.muted", "Also known as ", e.aliases.join(" · ")),
+      h("span.spacer"), !e.summary && summary, editButton),
+    e.aliases.length > 0 && h("p.muted", "Also known as ", e.aliases.map((a) =>
+      (secret.has(a) ? `${a} (party doesn't know)` : a)).join(" · ")),
     e.summary && summary,
     now > 0 && h("label.as-of", h("span.as-of-title", "Show it as it was "), sliderLabel, slider),
     body,
-    canEdit(c) && h("details.card", h("summary", "Merge with another entry…"), h("p.muted.small", "For two entries that are the same thing: both histories are kept, and the other name becomes an alias."), merge),
   );
 }
 
-function factSections(c, e, t, isNow) {
+// Where else its name comes up: what's said about other things, and session recaps (World.mentions).
+function mentions(c, e) {
+  const m = e.mentioned_in;
+  if (!m || (!m.entities.length && !m.sessions.length)) return "";
+  const comma = (items) => items.map((x, i) => [i ? ", " : "", x]);
+  return h("section.card.mentions",
+    h("h2", "Mentioned in"),
+    m.entities.length > 0 && h("p", comma(m.entities.map((x) =>
+      h("a", { href: `#/campaigns/${c.slug}/entity/${x.id}`, title: kindName(x.kind) }, x.name))),
+      m.more > 0 ? h("span.muted", ` and ${m.more} more`) : ""),
+    m.sessions.length > 0 && h("p", h("span.muted", "Recaps: "), comma(m.sessions.map((x) =>
+      h("a", { href: `#/campaigns/${c.slug}/session/${x.number}` }, e.sessionName.heading(x.number))))));
+}
+
+function factSections(c, e, t, isNow, editing) {
   const name = e.sessionName;
   const base = `/api/campaigns/${c.slug}`;
   const facts = e.all_facts.filter((f) => f.valid_from <= t);
   const openAt = (f) => f.valid_to === null || f.valid_to > t;
-  const current = facts.filter((f) => openAt(f) && f.modality === "fact");
-  const BULKY = ["stat_block", "read_aloud"];
-  const attrs = current.filter((f) => f.attribute && !BULKY.includes(f.attribute));
+  const fromBook = (f) => f.origin === "book";
   const TREASURE = "Treasure: ";
-  const statements = current.filter((f) => !f.attribute && !f.statement.startsWith(TREASURE));
+  const current = facts.filter((f) => openAt(f) && f.modality === "fact");
+  const values = current.filter((f) => f.attribute && !NOT_READ.includes(f.attribute));
+  const bookNotes = current.filter((f) => fromBook(f) && !f.attribute && !f.statement.startsWith(TREASURE));
   const treasure = current.filter((f) => !f.attribute && f.statement.startsWith(TREASURE));
   const statBlocks = current.filter((f) => f.attribute === "stat_block");
   const readAloud = current.filter((f) => f.attribute === "read_aloud");
   const maybe = facts.filter((f) => openAt(f) && f.modality !== "fact");
-  const past = facts.filter((f) => !openAt(f));
+  const changed = facts.filter((f) => fromBook(f) && !openAt(f));
   const events = e.all_events.filter((ev) => ev.session <= t);
 
-  const endButton = (f) => isNow && canEdit(c) && openAt(f) && h("button.link.small.end-fact", {
+  const endButton = (f) => editing && isNow && openAt(f) && h("button.link.small.end-fact", {
     title: "It stops being true now; it stays in the history",
     onclick: async () => {
       await api("POST", `${base}/facts/${f.id}/end`);
       location.reload();
     },
   }, "no longer true");
-  const factRow = (f, text) => h("li.fact",
-    h("span", text || inline(f.statement)),
-    h("span.fact-meta", [range(f, name), sourceLabel(f, name)].filter(Boolean).join(" · "),
-      f.party_knows_from === null ? " · party doesn't know" : ""),
-    endButton(f));
+  const secretMark = (f) => f.party_knows_from === null && h("span.badge.secret", { title: "The party doesn't know this" }, "secret");
+  const note = (f, text, extra = "") => h(`li.note${extra}`, { title: provenance(f, name) },
+    h("span", text || inline(f.statement)), secretMark(f), endButton(f));
 
-  const add = isNow && canEdit(c) && (() => {
-    const statement = h("input", { placeholder: "Something that's now true", required: true, "aria-label": "Statement" });
-    const attribute = h("input", { list: "attr-options", placeholder: "attribute (optional)", "aria-label": "Attribute" });
-    const value = h("input", { placeholder: "value", "aria-label": "Value" });
+  // What happened in play, session by session: the journal, and what was recorded then. A note
+  // that says what an entry already says is left out; one that has stopped being true is struck.
+  const said = new Set(events.map((ev) => ev.text.trim().toLowerCase()));
+  const played = facts.filter((f) => !fromBook(f) && f.modality === "fact" && !NOT_READ.includes(f.attribute)
+    && !f.statement.startsWith(TREASURE) && !said.has(f.statement.trim().toLowerCase()));
+  const sessions = [...new Set([...events.map((ev) => ev.session), ...played.map((f) => f.valid_from)])].sort((a, b) => a - b);
+  const history = sessions.length > 0 && h("section.card.history",
+    h("h2", "What's happened"),
+    sessions.map((n) => h("div.history-session",
+      h("h3", n > 0 ? h("a", { href: `#/campaigns/${c.slug}/session/${n}` }, name.heading(n)) : name.heading(n)),
+      h("ul.notes",
+        events.filter((ev) => ev.session === n).map((ev) => h("li.note", h("span", inline(ev.text)))),
+        played.filter((f) => f.valid_from === n).map((f) => note(f, null, openAt(f) ? "" : ".ended"))))));
+
+  // What the book says, by book: its source named once, near-repeats folded together.
+  const books = new Map();
+  bookNotes.forEach((f) => (books.get(f.source) || books.set(f.source, []).get(f.source)).push(f));
+  const fromBooks = [...books].map(([source, notes]) => h("section.card.book-notes",
+    h("h2", `From ${source || "the reference material"}`, h("span.muted.small.pages", ` ${pageRange(notes.flatMap((f) => f.pages || []))}`)),
+    h("ul.notes", withoutRepeats(notes).map((f) => note(f)))));
+
+  const add = editing && isNow && (() => {
+    const statement = h("input", { placeholder: `Something that's now true about ${e.name}`, required: true, "aria-label": "Note" });
+    const attribute = h("input", { list: "attr-options", placeholder: "status, location…", "aria-label": "What it sets" });
+    const value = h("input", { placeholder: "e.g. dead, Vallaki", "aria-label": "Value" });
     // A DM's notes are the DM's until they say otherwise; in a player's campaign the party knows it all.
     const known = h("input", { type: "checkbox", checked: c.role !== "dm" });
     return h("form.card.add-fact", {
@@ -1277,30 +1421,37 @@ function factSections(c, e, t, isNow) {
         }
       },
     },
-      h("h2", "Add a fact"),
+      h("h2", "Add a note"),
       statement,
-      h("div.identity", attribute, value),
+      h("details", h("summary.muted.small", "It changes a status, location or the like…"),
+        h("p.muted.small", "The old value moves to the history."),
+        h("div.identity", attribute, value)),
       h("datalist", { id: "attr-options" }, ["status", "location", "holder", "disposition", "leader", "allegiance", "condition"].map((a) => h("option", { value: a }))),
-      h("p.muted.small", "Or just tell the assistant in the Ask tab what happened, and it records it."),
       h("label.check", known, " The party knows this"),
-      h("p.muted.small", "With an attribute, this replaces the current value, which moves to history."),
+      h("p.muted.small", "Or tell the assistant in the Ask tab what happened, and it records it."),
       h("div.actions", h("button.primary", { type: "submit" }, "Add")),
     );
   })();
 
+  const empty = !values.length && !history && !fromBooks.length && !treasure.length && !statBlocks.length
+    && !readAloud.length && !maybe.length && !changed.length && !e.borrowed_stat_block;
   return [
+    values.length > 0 && h("section.card.now",
+      h("h2", isNow ? "Now" : `At the end of ${name(t)}`),
+      h("dl.now-values", values.flatMap((f) => [h("dt", attributeLabel(f.attribute)),
+        h("dd", { title: provenance(f, name) }, f.attribute === "status" ? statusBadge(f.value) : f.value, secretMark(f), endButton(f))]))),
+    history,
+    maybe.length > 0 && h("section.card", h("h2", "Rumors and possibilities"),
+      h("ul.notes", maybe.map((f) => note(f, `${f.modality === "rumor" ? "Rumor: " : "Possible: "}${f.statement}`)))),
     ...readAloud.map((f) => h("figure.read-aloud",
       h("figcaption", "Read aloud"), h("blockquote", f.value), h("span.fact-meta", sourceLabel(f, name)))),
-    h("section.card",
-      h("h2", isNow ? "True now" : `True at the end of ${name(t)}`),
-      attrs.length > 0 && h("ul.facts.attrs", attrs.map((f) => factRow(f, h("span", h("strong", attributeLabel(f.attribute)), ": ", f.value)))),
-      statements.length > 0 && h("ul.facts", statements.map((f) => factRow(f))),
-      attrs.length + statements.length === 0 && h("p.empty", "Nothing recorded."),
-    ),
+    ...fromBooks,
     treasure.length > 0 && h("section.card.treasure",
       h("h2", "Treasure"),
-      h("ul.facts", treasure.map((f) => factRow(f, inline(f.statement.slice(TREASURE.length))))),
-      isNow && h("p.muted.small", "When the party takes something, mark it no longer true (×) and add it to the party's inventory (Party tab).")),
+      h("ul.notes", treasure.map((f) => note(f, inline(f.statement.slice(TREASURE.length))))),
+      isNow && h("p.muted.small", "When the party takes something, mark it no longer true (Edit) and add it to the party's inventory (Party tab).")),
+    changed.length > 0 && h("section.card", h("h2", "No longer as the book has it"),
+      h("ul.notes", changed.map((f) => note(f, null, ".ended")))),
     ...statBlocks.map((f) => h("div.statblock-wrap",
       statBlockFromData(e.name, JSON.parse(f.value)), h("p.fact-meta", sourceLabel(f, name)))),
     // No block of its own, but one it runs on ("Heleka, a sea hag"): that one, saying whose it is.
@@ -1308,11 +1459,7 @@ function factSections(c, e, t, isNow) {
       h("p.small.muted.borrowed", "Runs on the ", h("a", { href: `#/campaigns/${c.slug}/entity/${e.borrowed_stat_block.from.id}` },
         e.borrowed_stat_block.from.name), " stat block"),
       statBlockFromData(`${e.name} (${e.borrowed_stat_block.from.name})`, e.borrowed_stat_block.stat_block)),
-    maybe.length > 0 && h("section.card", h("h2", "Rumors and possibilities"),
-      h("ul.facts", maybe.map((f) => factRow(f, `${f.modality === "rumor" ? "Rumor: " : "Possible: "}${f.statement}`)))),
-    past.length > 0 && h("section.card", h("h2", "No longer true"), h("ul.facts.past", past.map((f) => factRow(f)))),
-    events.length > 0 && h("section.card", h("h2", "Events"),
-      h("ol.events", events.map((ev) => h("li", h("span.session-num", name(ev.session)), " ", ev.text)))),
+    empty && h("p.empty", isNow ? "Nothing recorded yet." : `Nothing recorded by the end of ${name(t)}.`),
     add,
   ];
 }

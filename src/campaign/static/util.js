@@ -77,11 +77,19 @@ export async function sessionNames(slug) {
     sessionLists.set(slug, got);
   }
   const bySession = new Map((await got.list).map((s) => [s.number, s]));
-  return (n) => {
+  const name = (n) => {
     if (!n) return "before play";
     const s = bySession.get(n);
     return s?.kind === "recap" ? (s.title || `recap ${n}`) : `session ${n}`;
   };
+  // A heading for a session: a played one with its title, "Session 3: The Temple raid".
+  name.heading = (n) => {
+    const s = bySession.get(n);
+    const said = name(n);
+    const title = s?.kind !== "recap" && s?.title ? `: ${s.title}` : "";
+    return `${said.charAt(0).toUpperCase()}${said.slice(1)}${title}`;
+  };
+  return name;
 }
 
 // A value in gold pieces, as a player would say it: "1,400 gp", "5 sp", "3 cp"; "" for none.

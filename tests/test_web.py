@@ -492,3 +492,15 @@ def test_dndbeyond_fetch_says_what_went_wrong(monkeypatch):
         monkeypatch.setattr(dndbeyond.urllib.request, "urlopen", answer(code))
         with pytest.raises(dndbeyond.DndBeyondError, match=words):
             dndbeyond.fetch("123456")
+
+
+def test_the_world_reads_as_a_wiki(client):
+    """Names link to pages, pages list where they're mentioned, and each session is a page of what it changed."""
+    client.post("/api/campaigns", json={"name": "Strahd"})
+    client.post("/api/characters/import", files={"file": ("c.json", EXAMPLE.read_bytes())}, data={"campaign": "strahd"})
+    entity = client.get("/api/campaigns/strahd/entities").json()["entities"][0]
+    links = client.get("/api/campaigns/strahd/links").json()
+    assert links["links"][entity["name"]] == entity["id"] and str(entity["id"]) in links["entities"]
+    assert client.get(f"/api/campaigns/strahd/entities/{entity['id']}").json()["mentioned_in"] == \
+        {"entities": [], "sessions": [], "more": 0}
+    assert client.get("/api/campaigns/strahd/sessions/1").status_code == 404

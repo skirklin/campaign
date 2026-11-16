@@ -29,6 +29,31 @@ sheet as...", "the sheet says...", "previously...", "corrected from...",
 "misspelled as..."): that belongs in a change's `reason`, which goes to the
 log, and nowhere else. To fix something, replace it; don't annotate it."""
 
+# What players see of the DM's record, and how to keep a secret in it. For whoever writes as the DM.
+KEEPING_SECRETS = """Players in this campaign read the same record, filtered to what their party
+knows. A fact is hidden from them while party_knows is false; everything
+else is shown as written: an entity's name, every alias the party knows
+(listed beside the name), journal entries and session recaps. A name gives
+a secret away as surely as a fact does:
+- Never connect a disguise or secret identity to the truth through names.
+  A persona the party has met ("Vasili von Holtz") is its own entity under
+  the name the party knows; who it really is ("Vasili is Strahd in
+  disguise") is a fact with party_knows false, on the persona. Don't add the
+  true name as the persona's alias, or the persona as the true entity's
+  alias, and don't merge the two while it's a secret.
+- An alias that reveals what someone is ("the windmill hag" for the kindly
+  baker) is added with party_knows false: record_fact's aliases go with the
+  fact's party_knows; set_alias takes its own. lookup lists such names under
+  secret_aliases.
+- Journal entries and recaps say what the party saw and did, in the names
+  they know, never what's behind it.
+When the user, or what you read, shows a secret reaching the players, fix
+it at its source rather than writing around it: set_alias with party_knows
+false or remove_alias for a name, rename_entity or delete_entity for an
+entity that shouldn't be named so or exist, keep_from_party, edit_fact or
+retract_fact for a fact, edit_journal_entry or delete_journal_entry for the
+journal, edit_session for a recap. Then say what you changed."""
+
 ASK_SYSTEM = """\
 You are the campaign assistant for the D&D campaign "{name}". {role_line}
 
@@ -93,11 +118,13 @@ the user says happened at the table. A question about running something
 ("the party picks a fight with Neta, what am I running?"), a plan or a
 what-if is not an event: answer it, and if it might also have happened,
 offer to record it rather than recording it. If the user says something
-you recorded didn't happen or was wrong, take it back with retract_fact or
-delete_journal_entry.
+you recorded didn't happen or was wrong, correct it (edit_fact,
+edit_journal_entry, edit_session, rename_entity, remove_alias) or take it
+back (retract_fact, delete_journal_entry, delete_entity): anything written
+about play can be fixed, whichever session or chat wrote it.
 
 """ + CLEAN_RECORDS + """
-{spoiler_rules}
+{secrets}{spoiler_rules}
 Keep answers tight and table-ready: the user is often mid-session. Answer
 what was asked; skip background they didn't ask for.
 
@@ -154,7 +181,8 @@ Work in this order:
 2. Read all of the material.
 3. Resolve every name to an existing entity: the names list below, lookup
    and find_entities. "Strad", "Straud" and "the count" are all "Strahd von
-   Zarovich". Use the existing name, and add new nicknames with `aliases`.
+   Zarovich". Use the existing name, and add new nicknames with `aliases`
+   (a nickname that gives a secret away only with party_knows false, below).
    Create an entity (by passing `kind`) only for something genuinely new.
 4. Record what changed, as facts:
    - attributes for state that replaces earlier state: someone dies, moves,
@@ -181,7 +209,7 @@ Prefer fewer, accurate writes over guesses. If something is ambiguous, leave
 it out and mention it in your final message.
 
 """ + CLEAN_RECORDS + """
-{spoiler_rules}{catalog}"""
+{secrets}{spoiler_rules}{catalog}"""
 
 NEW_SESSION = ""
 
@@ -353,6 +381,7 @@ def _role_parts(campaign) -> dict[str, str]:
     return {
         "role_line": PLAYER_ROLE if campaign.spoiler_safe else DM_ROLE,
         "spoiler_rules": PLAYER_SPOILERS if campaign.spoiler_safe else "",
+        "secrets": "" if campaign.spoiler_safe else "\n" + KEEPING_SECRETS + "\n",
     }
 
 
@@ -617,8 +646,18 @@ _DESCRIBE: dict[str, Callable[[dict[str, Any]], str]] = {
     "record_fact": lambda a: f"Recorded: {a.get('statement', '')}",
     "end_fact": lambda a: "Marked a fact no longer true",
     "retract_fact": lambda a: "Deleted a fact recorded by mistake",
+    "edit_fact": lambda a: "Rewrote a fact" + (f": {a['statement']}" if a.get("statement") else ""),
+    "keep_from_party": lambda a: "Hid a fact from the players",
     "delete_journal_entry": lambda a: "Deleted a journal entry recorded by mistake",
+    "edit_journal_entry": lambda a: f"Rewrote a journal entry: {a.get('text', '')}",
     "party_learned": lambda a: "Marked a fact as known to the party",
+    "set_alias": lambda a: f"{a.get('entity', '?')} goes by “{a.get('alias', '')}”"
+                 + ("" if a.get("party_knows", True) else " (secret from the party)"),
+    "remove_alias": lambda a: f"{a.get('entity', '?')} no longer goes by “{a.get('alias', '')}”",
+    "rename_entity": lambda a: f"Renamed {a.get('entity', '?')} to {a.get('name', '?')}",
+    "delete_entity": lambda a: f"Deleted {a.get('entity', '?')}",
+    "edit_session": lambda a: f"Rewrote session {a.get('number', '?')}"
+                    + (f": {a['title']}" if a.get("title") else ""),
     "add_journal_entry": lambda a: f"Journal: {a.get('text', '')}",
     "add_recap": lambda a: f"Recap: {a.get('title', '')}",
     "get_character": lambda a: f"Read {a.get('name', '')}'s sheet",

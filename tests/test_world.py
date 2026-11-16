@@ -178,6 +178,175 @@ def test_aliases_from_dm_only_material_are_spoilers_too():
     assert w.apply_book(src, BOOK, key="v2") and w.resolve("the windmill hag")["id"] == hag
 
 
+def test_a_name_is_a_secret_while_the_party_doesnt_know_it():
+    """The leak a DM found: an alias written in play that gave a secret identity away."""
+    from dataclasses import replace
+
+    from campaign.tools import ToolContext, build_tools
+
+    store, camp, w, _ = setup(role="dm", dm_only=False)
+    store.upsert_session(camp, 2)
+    dm = {t.__name__: t for t in build_tools(ToolContext(store, camp))}
+    player = World(store, replace(camp, role="player"))
+    dm["record_fact"]("Vasili von Holtz", "Vasili von Holtz is a nobleman visiting Vallaki.", kind="npc",
+                      aliases=["the stranger"])
+    dm["record_fact"]("Vasili von Holtz", "Vasili von Holtz is Strahd in disguise.", aliases=["Strahd"],
+                      party_knows=False)
+    vasili = w.resolve("Vasili von Holtz")["id"]
+    assert player.view(vasili)["aliases"] == ["the stranger"]  # the secret name goes with the secret fact
+    assert player.resolve("Strahd") is None and "Vasili von Holtz" not in [e["name"] for e in player.list(q="Strahd")]
+    assert w.view(vasili)["secret_aliases"] == ["Strahd"]  # the DM sees which names are secret
+    assert "secret_aliases" not in player.view(vasili)
+
+    # One written as known by mistake is hidden, learned later, or taken away.
+    dm["set_alias"]("Vasili von Holtz", "the vampire")
+    assert "the vampire" in player.view(vasili)["aliases"]
+    assert "doesn't know" in dm["set_alias"]("Vasili von Holtz", "the vampire", party_knows=False)
+    assert "the vampire" not in player.view(vasili)["aliases"]
+    store.upsert_session(camp, 3)
+    assert "from session 3" in dm["set_alias"]("the stranger", "Strahd", party_knows=True)  # they found out
+    assert "Strahd" in player.view(vasili)["aliases"]
+    assert "no longer" in dm["remove_alias"]("Vasili von Holtz", "the vampire")
+    assert w.resolve("the vampire") is None
+    assert "has no alias" in dm["remove_alias"]("Vasili von Holtz", "the vampire")
+    assert "own name" in dm["set_alias"]("the stranger", "Vasili von Holtz")
+
+    # A known fact that says too much is hidden, or reworded; the book's can be hidden but not reworded.
+    fact = next(f for f in w.facts(vasili) if "nobleman" in f["statement"])
+    assert dm["edit_fact"](fact["id"], statement="Vasili von Holtz is a nobleman staying in Vallaki.") \
+        == f"Fact {fact['id']} rewritten."
+    assert [v["name"] for v in w.lookup("staying")] == ["Vasili von Holtz"]  # the search follows the words
+    assert dm["keep_from_party"](fact["id"]) == f"Fact {fact['id']} is kept from the party."
+    assert fact["id"] not in [f["id"] for f in player.facts(vasili)]
+    lives = next(f for f in w.facts(w.resolve("Ireena")["id"]) if f["statement"].startswith("Lives"))
+    assert "can't be reworded" in dm["edit_fact"](lives["id"], statement="x")
+    assert dm["keep_from_party"](lives["id"]).endswith("kept from the party.")
+
+
+def test_what_the_party_knows_of_the_books_names_outlasts_digesting_it_again():
+    from dataclasses import replace
+
+    store, camp, w, src = setup(role="dm", dm_only=False)
+    player = World(store, replace(camp, role="player"))
+    hag = w.resolve("Morgantha")["id"]
+    assert player.view(hag)["aliases"] == ["the windmill hag"]  # the party's own notes: known from the start
+    w.alias_known(hag, "the windmill hag", None)
+    assert w.apply_book(src, BOOK, key="v2")
+    assert player.view(hag)["aliases"] == []  # still kept from them
+    store.set_source_dm_only(src, True)
+    store.set_source_dm_only(src, False)
+    assert player.view(hag)["aliases"] == ["the windmill hag"]  # a visible book's names are known
+    store.set_source_dm_only(src, True)
+    assert player.view(hag) is None or player.view(hag)["aliases"] == []
+
+
+def test_whatever_play_wrote_can_be_renamed_rewritten_or_deleted():
+    from campaign.tools import ToolContext, build_tools
+
+    store, camp, w, _ = setup(role="dm", dm_only=False)
+    # Written by a session's ingest, not in chat: still the DM's to fix.
+    run = play(store, w, 1)
+    stranger = w.ensure_entity("Strahd's disguise", "npc")["id"]
+    w.record(stranger, "A stranger in a black cloak watched the party.", run, 1)
+    event = w.add_event("Strahd, in disguise, watched the party.", 1, run, [stranger])
+    w.record(w.resolve("Ireena")["id"], "Ireena told the party her secret.", run, 1)
+    store.upsert_session(camp, 1, title="Strahd watches", summary="Strahd, disguised, watched them.")
+    dm = {t.__name__: t for t in build_tools(ToolContext(store, camp))}
+
+    assert dm["rename_entity"]("Strahd's disguise", "The cloaked stranger") == \
+        "Renamed Strahd's disguise to The cloaked stranger."
+    assert w.resolve("Strahd's disguise") is None and w.entity(stranger)["aliases"] == []
+    assert "already called" in dm["rename_entity"]("The cloaked stranger", "Morgantha")
+    assert dm["edit_journal_entry"](event, "A cloaked stranger watched the party.") == f"Journal entry {event} rewritten."
+    assert w.events()[0]["text"] == "A cloaked stranger watched the party."
+    assert dm["edit_session"](1, title="Watched", summary="A cloaked stranger watched them.") == "Session 1 rewritten."
+    assert [(x["title"], x["summary"]) for x in store.sessions(camp)] == [("Watched", "A cloaked stranger watched them.")]
+    told = next(f for f in w.facts(w.resolve("Ireena")["id"]) if "secret" in f["statement"])
+    assert dm["retract_fact"](told["id"]) == f"Deleted fact {told['id']}."
+
+    assert "can't be deleted: the reference material" in dm["delete_entity"]("Morgantha")
+    assert dm["delete_entity"]("The cloaked stranger") == "Deleted The cloaked stranger."
+    assert w.resolve("The cloaked stranger") is None and w.lookup("black cloak") == []
+    assert w.events()[0]["entities"] == []  # the entry stays, without it
+    assert dm["delete_journal_entry"](event) == f"Deleted journal entry {event}."
+    cid = store.create_character({"name": "Bram"}, campaign_id=camp.id)
+    assert "a character in the party" in dm["delete_entity"]("Bram")
+    assert dm["rename_entity"]("Bram", "Bram the Bold") == "Renamed Bram to Bram the Bold, sheet and all."
+    assert store.character(cid)["name"] == "Bram the Bold" and w.resolve("Bram") is None
+
+
+def test_a_card_says_what_a_thing_is_and_what_last_happened_to_it():
+    store, _, w, _ = setup(role="dm", dm_only=False)
+    ireena = w.resolve("Ireena")["id"]
+    card = lambda: next(e for e in w.list() if e["id"] == ireena)  # noqa: E731
+    assert card()["description"] == "Adopted daughter of the burgomaster." and card()["latest"] is None
+    run = play(store, w, 2)
+    w.add_event("The party met Ireena at her father's wake.", 2, run, [ireena])
+    w.record(ireena, "Ireena is in Vallaki", play(store, w, 3), 3, attribute="location", value="Vallaki")
+    assert card()["latest"] == {"session": 3, "text": "Ireena is in Vallaki"}
+    assert card()["description"] == "Adopted daughter of the burgomaster."  # still what she is, not the news
+    bram = w.ensure_entity("Bram", "npc")["id"]
+    w.record(bram, "Bram runs the ferry.", run, 2)
+    assert next(e for e in w.list() if e["id"] == bram)["description"] == "Bram runs the ferry."
+
+
+def test_names_link_to_their_pages_as_the_reader_knows_them():
+    from dataclasses import replace
+
+    store, camp, w, _ = setup(role="dm", dm_only=True)
+    hag = w.resolve("Morgantha")["id"]
+    ireena = w.resolve("Ireena")["id"]
+    temple = w.ensure_entity("Temple of the Oracle", "location")["id"]
+    oracle = w.ensure_entity("Versi", "npc")["id"]
+    run = play(store, w, 1)
+    w.add_alias(oracle, "the Oracle", run, 1)
+    w.add_alias(oracle, "she who knows", run, 1)
+    w.add_alias(temple, "C3", run, 1)
+    w.record(temple, "The party found Versi bound in the Temple of the Oracle.", run, 1)
+    w.record(oracle, "The Oracle told Ireena of her past.", run, 1)
+    w.record(hag, "Morgantha sells pies to the party", run, 1)
+
+    w.record(ireena, "Ireena prayed at the Temple of the Oracle.", run, 1)
+    links = w.links()["links"]
+    assert links["Morgantha"] == hag and links["Ireena"] == ireena and links["Temple of the Oracle"] == temple
+    assert links["Oracle"] == oracle  # "the Oracle" links however the sentence begins
+    assert "she who knows" not in links and "C3" not in links and "windmill hag" not in links  # descriptions, map keys
+    pattern = World.link_pattern(links)
+    assert [links[m.group(0)] for m in pattern.finditer("At the Temple of the Oracle, the Oracle spoke.")] == [temple, oracle]
+
+    # A player gets links only to what the party knows of.
+    player = World(store, replace(camp, role="player"))
+    assert "Morgantha" in player.links()["links"] and "Ireena" not in player.links()["links"]  # her book facts are the DM's
+
+    # Where else it's named: other things' notes, and recaps. The longest name decides: Ireena praying at
+    # the Temple of the Oracle names the temple, not the Oracle.
+    store.upsert_session(camp, 1, title="The temple", summary="Versi was freed. Ireena wept.")
+    m = w.mentions(oracle)
+    assert [x["name"] for x in m["entities"]] == ["Temple of the Oracle"] and [x["number"] for x in m["sessions"]] == [1]
+    assert [x["name"] for x in w.mentions(temple)["entities"]] == ["Ireena Kolyana"]
+    assert [x["name"] for x in w.mentions(ireena)["entities"]] == ["Versi"]
+
+
+def test_a_session_page_says_what_it_changed():
+    from dataclasses import replace
+
+    store, camp, w, _ = setup(role="dm", dm_only=False)
+    ireena = w.resolve("Ireena")["id"]
+    lives = next(f for f in w.facts(ireena) if f["statement"].startswith("Lives"))
+    w.record(ireena, "Ireena is in Vallaki", play(store, w, 1), 1, attribute="location", value="Vallaki")
+    run = play(store, w, 2)
+    w.record(ireena, "Ireena is at the Abbey", run, 2, attribute="location", value="Abbey")
+    w.record(ireena, "Ireena is Tatyana reborn", run, 2, party_knows=False)
+    w.end_fact(lives["id"], run, 2)
+    changes = w.session_changes(2)["changes"]
+    assert [c["name"] for c in changes] == ["Ireena Kolyana"]
+    began = {f["statement"]: f["party_knows"] for f in changes[0]["began"]}
+    assert began == {"Ireena is at the Abbey": True, "Ireena is Tatyana reborn": False}
+    assert {f["statement"] for f in changes[0]["ended"]} == {"Ireena is in Vallaki", "Lives in the Village of Barovia"}
+    player = World(store, replace(camp, role="player"))
+    assert "Ireena is Tatyana reborn" not in [f["statement"] for f in player.session_changes(2)["changes"][0]["began"]]
+
+
 def test_search_doesnt_reveal_hidden_facts():
     store, camp, w, _ = setup(role="dm", dm_only=True)
     w.record(w.resolve("Morgantha")["id"], "Morgantha sells pies to the party", play(store, w, 1), 1)
@@ -375,7 +544,7 @@ def test_a_mistaken_write_from_chat_can_be_taken_back():
     fact = w.facts(bildrath)[0]
     tools["retract_fact"](fact["id"])
     assert w.resolve("Bildrath") is None  # an entity only that write made goes with it
-    # What came from the book or a session is changed by re-running those, not here.
+    # What the book says is changed by digesting it again, not here.
     assert "can't be deleted" in tools["retract_fact"](lives["id"])
     assert "No journal entry" in tools["delete_journal_entry"](12345)
 
@@ -402,6 +571,7 @@ def test_the_schema_is_made_whole_and_the_deployed_database_brought_up_to_it(tmp
     # The deployment as it stands: version 21, when a session had one source.
     s.conn.executescript("""
         ALTER TABLE runs DROP COLUMN recap_before;
+        ALTER TABLE aliases DROP COLUMN party_knows_from;
         ALTER TABLE sessions ADD COLUMN source_id INTEGER REFERENCES sources(id) ON DELETE SET NULL;
     """)
     t1 = s.add_source(camp, "Session 1 transcript", "transcript", [{"heading": "", "text": "Night one.", "page": 1}])
@@ -428,6 +598,25 @@ def test_the_schema_is_made_whole_and_the_deployed_database_brought_up_to_it(tmp
     assert list((tmp_path / "backups").glob(f"campaign-*-pre-v{SCHEMA_VERSION}.db"))
     s.close()
     assert Store(db).schema_version == SCHEMA_VERSION  # reopening changes nothing
+
+    # Version 22, when a player saw every alias but a DM-only book's: from then, each is known or not.
+    store, camp, w, src = setup(role="dm", dm_only=True)
+    path = tmp_path / "v22.db"
+    store.conn.execute(f"VACUUM INTO '{path}'")
+    s = Store(path)
+    hag = s.conn.execute("SELECT entity_id FROM aliases WHERE alias = 'the windmill hag'").fetchone()[0]
+    run = s.conn.execute("INSERT INTO runs (campaign_id, kind, session, created_at) VALUES (?, 'chat', 3, 'x')",
+                         (camp.id,)).lastrowid
+    s.conn.executescript(f"""
+        UPDATE sources SET title = 'Players_Guide_to_Odyssey_v1', filename = 'Players_Guide_to_Odyssey_v1.pdf';
+        INSERT INTO aliases (entity_id, alias, run_id) VALUES ({hag}, 'the baker', {run});
+        ALTER TABLE aliases DROP COLUMN party_knows_from;
+        PRAGMA user_version = 22;
+    """)
+    s.close()
+    known = dict(Store(path).conn.execute("SELECT alias, party_knows_from FROM aliases WHERE entity_id = ?", (hag,)).fetchall())
+    assert known == {"the windmill hag": None, "the baker": 3}
+    assert [x["title"] for x in Store(path).sources(camp)] == ["Players Guide to Odyssey v1"]
 
     # A database from a version with no way forward is refused, not guessed at.
     old = tmp_path / "old.db"

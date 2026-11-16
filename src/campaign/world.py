@@ -71,6 +71,26 @@ def _naming(alias: str) -> bool:
     return len(a) > 2 and not _DESCRIPTIVE.match(a) and not _MAP_KEY.match(a)
 
 
+# The order a name's owners are chosen in when several things share it: people before places
+# before things before what the book merely mentions.
+_LINK_ORDER = ("pc", "npc", "location", "faction", "quest", "item", "monster", "lore")
+
+
+def _link_handle(name: str) -> str | None:
+    """The words in running text that a name links from, or None if it doesn't name one thing.
+
+    "the Silver City" links from "Silver City", so it links however the sentence
+    begins; "the leader of the cult" or "she who knows" describe, and "C3" is a
+    map key, so they don't. Matching is by case: a name is written capitalized.
+    """
+    a = " ".join(name.split())
+    if _MAP_KEY.match(a):
+        return None
+    if (m := re.match(r"^the\s+(.+)$", a, re.IGNORECASE)) and m.group(1)[:1].isupper():
+        a = m.group(1)
+    return a if len(a) >= 3 and a[:1].isupper() else None
+
+
 def _name_keys(name: str) -> set[str]:
     """What a name is called with its punctuation and any epithet after a comma dropped:
     "Sydon, Lord of Storms" and "Sydon, The Lord of Storms" are both "sydon",
@@ -103,15 +123,14 @@ class World:
 
     @property
     def _alias_filter(self) -> str:
-        """SQL condition on an aliases row: in a player's view, hide names that came from DM-only material.
+        """SQL condition on an aliases row: in a player's view, only names the party knows.
 
-        "The windmill hag" from the module would give away who the kindly
-        baker is, as surely as a fact would.
+        "The windmill hag" would give away who the kindly baker is, and a
+        disguise's true name who the stranger is, as surely as a fact would.
         """
         if not self.campaign.spoiler_safe:
             return ""
-        return (" AND run_id NOT IN (SELECT r.id FROM runs r JOIN sources s ON s.id = r.source_id"
-                " WHERE r.kind = 'book' AND s.dm_only = 1)")
+        return f" AND party_knows_from IS NOT NULL AND party_knows_from <= {int(self.now)}"
 
     @property
     def now(self) -> int:
@@ -197,8 +216,12 @@ class World:
         if row is None:
             return None
         e = dict(row)
-        e["aliases"] = [r["alias"] for r in self.conn.execute(
-            f"SELECT alias FROM aliases WHERE entity_id = ?{self._alias_filter} ORDER BY id", (entity_id,))]
+        names = self.conn.execute(
+            f"SELECT alias, party_knows_from FROM aliases WHERE entity_id = ?{self._alias_filter} ORDER BY id",
+            (entity_id,)).fetchall()
+        e["aliases"] = [r["alias"] for r in names]
+        if secret := [r["alias"] for r in names if r["party_knows_from"] is None]:
+            e["secret_aliases"] = secret  # the DM's view: names the players don't see
         return e
 
     def resolve(self, name: str, kind: str | None = None, every_alias: bool = False) -> dict[str, Any] | None:
@@ -276,15 +299,79 @@ class World:
             return
         self.add_alias(entity_id, e["name"], run)
 
-    def add_alias(self, entity_id: int, alias: str, run_id: int) -> None:
+    def add_alias(self, entity_id: int, alias: str, run_id: int, known_from: int | None = 0) -> None:
+        """Another name the entity answers to, known to the party from session `known_from` (None: a
+        name they don't know). A name it already has keeps the earlier of the two times it was known."""
         alias = alias.strip()
         e = self.entity(entity_id)
         if not alias or not e or alias.lower() == e["name"].lower():
             return
         with self.conn:
             self.conn.execute(
-                "INSERT OR IGNORE INTO aliases (entity_id, alias, run_id) VALUES (?, ?, ?)", (entity_id, alias, run_id)
+                "INSERT INTO aliases (entity_id, alias, run_id, party_knows_from) VALUES (?, ?, ?, ?)"
+                " ON CONFLICT (entity_id, alias) DO UPDATE SET party_knows_from = CASE"
+                "  WHEN aliases.party_knows_from IS NULL THEN excluded.party_knows_from"
+                "  WHEN excluded.party_knows_from IS NULL THEN aliases.party_knows_from"
+                "  ELSE min(aliases.party_knows_from, excluded.party_knows_from) END",
+                (entity_id, alias, run_id, known_from),
             )
+
+    def alias_known(self, entity_id: int, alias: str, known_from: int | None) -> bool:
+        """Say whether, and since when, the party knows the entity by this name. False if it has no such alias."""
+        with self.conn:
+            return self.conn.execute(
+                "UPDATE aliases SET party_knows_from = ? WHERE entity_id = ? AND alias = ?",
+                (known_from, entity_id, alias.strip()),
+            ).rowcount > 0
+
+    def remove_alias(self, entity_id: int, alias: str) -> bool:
+        """The entity no longer answers to this name. False if it had no such alias."""
+        with self.conn:
+            gone = self.conn.execute(
+                "DELETE FROM aliases WHERE entity_id = ? AND alias = ?", (entity_id, alias.strip())).rowcount > 0
+        if gone:
+            self._remove_orphans()
+        return gone
+
+    def rename(self, entity_id: int, name: str) -> dict[str, Any]:
+        """Give an entity a different name. One of its aliases that is the new name stops being one;
+        the old name isn't kept (add it as an alias for that). ValueError if another has the name."""
+        e = self.entity(entity_id)
+        name = name.strip()
+        if e is None or not name:
+            raise ValueError("no such entity, or no name")
+        try:
+            with self.conn:
+                self.conn.execute("UPDATE entities SET name = ? WHERE id = ?", (name, entity_id))
+                self.conn.execute("DELETE FROM aliases WHERE entity_id = ? AND alias = ?", (entity_id, name))
+        except sqlite3.IntegrityError:
+            raise ValueError(f"another {e['kind']} is already called {name!r}") from None
+        return self.entity(entity_id)
+
+    def deletable(self, entity_id: int) -> str | None:
+        """Why an entity can't be deleted outright, or None if it can: it's from the reference material,
+        or is a character or holds or is something in the party's inventory."""
+        checks = (
+            ("the reference material describes it", "SELECT 1 FROM facts f JOIN runs r ON r.id = f.run_id"
+             " WHERE f.entity_id = :id AND r.kind = 'book' UNION SELECT 1 FROM aliases a JOIN runs r ON r.id = a.run_id"
+             " WHERE a.entity_id = :id AND r.kind = 'book'"),
+            ("it's a character in the party", "SELECT 1 FROM characters WHERE entity_id = :id"),
+            ("it's in the party's inventory", "SELECT 1 FROM holdings WHERE :id IN (holder_id, item_id)"
+             " UNION SELECT 1 FROM purses WHERE holder_id = :id"),
+        )
+        for why, sql in checks:
+            if self.conn.execute(sql, {"id": entity_id}).fetchone():
+                return why
+        return None
+
+    def delete_entity(self, entity_id: int) -> bool:
+        """Delete an entity that shouldn't exist, and everything recorded about it (see deletable).
+        Journal entries stay, without it among who was involved."""
+        if self.entity(entity_id) is None or self.deletable(entity_id):
+            return False
+        with self.conn:
+            self.conn.execute("DELETE FROM entities WHERE id = ? AND campaign_id = ?", (entity_id, self.campaign.id))
+        return True
 
     def merge(self, keep_id: int, other_id: int) -> dict[str, Any]:
         """Fold `other` into `keep`: its facts, aliases and events move over and its name becomes an alias."""
@@ -379,7 +466,19 @@ class World:
             ).lastrowid
         return {"id": fact_id, "ended": closed}
 
+    # What was written about play (from a session's material, in chat, by hand) can be corrected or taken
+    # back; what the reference material says is changed by digesting it again, not piecemeal.
+    _FROM_PLAY = "SELECT id FROM runs WHERE campaign_id = ? AND kind != 'book'"
+
+    def _fact(self, fact_id: int, from_play: bool = False) -> sqlite3.Row | None:
+        """A fact of this campaign, and with `from_play`, one written about play."""
+        play = f" AND run_id IN ({self._FROM_PLAY})" if from_play else ""
+        return self.conn.execute(f"SELECT * FROM facts WHERE id = ? AND campaign_id = ?{play}",
+                                 [fact_id, self.campaign.id, *([self.campaign.id] if from_play else [])]).fetchone()
+
     def end_fact(self, fact_id: int, run_id: int, session: int) -> bool:
+        if self._fact(fact_id) is None:
+            return False
         with self.conn:
             return self.conn.execute(
                 "UPDATE facts SET valid_to = ?, closed_by_run = ?"
@@ -387,16 +486,9 @@ class World:
                 (session, run_id, fact_id, self.campaign.id),
             ).rowcount > 0
 
-    # Writes a person made (in chat or by hand) can be taken back; what came from a book or a session
-    # transcript is changed by re-running that, not piecemeal.
-    _RETRACTABLE = "SELECT id FROM runs WHERE campaign_id = ? AND kind IN ('chat', 'manual')"
-
     def retract_fact(self, fact_id: int) -> bool:
         """Delete a fact recorded by mistake, reopening the value it replaced. False if it isn't one."""
-        f = self.conn.execute(
-            f"SELECT * FROM facts WHERE id = ? AND campaign_id = ? AND run_id IN ({self._RETRACTABLE})",
-            (fact_id, self.campaign.id, self.campaign.id),
-        ).fetchone()
+        f = self._fact(fact_id, from_play=True)
         if f is None:
             return False
         with self.conn:
@@ -410,18 +502,52 @@ class World:
         self._remove_orphans()
         return True
 
+    def edit_fact(self, fact_id: int, statement: str | None = None, value: str | None = None) -> bool:
+        """Reword a fact about play, or change its attribute's value; its dates stay. False if it isn't one."""
+        f = self._fact(fact_id, from_play=True)
+        if f is None:
+            return False
+        statement = statement.strip() if statement and statement.strip() else f["statement"]
+        with self.conn:
+            self.conn.execute("UPDATE facts SET statement = ?, value = ? WHERE id = ?",
+                              (statement, f["value"] if value is None else value, fact_id))
+            # The search index follows the text (facts_fts has no update trigger).
+            self.conn.execute("INSERT INTO facts_fts(facts_fts, rowid, statement) VALUES ('delete', ?, ?)",
+                              (fact_id, f["statement"]))
+            self.conn.execute("INSERT INTO facts_fts(rowid, statement) VALUES (?, ?)", (fact_id, statement))
+        return True
+
+    def keep_from_party(self, fact_id: int) -> bool:
+        """The party doesn't know this fact after all (it was recorded as known by mistake)."""
+        if self._fact(fact_id) is None:
+            return False
+        with self.conn:
+            return self.conn.execute(
+                "UPDATE facts SET party_knows_from = NULL WHERE id = ? AND campaign_id = ? AND party_knows_from IS NOT NULL",
+                (fact_id, self.campaign.id),
+            ).rowcount > 0
+
     def delete_event(self, event_id: int) -> bool:
-        """Delete a journal entry recorded by mistake. False if it isn't one."""
+        """Delete a journal entry recorded by mistake. False if there's no such entry."""
         with self.conn:
             gone = self.conn.execute(
-                f"DELETE FROM events WHERE id = ? AND campaign_id = ? AND run_id IN ({self._RETRACTABLE})",
-                (event_id, self.campaign.id, self.campaign.id),
-            ).rowcount > 0
+                "DELETE FROM events WHERE id = ? AND campaign_id = ?", (event_id, self.campaign.id)).rowcount > 0
         if gone:
             self._remove_orphans()
         return gone
 
+    def edit_event(self, event_id: int, text: str) -> bool:
+        """Reword a journal entry. False if there's no such entry."""
+        if not text.strip():
+            return False
+        with self.conn:
+            return self.conn.execute(
+                "UPDATE events SET text = ? WHERE id = ? AND campaign_id = ?",
+                (text.strip(), event_id, self.campaign.id)).rowcount > 0
+
     def party_learned(self, fact_id: int, session: int) -> bool:
+        if self._fact(fact_id) is None:
+            return False
         with self.conn:
             return self.conn.execute(
                 "UPDATE facts SET party_knows_from = ? WHERE id = ? AND campaign_id = ?"
@@ -545,7 +671,8 @@ class World:
         return None
 
     def list(self, kind: str | None = None, q: str | None = None, in_play: bool = False) -> list[dict[str, Any]]:
-        """Entities with their current attributes and fact counts.
+        """Entities with their current attributes and fact counts, what each is (`description`) and
+        the last thing that happened to it in play (`latest`: {session, text}).
 
         `in_play` keeps only those the table has touched (any fact or event
         that didn't come from the book).
@@ -561,11 +688,22 @@ class World:
             f" (SELECT json_group_object(f.attribute, f.value) FROM facts f WHERE f.entity_id = e.id"
             f"  AND f.valid_to IS NULL AND f.attribute IS NOT NULL AND f.attribute NOT IN {tuple(BULKY)}"
             f"  AND f.modality = 'fact'{clause}) AS attrs,"
-            f" (SELECT f.statement FROM facts f WHERE f.entity_id = e.id AND f.valid_to IS NULL"
-            f"  AND f.attribute IS NULL AND f.modality = 'fact'{clause} ORDER BY f.valid_from DESC, f.id LIMIT 1) AS headline"
+            # What it is: the book's description of it (the first thing the book says), else the first
+            # thing play said about it.
+            f" (SELECT f.statement FROM facts f JOIN runs r ON r.id = f.run_id WHERE f.entity_id = e.id"
+            f"  AND f.valid_to IS NULL AND f.attribute IS NULL AND f.modality = 'fact'"
+            f"  AND f.statement NOT LIKE '{TREASURE}%'{clause}"
+            "  ORDER BY r.kind = 'book' DESC, f.valid_from, f.id LIMIT 1) AS description,"
+            # The last thing that happened to it in play: a journal entry it's in, or something recorded.
+            " (SELECT json_object('session', n, 'text', t) FROM ("
+            "   SELECT ev.session AS n, ev.created_at AS at, ev.text AS t FROM events ev"
+            "    JOIN event_entities x ON x.event_id = ev.id WHERE x.entity_id = e.id"
+            "   UNION ALL SELECT f.valid_from, f.created_at, f.statement FROM facts f JOIN runs r ON r.id = f.run_id"
+            f"   WHERE f.entity_id = e.id AND r.kind != 'book' AND coalesce(f.attribute, '') NOT IN {tuple(BULKY)}{clause}"
+            "  ) ORDER BY n DESC, at DESC LIMIT 1) AS latest"
             " FROM entities e WHERE e.campaign_id = ?"
         )
-        args = params * 4 + [self.campaign.id]  # one per {clause} above
+        args = params * 5 + [self.campaign.id]  # one per {clause} above
         if kind:
             sql += " AND e.kind = ?"
             args.append(kind)
@@ -585,6 +723,7 @@ class World:
                 continue
             d["aliases"] = d["aliases"].split("; ") if d["aliases"] else []
             d["current"] = json.loads(d.pop("attrs") or "{}")
+            d["latest"] = json.loads(d["latest"]) if d["latest"] else None
             out.append(d)
         return out
 
@@ -606,6 +745,116 @@ class World:
                     (q, self.campaign.id, *params),
                 )))[:limit]
         return [v for v in (self.view(i, as_of) for i in ids) if v]
+
+    # -- the world as a wiki -----------------------------------------------------
+
+    def _visible_entities(self) -> tuple[str, list[Any]]:
+        """SQL condition on entities `e`, and its parameters: what this viewer may know the world has
+        (as list() decides)."""
+        if not self.campaign.spoiler_safe:
+            return "", []
+        clause, params = self._visible(None)
+        return (f" AND (e.kind = 'pc' OR EXISTS (SELECT 1 FROM facts f WHERE f.entity_id = e.id{clause})"
+                " OR EXISTS (SELECT 1 FROM event_entities x WHERE x.entity_id = e.id))", params)
+
+    def links(self) -> dict[str, Any]:
+        """Which words in running text link to which entity, for this viewer: `links` maps each name
+        as written to an entity id, and `entities` says what each linked entity is.
+
+        Only what this viewer may see: an entity they don't know of, or a name they don't know it
+        by, is never a link. Its own name wins over another's alias; an alias several things share
+        links to none of them.
+        """
+        visible, params = self._visible_entities()
+        rows = self.conn.execute(f"SELECT e.id, e.kind, e.name FROM entities e WHERE e.campaign_id = ?{visible}",
+                                 (self.campaign.id, *params)).fetchall()
+        entities = {r["id"]: {"name": r["name"], "kind": r["kind"]} for r in rows}
+        rank = {k: i for i, k in enumerate(_LINK_ORDER)}
+        links: dict[str, int] = {}
+        for r in sorted(rows, key=lambda r: (rank.get(r["kind"], len(rank)), r["id"])):
+            for handle in {h for h in (r["name"].strip(), _link_handle(r["name"])) if h and len(h) >= 2}:
+                links.setdefault(handle, r["id"])
+        owners: dict[str, set[int]] = {}
+        for a in self.conn.execute(
+            f"SELECT entity_id, alias FROM aliases WHERE entity_id IN (SELECT id FROM entities WHERE campaign_id = ?)"
+            f"{self._alias_filter}", (self.campaign.id,)):
+            if a["entity_id"] in entities and (handle := _link_handle(a["alias"])):
+                owners.setdefault(handle, set()).add(a["entity_id"])
+        for handle, ids in owners.items():
+            if handle not in links and len(ids) == 1:
+                links[handle] = next(iter(ids))
+        return {"links": links, "entities": entities}
+
+    @staticmethod
+    def link_pattern(links: dict[str, int]) -> re.Pattern[str] | None:
+        """The names in `links` as one pattern, longest first, so "Temple of the Oracle" links to the
+        temple and not to the Oracle. The app's pages link text with the same rule (wiki.js)."""
+        if not links:
+            return None
+        names = sorted(links, key=len, reverse=True)
+        return re.compile(r"(?<!\w)(?:" + "|".join(re.escape(n) for n in names) + r")(?!\w)")
+
+    def mentions(self, entity_id: int, most: int = 40) -> dict[str, Any]:
+        """Where else this viewer reads this entity's name: what's said about other entities, and
+        session recaps. A name counts where it would be a link to this entity."""
+        index = self.links()
+        links = index["links"]
+        handles = [h for h, i in links.items() if i == entity_id]
+        if not handles:
+            return {"entities": [], "sessions": [], "more": 0}
+        pattern = self.link_pattern(links)
+        names_it = lambda text: any(links.get(m.group(0)) == entity_id for m in pattern.finditer(text))  # noqa: E731
+        clause, params = self._visible(None)
+        phrases = " OR ".join('"' + h.replace('"', " ") + '"' for h in handles)
+        found: dict[int, None] = {}
+        for r in self.conn.execute(
+            "SELECT f.entity_id, f.statement FROM facts_fts JOIN facts f ON f.id = facts_fts.rowid"
+            f" WHERE facts_fts MATCH ? AND f.campaign_id = ? AND f.entity_id != ?{clause}"
+            f" AND coalesce(f.attribute, '') NOT IN {tuple(BULKY)} ORDER BY f.id",
+            (phrases, self.campaign.id, entity_id, *params),
+        ):
+            if r["entity_id"] in index["entities"] and r["entity_id"] not in found and names_it(r["statement"]):
+                found[r["entity_id"]] = None
+        others = sorted(({"id": i, **index["entities"][i]} for i in found), key=lambda e: e["name"].lower())
+        sessions = [
+            {"number": r["number"], "title": r["title"], "kind": r["kind"]}
+            for r in self.conn.execute(
+                "SELECT number, title, kind, summary FROM sessions WHERE campaign_id = ? ORDER BY number",
+                (self.campaign.id,))
+            if names_it(r["summary"] or "")
+        ]
+        return {"entities": others[:most], "sessions": sessions, "more": max(0, len(others) - most)}
+
+    def session_changes(self, number: int) -> dict[str, Any]:
+        """What a session changed, as this viewer may see it: by entity, the facts that began, ended,
+        or that the party learned then; and what the party's inventory gained, lost and spent."""
+        clause, params = self._visible(None)
+        rows = self.conn.execute(
+            f"SELECT {FACT_COLUMNS}, e.name AS entity, e.kind AS entity_kind FROM facts f"
+            " JOIN entities e ON e.id = f.entity_id JOIN runs r ON r.id = f.run_id"
+            " LEFT JOIN sources s ON s.id = f.source_id WHERE f.campaign_id = ?"
+            " AND (f.valid_from = ? OR f.valid_to = ? OR (f.party_knows_from = ? AND f.valid_from < ?))"
+            f" AND coalesce(f.attribute, '') NOT IN {tuple(BULKY)} AND coalesce(f.attribute, '') != ?{clause}"
+            " ORDER BY f.id",
+            (self.campaign.id, number, number, number, number, USES_STAT_BLOCK, *params),
+        ).fetchall()
+        changes: dict[int, dict[str, Any]] = {}
+        for r in rows:
+            c = changes.setdefault(r["entity_id"], {"id": r["entity_id"], "name": r["entity"], "kind": r["entity_kind"],
+                                                    "began": [], "ended": [], "learned": []})
+            f = {"id": r["id"], "statement": r["statement"], "attribute": r["attribute"], "value": r["value"],
+                 "modality": r["modality"], "party_knows": r["party_knows_from"] is not None}
+            if r["valid_from"] == number:
+                c["began"].append(f | {"ended_too": r["valid_to"] == number})
+            elif r["valid_to"] == number:
+                c["ended"].append(f)
+            else:
+                c["learned"].append(f)
+        inventory = [r["text"] for r in self.conn.execute(
+            "SELECT text FROM inventory_log WHERE campaign_id = ? AND session = ? ORDER BY id", (self.campaign.id, number))]
+        rank = {k: i for i, k in enumerate(_LINK_ORDER)}
+        return {"changes": sorted(changes.values(), key=lambda c: (rank.get(c["kind"], len(rank)), c["name"].lower())),
+                "inventory": inventory}
 
     def timeline(self, entity_id: int) -> list[dict[str, Any]]:
         """What changed for an entity, session by session: facts starting and ending, and events."""
@@ -653,6 +902,14 @@ class World:
                 (source_id,),
             )
         }
+        # Whether the party knows the book's names, as play left it: learned, or kept from them.
+        names_known = {
+            (r["name"].lower(), r["alias"].lower()): r["party_knows_from"]
+            for r in self.conn.execute(
+                "SELECT e.name, a.alias, a.party_knows_from FROM aliases a JOIN entities e ON e.id = a.entity_id"
+                " JOIN runs r ON r.id = a.run_id WHERE r.kind = 'book' AND r.source_id = ?", (source_id,),
+            )
+        }
         src = self.store.source(source_id)
         with self.conn:
             self.conn.execute("DELETE FROM runs WHERE kind = 'book' AND source_id = ?", (source_id,))
@@ -666,7 +923,8 @@ class World:
             e = self._match_book_entry(item) or self._new_entity(item["name"], item["kind"])
             key_alias = [item["area_key"]] if item.get("area_key") else []
             for alias in (item["name"], *item.get("aliases", []), *key_alias):
-                self.add_alias(e["id"], alias, run)
+                self.add_alias(e["id"], alias, run, names_known.get((e["name"].lower(), alias.strip().lower()),
+                                                                    0 if known else None))
             pages = item.get("pages", [])
             statements = ([item["summary"]] if item.get("summary") else []) + list(item.get("facts", []))
             statements += [f"{TREASURE}{t}" for t in item.get("treasure") or []]
@@ -746,7 +1004,8 @@ class World:
             for f in self.facts(entity_id)
         ]
         events = [(ev["session"], ev["text"]) for ev in self.events(entity_id=entity_id)]
-        blob = json.dumps([SUMMARY_VERSION, e["name"], facts, events], ensure_ascii=False)
+        # The names it goes by are in the summary's prompt: a name the party doesn't know mustn't reach theirs.
+        blob = json.dumps([SUMMARY_VERSION, e["name"], e["aliases"], facts, events], ensure_ascii=False)
         return hashlib.sha256(blob.encode()).hexdigest()
 
     def cached_summary(self, entity_id: int) -> str | None:

@@ -12,6 +12,11 @@ from .ingest import CHUNKER_VERSION, parse_bytes
 REFERENCE_SUFFIXES = {".pdf", ".md", ".markdown", ".txt"}
 
 
+def source_title(filename: str) -> str:
+    """A title a person would give a file: "Players_Guide_to_Odyssey_v1.pdf" is "Players Guide to Odyssey v1"."""
+    return " ".join(Path(filename).stem.replace("_", " ").split()) or filename
+
+
 def add_reference(
     store: Store,
     campaign: Campaign,
@@ -34,7 +39,7 @@ def add_reference(
     if not doc.chunks:
         raise ValueError("no text found (a scanned PDF needs OCR first)")
     source_id = store.add_source(
-        campaign, title or Path(filename).stem, kind, doc,
+        campaign, title or source_title(filename), kind, doc,
         dm_only=(kind == "module") if dm_only is None else dm_only,
         blob=blob, filename=filename,
     )

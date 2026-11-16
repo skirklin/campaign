@@ -420,8 +420,10 @@ def test_recaps_put_past_play_on_the_same_timeline(store):
     assert "no session 7" in t["add_journal_entry"](text="Later.", session=7)
 
     # Rewriting a recap; the next played session comes after them.
-    assert t["add_recap"](title="The call", summary="The boar hunt, the Oracle, the prophecy.", number=1).startswith("Recap 1")
-    assert "isn't a recap" in t["add_recap"](title="x", summary="y", number=5)
+    assert t["edit_session"](1, summary="The boar hunt, the Oracle, the prophecy.") == "Session 1 rewritten."
+    assert [(x["title"], x["summary"]) for x in json.loads(t["list_sessions"]())][0] == \
+        ("The call", "The boar hunt, the Oracle, the prophecy.")
+    assert "no session 5" in t["edit_session"](5, title="x")
     assert store.next_ingest_session(camp) == 3
 
 
@@ -456,3 +458,10 @@ def test_the_dndbeyond_tool(store, monkeypatch):
     assert out["level"] == 5 and out["carrying_differs"]["coin"]["gp"]["dndbeyond"] == 120
     got = json.loads(t["get_character"](name="Agrippa"))
     assert got["sheet_from"].startswith("D&D Beyond") and got["derived"]["ac"]["total"] == 19
+
+
+def test_a_reference_titled_by_its_file_reads_like_a_title():
+    from campaign.library import source_title
+
+    assert source_title("Players_Guide_to_Odyssey_v1.pdf") == "Players Guide to Odyssey v1"
+    assert source_title("Curse of Strahd.md") == "Curse of Strahd"

@@ -288,8 +288,10 @@ def state(
     for e in w.list(kind=kind, q=query, in_play=in_play):
         attrs = ", ".join(f"{k}: {v}" for k, v in e["current"].items())
         typer.echo(f"[{e['kind']}] {e['name']}" + (f" ({attrs})" if attrs else ""))
-        if e["headline"]:
-            typer.echo(f"    {e['headline']}")
+        if e["description"]:
+            typer.echo(f"    {e['description']}")
+        if e["latest"] and e["latest"]["text"] != e["description"]:
+            typer.echo(f"    Latest (session {e['latest']['session']}): {e['latest']['text']}")
 
 
 @app.command()
