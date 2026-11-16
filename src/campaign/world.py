@@ -71,6 +71,26 @@ def _naming(alias: str) -> bool:
     return len(a) > 2 and not _DESCRIPTIVE.match(a) and not _MAP_KEY.match(a)
 
 
+# The order a name's owners are chosen in when several things share it: people before places
+# before things before what the book merely mentions.
+_LINK_ORDER = ("pc", "npc", "location", "faction", "quest", "item", "monster", "lore")
+
+
+def _link_handle(name: str) -> str | None:
+    """The words in running text that a name links from, or None if it doesn't name one thing.
+
+    "the Silver City" links from "Silver City", so it links however the sentence
+    begins; "the leader of the cult" or "she who knows" describe, and "C3" is a
+    map key, so they don't. Matching is by case: a name is written capitalized.
+    """
+    a = " ".join(name.split())
+    if _MAP_KEY.match(a):
+        return None
+    if (m := re.match(r"^the\s+(.+)$", a, re.IGNORECASE)) and m.group(1)[:1].isupper():
+        a = m.group(1)
+    return a if len(a) >= 3 and a[:1].isupper() else None
+
+
 def _name_keys(name: str) -> set[str]:
     """What a name is called with its punctuation and any epithet after a comma dropped:
     "Sydon, Lord of Storms" and "Sydon, The Lord of Storms" are both "sydon",
@@ -725,6 +745,116 @@ class World:
                     (q, self.campaign.id, *params),
                 )))[:limit]
         return [v for v in (self.view(i, as_of) for i in ids) if v]
+
+    # -- the world as a wiki -----------------------------------------------------
+
+    def _visible_entities(self) -> tuple[str, list[Any]]:
+        """SQL condition on entities `e`, and its parameters: what this viewer may know the world has
+        (as list() decides)."""
+        if not self.campaign.spoiler_safe:
+            return "", []
+        clause, params = self._visible(None)
+        return (f" AND (e.kind = 'pc' OR EXISTS (SELECT 1 FROM facts f WHERE f.entity_id = e.id{clause})"
+                " OR EXISTS (SELECT 1 FROM event_entities x WHERE x.entity_id = e.id))", params)
+
+    def links(self) -> dict[str, Any]:
+        """Which words in running text link to which entity, for this viewer: `links` maps each name
+        as written to an entity id, and `entities` says what each linked entity is.
+
+        Only what this viewer may see: an entity they don't know of, or a name they don't know it
+        by, is never a link. Its own name wins over another's alias; an alias several things share
+        links to none of them.
+        """
+        visible, params = self._visible_entities()
+        rows = self.conn.execute(f"SELECT e.id, e.kind, e.name FROM entities e WHERE e.campaign_id = ?{visible}",
+                                 (self.campaign.id, *params)).fetchall()
+        entities = {r["id"]: {"name": r["name"], "kind": r["kind"]} for r in rows}
+        rank = {k: i for i, k in enumerate(_LINK_ORDER)}
+        links: dict[str, int] = {}
+        for r in sorted(rows, key=lambda r: (rank.get(r["kind"], len(rank)), r["id"])):
+            for handle in {h for h in (r["name"].strip(), _link_handle(r["name"])) if h and len(h) >= 2}:
+                links.setdefault(handle, r["id"])
+        owners: dict[str, set[int]] = {}
+        for a in self.conn.execute(
+            f"SELECT entity_id, alias FROM aliases WHERE entity_id IN (SELECT id FROM entities WHERE campaign_id = ?)"
+            f"{self._alias_filter}", (self.campaign.id,)):
+            if a["entity_id"] in entities and (handle := _link_handle(a["alias"])):
+                owners.setdefault(handle, set()).add(a["entity_id"])
+        for handle, ids in owners.items():
+            if handle not in links and len(ids) == 1:
+                links[handle] = next(iter(ids))
+        return {"links": links, "entities": entities}
+
+    @staticmethod
+    def link_pattern(links: dict[str, int]) -> re.Pattern[str] | None:
+        """The names in `links` as one pattern, longest first, so "Temple of the Oracle" links to the
+        temple and not to the Oracle. The app's pages link text with the same rule (wiki.js)."""
+        if not links:
+            return None
+        names = sorted(links, key=len, reverse=True)
+        return re.compile(r"(?<!\w)(?:" + "|".join(re.escape(n) for n in names) + r")(?!\w)")
+
+    def mentions(self, entity_id: int, most: int = 40) -> dict[str, Any]:
+        """Where else this viewer reads this entity's name: what's said about other entities, and
+        session recaps. A name counts where it would be a link to this entity."""
+        index = self.links()
+        links = index["links"]
+        handles = [h for h, i in links.items() if i == entity_id]
+        if not handles:
+            return {"entities": [], "sessions": [], "more": 0}
+        pattern = self.link_pattern(links)
+        names_it = lambda text: any(links.get(m.group(0)) == entity_id for m in pattern.finditer(text))  # noqa: E731
+        clause, params = self._visible(None)
+        phrases = " OR ".join('"' + h.replace('"', " ") + '"' for h in handles)
+        found: dict[int, None] = {}
+        for r in self.conn.execute(
+            "SELECT f.entity_id, f.statement FROM facts_fts JOIN facts f ON f.id = facts_fts.rowid"
+            f" WHERE facts_fts MATCH ? AND f.campaign_id = ? AND f.entity_id != ?{clause}"
+            f" AND coalesce(f.attribute, '') NOT IN {tuple(BULKY)} ORDER BY f.id",
+            (phrases, self.campaign.id, entity_id, *params),
+        ):
+            if r["entity_id"] in index["entities"] and r["entity_id"] not in found and names_it(r["statement"]):
+                found[r["entity_id"]] = None
+        others = sorted(({"id": i, **index["entities"][i]} for i in found), key=lambda e: e["name"].lower())
+        sessions = [
+            {"number": r["number"], "title": r["title"], "kind": r["kind"]}
+            for r in self.conn.execute(
+                "SELECT number, title, kind, summary FROM sessions WHERE campaign_id = ? ORDER BY number",
+                (self.campaign.id,))
+            if names_it(r["summary"] or "")
+        ]
+        return {"entities": others[:most], "sessions": sessions, "more": max(0, len(others) - most)}
+
+    def session_changes(self, number: int) -> dict[str, Any]:
+        """What a session changed, as this viewer may see it: by entity, the facts that began, ended,
+        or that the party learned then; and what the party's inventory gained, lost and spent."""
+        clause, params = self._visible(None)
+        rows = self.conn.execute(
+            f"SELECT {FACT_COLUMNS}, e.name AS entity, e.kind AS entity_kind FROM facts f"
+            " JOIN entities e ON e.id = f.entity_id JOIN runs r ON r.id = f.run_id"
+            " LEFT JOIN sources s ON s.id = f.source_id WHERE f.campaign_id = ?"
+            " AND (f.valid_from = ? OR f.valid_to = ? OR (f.party_knows_from = ? AND f.valid_from < ?))"
+            f" AND coalesce(f.attribute, '') NOT IN {tuple(BULKY)} AND coalesce(f.attribute, '') != ?{clause}"
+            " ORDER BY f.id",
+            (self.campaign.id, number, number, number, number, USES_STAT_BLOCK, *params),
+        ).fetchall()
+        changes: dict[int, dict[str, Any]] = {}
+        for r in rows:
+            c = changes.setdefault(r["entity_id"], {"id": r["entity_id"], "name": r["entity"], "kind": r["entity_kind"],
+                                                    "began": [], "ended": [], "learned": []})
+            f = {"id": r["id"], "statement": r["statement"], "attribute": r["attribute"], "value": r["value"],
+                 "modality": r["modality"], "party_knows": r["party_knows_from"] is not None}
+            if r["valid_from"] == number:
+                c["began"].append(f | {"ended_too": r["valid_to"] == number})
+            elif r["valid_to"] == number:
+                c["ended"].append(f)
+            else:
+                c["learned"].append(f)
+        inventory = [r["text"] for r in self.conn.execute(
+            "SELECT text FROM inventory_log WHERE campaign_id = ? AND session = ? ORDER BY id", (self.campaign.id, number))]
+        rank = {k: i for i, k in enumerate(_LINK_ORDER)}
+        return {"changes": sorted(changes.values(), key=lambda c: (rank.get(c["kind"], len(rank)), c["name"].lower())),
+                "inventory": inventory}
 
     def timeline(self, entity_id: int) -> list[dict[str, Any]]:
         """What changed for an entity, session by session: facts starting and ending, and events."""

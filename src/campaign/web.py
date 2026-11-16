@@ -702,6 +702,7 @@ def create_app(
         view["timeline"] = w.timeline(entity_id)
         view["all_events"] = w.events(entity_id=entity_id)
         view["character"] = s.character_for_entity(entity_id)
+        view["mentioned_in"] = w.mentions(entity_id)
         # The stat block it runs on when it has none of its own ("Heleka, a sea hag"), to show here too.
         found = None if w.attribute_values(entity_id, "stat_block") else w.stat_block(entity_id)
         view["borrowed_stat_block"] = found and {"from": {"id": found[1]["id"], "name": found[1]["name"]},
@@ -802,6 +803,23 @@ def create_app(
     def entity_passage(entity_id: int, c: Campaign = Depends(reader), s: Store = Depends(store)) -> list[dict[str, Any]]:
         """The book text an entity's stat block was read from, to check it against."""
         return encounters.book_passage(s, c, entity_id)
+
+    @app.get("/api/campaigns/{slug}/links")
+    def links(c: Campaign = Depends(reader), s: Store = Depends(store)) -> dict[str, Any]:
+        """Which names in the campaign's text link to which entity, for this reader (World.links)."""
+        return World(s, c).links()
+
+    @app.get("/api/campaigns/{slug}/sessions/{number}")
+    def session_page(number: int, c: Campaign = Depends(reader), s: Store = Depends(store)) -> dict[str, Any]:
+        """One session as a page: its recap, its journal, and what it changed in the world."""
+        sessions = s.sessions(c)
+        at = next((i for i, x in enumerate(sessions) if x["number"] == number), None)
+        if at is None:
+            raise HTTPException(404, "no such session")
+        w = World(s, c)
+        return {"session": sessions[at], "events": w.events(session=number), **w.session_changes(number),
+                "previous": sessions[at - 1]["number"] if at > 0 else None,
+                "next": sessions[at + 1]["number"] if at + 1 < len(sessions) else None}
 
     @app.get("/api/campaigns/{slug}/journal")
     def journal(session: int | None = None, c: Campaign = Depends(reader), s: Store = Depends(store)) -> list[dict]:

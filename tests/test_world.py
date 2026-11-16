@@ -290,6 +290,63 @@ def test_a_card_says_what_a_thing_is_and_what_last_happened_to_it():
     assert next(e for e in w.list() if e["id"] == bram)["description"] == "Bram runs the ferry."
 
 
+def test_names_link_to_their_pages_as_the_reader_knows_them():
+    from dataclasses import replace
+
+    store, camp, w, _ = setup(role="dm", dm_only=True)
+    hag = w.resolve("Morgantha")["id"]
+    ireena = w.resolve("Ireena")["id"]
+    temple = w.ensure_entity("Temple of the Oracle", "location")["id"]
+    oracle = w.ensure_entity("Versi", "npc")["id"]
+    run = play(store, w, 1)
+    w.add_alias(oracle, "the Oracle", run, 1)
+    w.add_alias(oracle, "she who knows", run, 1)
+    w.add_alias(temple, "C3", run, 1)
+    w.record(temple, "The party found Versi bound in the Temple of the Oracle.", run, 1)
+    w.record(oracle, "The Oracle told Ireena of her past.", run, 1)
+    w.record(hag, "Morgantha sells pies to the party", run, 1)
+
+    w.record(ireena, "Ireena prayed at the Temple of the Oracle.", run, 1)
+    links = w.links()["links"]
+    assert links["Morgantha"] == hag and links["Ireena"] == ireena and links["Temple of the Oracle"] == temple
+    assert links["Oracle"] == oracle  # "the Oracle" links however the sentence begins
+    assert "she who knows" not in links and "C3" not in links and "windmill hag" not in links  # descriptions, map keys
+    pattern = World.link_pattern(links)
+    assert [links[m.group(0)] for m in pattern.finditer("At the Temple of the Oracle, the Oracle spoke.")] == [temple, oracle]
+
+    # A player gets links only to what the party knows of.
+    player = World(store, replace(camp, role="player"))
+    assert "Morgantha" in player.links()["links"] and "Ireena" not in player.links()["links"]  # her book facts are the DM's
+
+    # Where else it's named: other things' notes, and recaps. The longest name decides: Ireena praying at
+    # the Temple of the Oracle names the temple, not the Oracle.
+    store.upsert_session(camp, 1, title="The temple", summary="Versi was freed. Ireena wept.")
+    m = w.mentions(oracle)
+    assert [x["name"] for x in m["entities"]] == ["Temple of the Oracle"] and [x["number"] for x in m["sessions"]] == [1]
+    assert [x["name"] for x in w.mentions(temple)["entities"]] == ["Ireena Kolyana"]
+    assert [x["name"] for x in w.mentions(ireena)["entities"]] == ["Versi"]
+
+
+def test_a_session_page_says_what_it_changed():
+    from dataclasses import replace
+
+    store, camp, w, _ = setup(role="dm", dm_only=False)
+    ireena = w.resolve("Ireena")["id"]
+    lives = next(f for f in w.facts(ireena) if f["statement"].startswith("Lives"))
+    w.record(ireena, "Ireena is in Vallaki", play(store, w, 1), 1, attribute="location", value="Vallaki")
+    run = play(store, w, 2)
+    w.record(ireena, "Ireena is at the Abbey", run, 2, attribute="location", value="Abbey")
+    w.record(ireena, "Ireena is Tatyana reborn", run, 2, party_knows=False)
+    w.end_fact(lives["id"], run, 2)
+    changes = w.session_changes(2)["changes"]
+    assert [c["name"] for c in changes] == ["Ireena Kolyana"]
+    began = {f["statement"]: f["party_knows"] for f in changes[0]["began"]}
+    assert began == {"Ireena is at the Abbey": True, "Ireena is Tatyana reborn": False}
+    assert {f["statement"] for f in changes[0]["ended"]} == {"Ireena is in Vallaki", "Lives in the Village of Barovia"}
+    player = World(store, replace(camp, role="player"))
+    assert "Ireena is Tatyana reborn" not in [f["statement"] for f in player.session_changes(2)["changes"][0]["began"]]
+
+
 def test_search_doesnt_reveal_hidden_facts():
     store, camp, w, _ = setup(role="dm", dm_only=True)
     w.record(w.resolve("Morgantha")["id"], "Morgantha sells pies to the party", play(store, w, 1), 1)

@@ -7,6 +7,7 @@ import { characterCard, newCharacterForm } from "./sheet.js";
 import { InventoryView } from "./inventory.js";
 import { renderMarkdown, inline, statBlockFromData } from "./markdown.js";
 import { encounterFence, encountersTab } from "./encounter.js";
+import { nameLinks } from "./wiki.js";
 
 export async function campaignList() {
   const [campaigns, info, me] = await Promise.all([
@@ -230,6 +231,7 @@ async function askTab(c, _me, convId) {
         });
         if (frame) { cancelAnimationFrame(frame); paint(); }
         if (usage && answer) answer.el.append(costLine(usage));
+        (await nameLinks(c.slug)).link(thread);
         typing.remove();
         chats = await api("GET", `${base}/chats`);
         fillHead();
@@ -259,6 +261,7 @@ async function askTab(c, _me, convId) {
     current = conv.id;
     fillHead();
     thread.replaceChildren(...turnsEls(conv.turns));
+    nameLinks(c.slug).then((wiki) => wiki.link(thread));
     requestAnimationFrame(() => thread.lastElementChild?.scrollIntoView({ block: "end" }));
   } else {
     if (convId) {  // deleted, or someone else's: start a new one instead
@@ -344,7 +347,7 @@ function campaignHome(c) {
     const link = (href, text) => h("a", { href }, text);
     const parts = [
       last && h("div.home-item.home-last", h("span.home-label", "Last time"),
-        h("div", link(`#/campaigns/${c.slug}/ingest`, `#${last.number} ${last.title || "(untitled)"}`),
+        h("div", link(`#/campaigns/${c.slug}/session/${last.number}`, `#${last.number} ${last.title || "(untitled)"}`),
           last.summary && h("p.small", last.summary.split(/(?<=[.!?])\s/)[0]))),
       open.length > 0 && h("div.home-item", h("span.home-label", "Quests under way"),
         h("div", open.map((q, i) => [i ? " · " : "", link(`#/campaigns/${c.slug}/entity/${q.id}`, q.name)]))),
@@ -356,6 +359,7 @@ function campaignHome(c) {
           f.state?.started ? h("span.muted.small", ` round ${f.state.round}`) : ""]))),
     ].filter(Boolean);
     if (parts.length) el.replaceChildren(h("h3", "Where things stand"), ...parts);
+    nameLinks(c.slug).then((wiki) => el.querySelectorAll(".home-last p").forEach((p) => wiki.link(p)));
   }, () => {});
   return el;
 }
@@ -462,21 +466,77 @@ function scanForm(c, jobs) {
       + "correct; it takes a minute or two and carries on if you leave the page."));
 }
 
+// -- sessions as pages -------------------------------------------------------------
+
+// A journal entry with the names in it linked, followed by whoever it's about that it doesn't name.
+function journalEntry(c, e, wiki) {
+  const text = h("span", inline(e.text));
+  const linked = wiki.link(text);
+  const rest = e.entities.filter((x) => !linked.has(x.id) && !linked.has(String(x.id)));
+  return h("li", text, rest.length > 0 && h("span.event-entities", " — ",
+    rest.map((x, i) => [i ? ", " : "", h("a", { href: `#/campaigns/${c.slug}/entity/${x.id}` }, x.name)])));
+}
+
+function recap(s, wiki) {
+  const el = h("div.prose", s.summary ? s.summary.split(/\n\s*\n/).map((p) => h("p", inline(p))) : h("p.muted", "No recap."));
+  wiki.link(el);
+  return el;
+}
+
+// One session as a page, like a wiki's recent changes: its recap, its journal, and what it changed
+// in the world, thing by thing, as this reader may see it.
+export async function sessionView(slug, number) {
+  const base = `/api/campaigns/${slug}`;
+  const [campaigns, d, name, wiki] = await Promise.all([
+    api("GET", "/api/campaigns"), api("GET", `${base}/sessions/${number}`), sessionNames(slug), nameLinks(slug)]);
+  const c = campaigns.find((x) => x.slug === slug);
+  const s = d.session;
+  const page = (n, label) => n !== null && h("a", { href: `#/campaigns/${slug}/session/${n}` }, label);
+  const fact = (f, lead = "", cls = "") => h(`li.note${cls}`, lead && h("span.muted", lead), h("span", inline(f.statement)),
+    !f.party_knows && h("span.badge.secret", { title: "The party doesn't know this" }, "secret"));
+  const changes = d.changes.map((x) => {
+    const notes = h("ul.notes",
+      x.began.map((f) => fact(f, f.modality === "rumor" ? "Rumor: " : f.modality === "possible" ? "Possible: " : "",
+        f.ended_too ? ".ended" : "")),
+      x.learned.map((f) => fact(f, "The party learned: ")),
+      x.ended.map((f) => fact(f, "No longer: ", ".ended")));
+    wiki.link(notes, { self: x.id });
+    return h("div.change", h("h3", h("a", { href: `#/campaigns/${slug}/entity/${x.id}` }, x.name),
+      h("span.badge", kindName(x.kind))), notes);
+  });
+  const journal = d.events.length > 0 && h("section.card", h("h2", "What happened"),
+    h("ol.journal", d.events.map((e) => journalEntry(c, e, wiki))));
+  const inventory = d.inventory.length > 0 && h("section.card", h("h2", "The party's inventory"),
+    h("ul.notes", d.inventory.map((t) => h("li.note", t))));
+  if (inventory) wiki.link(inventory);
+  return h("section.page.session-page",
+    h("div.page-head", h("a", { href: `#/campaigns/${slug}/ingest` }, `← ${c.name}: sessions`), h("span.spacer"),
+      h("span.session-nav", page(d.previous, `← ${name.heading(d.previous)}`), page(d.next, `${name.heading(d.next)} →`))),
+    h("h1", s.kind === "recap" ? s.title || `Recap ${s.number}` : name.heading(s.number)),
+    (s.kind === "recap" || s.played_on) && h("p.muted", [s.kind === "recap"
+      ? (s.covers ? `A recap of about ${s.covers} sessions` : "A recap") : "", s.played_on ? `played ${s.played_on}` : ""]
+      .filter(Boolean).join(" · ")),
+    h("section.card", h("h2", "Recap"), recap(s, wiki)),
+    journal,
+    changes.length > 0 && h("section.card.changes", h("h2", "What changed"), changes),
+    inventory,
+    !journal && !changes.length && !inventory && h("p.empty", "Nothing was recorded about this session beyond its recap."),
+  );
+}
+
 // -- sessions & ingest ---------------------------------------------------------
 
 // The campaign's timeline: each session, newest first, opening to its recap and what happened in it
 // (the journal), and the sessions' notes waiting for the DM's review.
 async function sessionsTab(c) {
   const base = `/api/campaigns/${c.slug}`;
-  const [data, events] = await Promise.all([api("GET", `${base}/sessions`), api("GET", `${base}/journal`)]);
+  const [data, events, wiki] = await Promise.all([api("GET", `${base}/sessions`), api("GET", `${base}/journal`), nameLinks(c.slug)]);
   const list = h("div.session-list");
   let journal = events;
 
   const happened = (n) => {
     const items = journal.filter((e) => e.session === n);
-    return items.length > 0 && h("div.session-events", h("h3", "What happened"), h("ol", items.map((e) => h("li", e.text,
-      e.entities.length > 0 && h("span.event-entities", " — ",
-        e.entities.map((x, i) => [i ? ", " : "", h("a", { href: `#/campaigns/${c.slug}/entity/${x.id}` }, x.name)]))))));
+    return items.length > 0 && h("div.session-events", h("h3", "What happened"), h("ol", items.map((e) => journalEntry(c, e, wiki))));
   };
   const renderSessions = (sessions) => list.replaceChildren(
     sessions.length === 0 && !journal.length ? h("p.empty", "No sessions yet.") : "",
@@ -486,7 +546,8 @@ async function sessionsTab(c) {
         h("strong", s.title || "(untitled)"),
         s.kind === "recap" && h("span.muted", s.covers ? `a recap of about ${s.covers} sessions` : "a recap"),
         s.played_on && h("span.muted", s.played_on)),
-      h("div.prose", s.summary ? s.summary.split(/\n\s*\n/).map((p) => h("p", p)) : h("p.muted", "No recap.")),
+      recap(s, wiki),
+      h("p.small", h("a", { href: `#/campaigns/${c.slug}/session/${s.number}` }, "The session's page, with what it changed →")),
       happened(s.number),
       uploads(s),
     )),
@@ -1204,8 +1265,9 @@ function worldCard(c, e, name, browsing) {
 
 export async function entityView(slug, id) {
   const base = `/api/campaigns/${slug}`;
-  const [campaigns, e, list, name] = await Promise.all([
+  const [campaigns, e, list, name, wiki] = await Promise.all([
     api("GET", "/api/campaigns"), api("GET", `${base}/entities/${id}`), api("GET", `${base}/entities`), sessionNames(slug),
+    nameLinks(slug),
   ]);
   const c = campaigns.find((x) => x.slug === slug);
   e.sessionName = name;
@@ -1236,7 +1298,8 @@ export async function entityView(slug, id) {
   const renderAt = () => {
     const t = Number(slider.value);
     sliderLabel.textContent = t === now ? `now (after ${name(now)})` : `after ${name(t)}`;
-    body.replaceChildren(...factSections(c, e, t, t === now, editing).filter(Boolean), editing ? merge : "");
+    body.replaceChildren(...factSections(c, e, t, t === now, editing).filter(Boolean), mentions(c, e), editing ? merge : "");
+    wiki.link(body, { self: e.id });
   };
   slider.addEventListener("input", renderAt);
 
@@ -1249,7 +1312,9 @@ export async function entityView(slug, id) {
       ev.target.textContent = "Writing a summary…";
       try {
         const r = await api("POST", `${base}/entities/${id}/summary`);
-        ev.target.replaceWith(h("div.card.summary", h("p", r.summary)));
+        const card = h("div.card.summary", h("p", r.summary));
+        wiki.link(card, { self: e.id });
+        ev.target.replaceWith(card);
       } catch (err) {
         toast(err.message, true);
         ev.target.disabled = false;
@@ -1259,6 +1324,7 @@ export async function entityView(slug, id) {
   }, "Summarize");
 
   const secret = new Set(e.secret_aliases || []);
+  if (e.summary) wiki.link(summary, { self: e.id });
   renderAt();
   return h("section.page",
     h("div.page-head", h("a", { href: `#/campaigns/${slug}/state` }, `← ${c.name}`)),
@@ -1271,6 +1337,20 @@ export async function entityView(slug, id) {
     now > 0 && h("label.as-of", h("span.as-of-title", "Show it as it was "), sliderLabel, slider),
     body,
   );
+}
+
+// Where else its name comes up: what's said about other things, and session recaps (World.mentions).
+function mentions(c, e) {
+  const m = e.mentioned_in;
+  if (!m || (!m.entities.length && !m.sessions.length)) return "";
+  const comma = (items) => items.map((x, i) => [i ? ", " : "", x]);
+  return h("section.card.mentions",
+    h("h2", "Mentioned in"),
+    m.entities.length > 0 && h("p", comma(m.entities.map((x) =>
+      h("a", { href: `#/campaigns/${c.slug}/entity/${x.id}`, title: kindName(x.kind) }, x.name))),
+      m.more > 0 ? h("span.muted", ` and ${m.more} more`) : ""),
+    m.sessions.length > 0 && h("p", h("span.muted", "Recaps: "), comma(m.sessions.map((x) =>
+      h("a", { href: `#/campaigns/${c.slug}/session/${x.number}` }, e.sessionName.heading(x.number))))));
 }
 
 function factSections(c, e, t, isNow, editing) {
@@ -1310,7 +1390,7 @@ function factSections(c, e, t, isNow, editing) {
   const history = sessions.length > 0 && h("section.card.history",
     h("h2", "What's happened"),
     sessions.map((n) => h("div.history-session",
-      h("h3", name.heading(n)),
+      h("h3", n > 0 ? h("a", { href: `#/campaigns/${c.slug}/session/${n}` }, name.heading(n)) : name.heading(n)),
       h("ul.notes",
         events.filter((ev) => ev.session === n).map((ev) => h("li.note", h("span", inline(ev.text)))),
         played.filter((f) => f.valid_from === n).map((f) => note(f, null, openAt(f) ? "" : ".ended"))))));
