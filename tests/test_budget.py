@@ -81,3 +81,20 @@ def test_the_banner_endpoint(tmp_path):
     with pytest.raises(Exception):
         ask(api((402, BILLING)))
     assert client.get("/api/claude").json()["paused"]["message"] == budget.MESSAGE
+
+
+def test_one_client_one_sign_in(monkeypatch, tmp_path):
+    """Federation trades the pod's token once per process: every caller, whatever its options, shares the sign-in."""
+    token = tmp_path / "token"
+    token.write_text("header.payload.signature")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("ANTHROPIC_PROFILE", raising=False)
+    monkeypatch.setenv("ANTHROPIC_FEDERATION_RULE_ID", "fdrl_test")
+    monkeypatch.setenv("ANTHROPIC_ORGANIZATION_ID", "00000000-0000-0000-0000-000000000000")
+    monkeypatch.setenv("ANTHROPIC_IDENTITY_TOKEN_FILE", str(token))
+
+    first, again, patient = budget.client(), budget.client(), budget.client(max_retries=10)
+    assert first is again
+    assert patient.max_retries == 10
+    assert patient._token_cache is first._token_cache is not None

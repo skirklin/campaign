@@ -10,7 +10,8 @@ This runs the web UI at `https://campaign.kirkl.in` on the homelab cluster.
   envelope: the namespace, its quota and default limits, the `deployer`
   ServiceAccount CI uses, and the Caddy route
   (`infra/k8s/tenants/campaign.yaml`, `infra/k8s/caddy.yaml`). This repo
-  owns what runs inside it: the Deployment, Service and PVC.
+  owns what runs inside it: the Deployment, Service, PVC and the app's
+  ServiceAccount.
 - **Sign-in** is Google, and invite-only. People join a campaign through an
   invite link, as a DM or a player, and the app's users and memberships
   live in its database, not in config.
@@ -49,9 +50,16 @@ GitHub Actions: push to main ─▶ test ─▶ ghcr.io/skirklin/campaign:sha-�
 - **It refuses to run unprotected.** The server won't listen on anything but
   localhost unless sign-in is configured or `--no-auth` is passed.
 - **The container is locked down.** It runs as a non-root user with a
-  read-only root filesystem and no service-account token. The `deployer`
-  account that CI uses can manage Deployments, Services and PVCs and read
-  pods and logs, in this namespace only. It can't read Secrets.
+  read-only root filesystem and no token for the cluster's API. Its only
+  token is good for the Claude API alone (see below). The `deployer`
+  account that CI uses can manage Deployments, Services, PVCs and
+  ServiceAccounts and read pods and logs, in this namespace only. It can't
+  read Secrets.
+- **No Claude API key exists.** The app signs in with workload identity
+  federation: Kubernetes gives the pod a token for its `campaign`
+  ServiceAccount, meant for `https://api.anthropic.com` and good for an
+  hour, and the SDK trades it for an Anthropic token that lasts minutes.
+  Nothing long-lived can leak, and there's nothing to rotate.
 
 ## One-time setup
 
@@ -75,12 +83,11 @@ Settings live in two places:
   plain `env` values: `CAMPAIGN_AUTH`, `CAMPAIGN_PUBLIC_URL` and
   `GOOGLE_CLIENT_ID`. Replace the `REPLACE_ME` client ID before the first
   deploy.
-- **In the `campaign-secrets` Secret**, created by hand, for the three
+- **In the `campaign-secrets` Secret**, created by hand, for the
   credentials:
 
   | Key | Value |
   |---|---|
-  | `ANTHROPIC_API_KEY` | a key just for this app, so its spending is separate and it can be revoked on its own |
   | `GOOGLE_CLIENT_SECRET` | from step 1 |
   | `CAMPAIGN_SESSION_SECRET` | `openssl rand -hex 32`; changing it signs everyone out |
 
@@ -113,6 +120,55 @@ Then restart:
 kubectl -n campaign rollout restart deployment/campaign
 ```
 
+### 2b. The Claude API: workload identity federation
+
+The app has no API key. Anthropic trusts the cluster's signature on the
+pod's ServiceAccount token instead. Setting that up, once:
+
+1. **Give the cluster an issuer of its own.** By default k3s signs tokens
+   as `https://kubernetes.default.svc.cluster.local`, a name every cluster
+   shares and the Console won't take. In `/etc/rancher/k3s/config.yaml`
+   on the VPS:
+
+   ```yaml
+   kube-apiserver-arg:
+     - service-account-issuer=https://k8s.kirkl.in
+     - service-account-issuer=https://kubernetes.default.svc.cluster.local
+   ```
+
+   New tokens are signed as the first; the second keeps tokens already
+   handed out valid until the kubelet renews them. Restart k3s
+   (`sudo systemctl restart k3s`) and check
+   `kubectl get --raw /.well-known/openid-configuration | jq -r .issuer`.
+2. **Register it in the Claude Console**: Settings → Workload identity
+   federation → Connect workload → Kubernetes.
+   - **Issuer URL** `https://k8s.kirkl.in`, exactly the tokens' `iss`.
+   - **JWKS source: inline**, pasting `kubectl get --raw /openid/v1/jwks | jq .keys`.
+     Anthropic never calls the cluster, whose API isn't open to it.
+   - **Service account** `campaign-app`, role `developer`, a member of the
+     app's workspace, so its spending is separate.
+   - **Rule:** subject `system:serviceaccount:campaign:campaign` (exact),
+     audience `https://api.anthropic.com`, scope `workspace:inference`, the
+     app's workspace only, token lifetime 600 s.
+3. **Put the rule's IDs in `deployment.yaml`**: `ANTHROPIC_FEDERATION_RULE_ID`,
+   `ANTHROPIC_ORGANIZATION_ID` and `ANTHROPIC_WORKSPACE_ID`. They're not
+   secrets. `ANTHROPIC_API_KEY` must not be set anywhere the pod can see:
+   the SDK prefers a key and would never use federation.
+
+The Console's **Authentication history** tab shows every exchange, and why
+one was refused.
+
+**If the cluster's signing key changes** (`/var/lib/rancher/k3s/server/tls/service.key`;
+k3s doesn't rotate it on its own), every exchange fails until the issuer
+has the new keys: paste `kubectl get --raw /openid/v1/jwks | jq .keys`
+into it again.
+
+**Each token is taken once.** Kubernetes puts a unique `jti` in each
+token, and Anthropic refuses one it has already exchanged. That's why the
+whole process shares one API client (`budget.client()`): it exchanges the
+token once and renews the Anthropic token as it runs out, by which time the
+kubelet has written a fresh one.
+
 ### 3. Make yourself the first admin
 
 After the first deploy (steps 4-6, then [Releasing](#releasing)), add yourself from inside it:
@@ -139,7 +195,8 @@ to the Deployment.
 
 The homelab repo provides the namespace and its quota (one PVC of up to
 2 GiB; ephemeral storage counted, with defaults from a LimitRange), the
-`deployer` ServiceAccount and its token, and the Caddy route for
+`deployer` ServiceAccount and its token (allowed to manage ServiceAccounts
+too, for the app's own), and the Caddy route for
 `campaign.kirkl.in` with a 200 MB upload cap. See `campaign` in its
 `infra/EXTERNAL.md`. DNS needs nothing: the `*.kirkl.in` wildcard covers
 it, and Caddy gets the certificate itself.

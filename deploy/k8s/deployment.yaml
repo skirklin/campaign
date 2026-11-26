@@ -21,6 +21,9 @@ spec:
     metadata:
       labels: {app: campaign}
     spec:
+      serviceAccountName: campaign
+      # No token for the cluster's API; the only token the pod gets is the
+      # anthropic-token volume's, which is good only for the Claude API.
       automountServiceAccountToken: false
       # preStop's pause lets the Service stop routing here before the server
       # gets SIGTERM; then uvicorn finishes requests in flight (20 s).
@@ -45,9 +48,14 @@ spec:
             - {name: CAMPAIGN_DIGEST_MODEL, value: claude-sonnet-5-5}
             # From the Google Cloud OAuth client (docs/deploy.md, step 1).
             - {name: GOOGLE_CLIENT_ID, value: "779965064363-4ce52upmf3rktf48fn8lqk96qlfnd1ff.apps.googleusercontent.com"}
+            # The Claude API: workload identity federation, no API key (docs/deploy.md, step 2).
+            # The SDK trades the projected token below for a short-lived Anthropic token
+            # under this federation rule. None of these IDs is a secret.
+            - {name: ANTHROPIC_FEDERATION_RULE_ID, value: fdrl_01N2d82qXKPpWGAy8s8HNpC3}
+            - {name: ANTHROPIC_ORGANIZATION_ID, value: a839b65b-2dfd-4db0-8076-63a76a6e7b8d}
+            - {name: ANTHROPIC_WORKSPACE_ID, value: wrkspc_01YQ6EUY2tXaWJvWNa2PrNof}
+            - {name: ANTHROPIC_IDENTITY_TOKEN_FILE, value: /var/run/secrets/anthropic.com/token}
             # Credentials: the campaign-secrets Secret, created by hand (docs/deploy.md, step 2).
-            - name: ANTHROPIC_API_KEY
-              valueFrom: {secretKeyRef: {name: campaign-secrets, key: ANTHROPIC_API_KEY}}
             - name: GOOGLE_CLIENT_SECRET
               valueFrom: {secretKeyRef: {name: campaign-secrets, key: GOOGLE_CLIENT_SECRET}}
             - name: CAMPAIGN_SESSION_SECRET
@@ -59,6 +67,7 @@ spec:
           volumeMounts:
             - {name: data, mountPath: /data}
             - {name: tmp, mountPath: /tmp}
+            - {name: anthropic-token, mountPath: /var/run/secrets/anthropic.com, readOnly: true}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -82,3 +91,9 @@ spec:
           persistentVolumeClaim: {claimName: campaign-data}
         - name: tmp
           emptyDir: {}
+        # The ServiceAccount's token for the Claude API alone (its audience), good for
+        # an hour; the kubelet renews it before then and the SDK rereads the file.
+        - name: anthropic-token
+          projected:
+            sources:
+              - serviceAccountToken: {audience: "https://api.anthropic.com", expirationSeconds: 3600, path: token}

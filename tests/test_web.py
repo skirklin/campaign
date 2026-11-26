@@ -129,7 +129,7 @@ def test_ingest_job_runs_in_background(client, monkeypatch):
         ([tool_use("t3", "finish_session", title="Blood on the Vine", summary="They met Ismark.")], "tool_use"),
         ([text("All recorded.")], "end_turn"),
     ])
-    monkeypatch.setattr(agent_mod.budget.anthropic, "Anthropic", lambda **_: fake)
+    monkeypatch.setattr(agent_mod.budget, "client", lambda **_: fake)
     client.post("/api/campaigns", json={"name": "Strahd", "role": "dm"})
     assert client.post("/api/campaigns/strahd/ingest", data={"text": ""}).status_code == 422
 
@@ -193,7 +193,7 @@ def test_more_about_a_session_adds_to_it_and_comes_back_out_alone(client, monkey
         ]),
     ]
     used = []
-    monkeypatch.setattr(agent_mod.budget.anthropic, "Anthropic", lambda **_: used.append(clients.pop(0)) or used[-1])
+    monkeypatch.setattr(agent_mod.budget, "client", lambda **_: used.append(clients.pop(0)) or used[-1])
     client.post("/api/campaigns", json={"name": "Strahd", "role": "dm"})
     first = wait_for(client, client.post("/api/campaigns/strahd/ingest", files={"file": ("night.txt", b"DM: ...")},
                                          data={"played_on": "2026-10-25"}).json()["job"])
@@ -240,7 +240,7 @@ def test_a_dm_can_leave_out_what_the_notes_got_wrong_or_all_of_it(client, monkey
             ([text("All recorded.")], "end_turn"),
         ])
     clients = [script(), script()]
-    monkeypatch.setattr(agent_mod.budget.anthropic, "Anthropic", lambda **_: clients.pop(0))
+    monkeypatch.setattr(agent_mod.budget, "client", lambda **_: clients.pop(0))
     client.post("/api/campaigns", json={"name": "Strahd", "role": "dm"})
     first = wait_for(client, client.post("/api/campaigns/strahd/ingest", data={"text": "notes"}).json()["job"])
     # Only Ismark: Ireena never died.
@@ -262,7 +262,7 @@ def test_digest_endpoints_and_original_kept(client, monkeypatch):
 
     monkeypatch.setattr(digest, "MIN_LEAF_CHARS", 1)
     fake = FakeDigest()
-    monkeypatch.setattr(digest.anthropic, "Anthropic", lambda **kw: fake)
+    monkeypatch.setattr(digest.budget, "client", lambda **kw: fake)
     client.post("/api/campaigns", json={"name": "Strahd", "role": "dm"})
     book = BOOK.format(intro="", church="Donavich prays.").encode()
     r = client.post("/api/campaigns/strahd/sources", files={"file": ("book.md", book)},

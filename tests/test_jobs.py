@@ -64,7 +64,7 @@ def interrupt(loop, at, action):
 def scripted(monkeypatch, *scripts):
     """Each new Agent gets the next script."""
     clients = [FakeClient(sc) for sc in scripts]
-    monkeypatch.setattr(agent_mod.budget.anthropic, "Anthropic", lambda **_: clients.pop(0))
+    monkeypatch.setattr(agent_mod.budget, "client", lambda **_: clients.pop(0))
 
 
 def facts(s, camp):
@@ -102,7 +102,7 @@ def test_failures_back_off_then_wait_for_a_retry(env, monkeypatch):
     loop = JobLoop(db)
     clock = [time.time()]
     monkeypatch.setattr(jobs.time, "time", lambda: clock[0])
-    monkeypatch.setattr(agent_mod.budget.anthropic, "Anthropic", lambda **_: (_ for _ in ()).throw(RuntimeError("API down")))
+    monkeypatch.setattr(agent_mod.budget, "client", lambda **_: (_ for _ in ()).throw(RuntimeError("API down")))
     for attempt in range(1, jobs.MAX_ATTEMPTS + 1):
         assert loop.pass_once()
         assert loop.pass_once() is False  # backing off: nothing due yet
@@ -188,7 +188,7 @@ def scan_client(monkeypatch, *script, events=("Looking at the sheet. ", "Wizard 
         return Stream(*script[min(len(calls), len(script)) - 1])
 
     client = NS(beta=NS(messages=NS(stream=stream)))
-    monkeypatch.setattr(agent_mod.budget.anthropic, "Anthropic", lambda **_: client)
+    monkeypatch.setattr(agent_mod.budget, "client", lambda **_: client)
     return calls
 
 
@@ -290,7 +290,7 @@ def test_a_request_the_api_refuses_fails_at_once(scan_job, monkeypatch):
     def stream(**kw):
         raise agent_mod.budget.anthropic.BadRequestError("The compiled grammar is too large", response=response, body=None)
 
-    monkeypatch.setattr(agent_mod.budget.anthropic, "Anthropic", lambda **_: NS(beta=NS(messages=NS(stream=stream))))
+    monkeypatch.setattr(agent_mod.budget, "client", lambda **_: NS(beta=NS(messages=NS(stream=stream))))
     assert JobLoop(db).pass_once()
     job = s.job(job_id)
     assert job["state"] == "failed" and job["attempts"] == 1 and job["retry_at"] is None
@@ -307,7 +307,7 @@ def test_out_of_api_budget_a_job_waits_and_says_so(kind, request, monkeypatch):
     def refuse(**kw):
         raise agent_mod.budget.anthropic.BadRequestError("usage limits", response=response, body=body)
 
-    monkeypatch.setattr(agent_mod.budget.anthropic, "Anthropic",
+    monkeypatch.setattr(agent_mod.budget, "client",
                         lambda **_: NS(beta=NS(messages=NS(stream=refuse, create=refuse))))
     assert JobLoop(db).pass_once()
     job = s.job(job_id)

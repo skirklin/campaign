@@ -22,8 +22,10 @@ uv sync                      # add `--extra audio` for local speech-to-text
 export ANTHROPIC_API_KEY=... # or `ant auth login`
 ```
 
-Everyone's use goes on that one key, so give it a monthly spending limit in
-the Anthropic Console. When the limit is reached, the app says so in plain
+Deployed, the app has no key: it signs in as its Kubernetes ServiceAccount
+(workload identity federation, `docs/deploy.md`). Either way everyone's use
+goes on one workspace, so give it a monthly spending limit in the Anthropic
+Console. When the limit is reached, the app says so in plain
 words instead of showing an API error: a banner over every page ("Claude is
 paused", since when, and that raising the limit or waiting for it to reset
 brings it back), the same message in the chat and on jobs. Nothing fails
