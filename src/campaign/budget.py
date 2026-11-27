@@ -12,6 +12,13 @@ it. While it's marked:
 
 The mark lives in this process: the web server runs the chat, jobs and
 digests in one, and a restart just finds out again on the first call.
+
+The process shares one client, so it shares one sign-in. Deployed, the app
+signs in with workload identity federation (docs/deploy.md): the SDK trades
+the pod's Kubernetes token for a short-lived Anthropic one, and Anthropic
+takes each Kubernetes token only once. A client of its own per call would
+trade the same token again and be refused; the shared one trades it once
+and reuses the access token until it's due for renewal.
 """
 
 from __future__ import annotations
@@ -34,6 +41,7 @@ _lock = threading.Lock()
 _since: float | None = None  # when the API first refused for billing
 _last = 0.0  # when it last did
 _said = ""
+_shared: anthropic.Anthropic | None = None
 
 
 def _billing(status: int, body: Any) -> str | None:
@@ -71,10 +79,24 @@ def _watch(response: Any) -> None:
             _said = said
 
 
-def client(transport: Any = None, **kwargs: Any) -> anthropic.Anthropic:
-    """An API client whose every response is watched for the spending limit (`transport` for tests)."""
-    http = anthropic.DefaultHttpxClient(event_hooks={"response": [_watch]}, **({"transport": transport} if transport else {}))
-    return anthropic.Anthropic(http_client=http, **kwargs)
+def _http(transport: Any = None) -> Any:
+    return anthropic.DefaultHttpxClient(event_hooks={"response": [_watch]}, **({"transport": transport} if transport else {}))
+
+
+def client(transport: Any = None, **options: Any) -> anthropic.Anthropic:
+    """The process's API client, whose every response is watched for the spending limit.
+
+    `options` (`max_retries=`, ...) give a copy that keeps the shared sign-in and
+    connections. `transport` (tests) gives a client of its own instead.
+    """
+    global _shared
+    if transport is not None:
+        return anthropic.Anthropic(http_client=_http(transport), **options)
+    with _lock:
+        if _shared is None:
+            _shared = anthropic.Anthropic(http_client=_http())
+        shared = _shared
+    return shared.with_options(**options) if options else shared
 
 
 def paused() -> bool:
@@ -82,10 +104,10 @@ def paused() -> bool:
 
 
 def reset() -> None:
-    """Forget the mark (tests)."""
-    global _since, _last, _said
+    """Forget the mark and the shared client (tests)."""
+    global _since, _last, _said, _shared
     with _lock:
-        _since, _last, _said = None, 0.0, ""
+        _since, _last, _said, _shared = None, 0.0, "", None
 
 
 def status() -> dict[str, Any] | None:

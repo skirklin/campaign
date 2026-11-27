@@ -17,6 +17,16 @@ def no_titles(monkeypatch):
 
     monkeypatch.setattr(campaign.agent, "conversation_title", lambda question, answer: None)
 
+
+@pytest.fixture(autouse=True)
+def fresh_api_client():
+    """The app shares one API client per process; each test builds its own (fakes included)."""
+    from campaign import budget
+
+    budget.reset()
+    yield
+    budget.reset()
+
 BASE = "https://campaign.example"
 
 

@@ -170,7 +170,7 @@ def test_ask_assistant_runs_the_apps_chat_and_keeps_it(site, api, monkeypatch):
         ]),
         FakeClient([([BetaTextBlock(type="text", text="She bakes pies.")], "end_turn")]),
     ]
-    monkeypatch.setattr(agent_mod.budget.anthropic, "Anthropic", lambda **_: clients.pop(0))
+    monkeypatch.setattr(agent_mod.budget, "client", lambda **_: clients.pop(0))
     token = connect(site, api, dm, register(api))["access_token"]
 
     got = json.loads(call(api, token, "ask_assistant", campaign="strahd", question="Who is Morgantha?")[0])
@@ -201,7 +201,7 @@ def test_digest_tools_redigest_a_book_with_a_new_model(site, api, monkeypatch):
 
     monkeypatch.setattr(digest, "MIN_LEAF_CHARS", 1)
     fake = FakeDigest()
-    monkeypatch.setattr(digest.anthropic, "Anthropic", lambda **kw: fake)
+    monkeypatch.setattr(digest.budget, "client", lambda **kw: fake)
     dm, _ = setup_campaign(site)
     book = BOOK.format(intro="", church="Donavich prays.").encode()
     src = dm.post("/api/campaigns/strahd/sources", files={"file": ("book.md", book)},
